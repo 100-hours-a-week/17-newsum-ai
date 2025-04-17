@@ -1,0 +1,5 @@
+fastapi==0.115.12
+langchain-openai==0.3.13
+langgraph==0.3.30
+pip==25.0.1
+dotenv==0.9.9
