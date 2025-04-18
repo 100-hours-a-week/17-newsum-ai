@@ -1,0 +1,7 @@
+{
+  "status": "ready",
+  "model_id": "stabilityai/stable-diffusion-xl-base-1.0",
+  "device": "cuda:0",
+  "current_lora_path": null,
+  "active_adapters": []
+}
