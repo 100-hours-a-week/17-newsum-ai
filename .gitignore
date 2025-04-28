@@ -16,6 +16,8 @@ requirements.txt~
 
 # IDE 설정
 .vscode/
+.idea/
+*.iml
 
 # 환경 변수 파일
 .env
