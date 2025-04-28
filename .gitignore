@@ -1,1 +1,29 @@
+**# macOS 시스템 파일
 **/.DS_Store
+
+# Python 가상환경 폴더
+.venv/
+
+# Python bytecode
+__pycache__/
+**/__pycache__/
+
+# 기타 pyc/pyo 캐시 파일
+*.py[cod]
+*$py.class
+
+# pip freeze output (optional)
+requirements.txt~
+
+# VSCode 관련 설정 (원한다면)
+.vscode/
+
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env  # .env 파일을 Git 추적에서 제외
+data/ # 생성된 데이터도 제외하는 것이 좋음
+*.log
+*.testcase
