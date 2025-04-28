@@ -1,12 +1,13 @@
-# app/agents/collector_agent.py (import 경로 수정)
-import logging
-from typing import List, Dict
 
-from app.workflows.state import AppState
-# 변경된 경로에서 검색 도구 import
-from app.tools.llm.google_search_tool import run_google_search
-from app.services.llm_server_client import call_llm_api
+# app/tools/llm/google_search_tool.py
+# (이전 답변에서 제공된 코드와 동일)
+import logging
+import asyncio
+from typing import List, Dict, Optional
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from app.config.settings import settings
+from app.services.llm_server_client import call_llm_api
 
 logger = logging.getLogger(__name__)
 
@@ -14,29 +15,15 @@ logger = logging.getLogger(__name__)
 # 비동기 환경(FastAPI, LangGraph)에서 사용하려면 별도의 처리가 필요합니다.
 # 여기서는 asyncio.to_thread를 사용하여 동기 함수를 비동기적으로 실행합니다.
 
+
 async def run_google_search(query: str, num_results: int = 5) -> List[Dict[str, str]]:
-    """
-    Google Custom Search API를 사용하여 웹 검색을 수행하는 도구.
-
-    Args:
-        query (str): 검색할 쿼리 문자열.
-        num_results (int): 반환할 검색 결과의 최대 개수 (최대 10).
-
-    Returns:
-        List[Dict[str, str]]: 검색 결과 목록. 각 결과는 'title', 'link', 'snippet' 키를 가짐.
-                               오류 발생 시 빈 리스트 반환.
-    """
     logger.info(f"Google 검색 도구 실행: query='{query}', num_results={num_results}")
     if not settings.GOOGLE_API_KEY or not settings.GOOGLE_CSE_ID:
         logger.error("Google API 키 또는 CSE ID가 설정되지 않았습니다.")
         return []
-
     try:
-        # 동기 함수인 google search api 호출을 비동기 이벤트 루프에서 실행
         results = await asyncio.to_thread(
-            _execute_google_search_sync,
-            query,
-            num_results
+            _execute_google_search_sync, query, num_results
         )
         return results
     except HttpError as e:
@@ -47,17 +34,9 @@ async def run_google_search(query: str, num_results: int = 5) -> List[Dict[str, 
         return []
 
 def _execute_google_search_sync(query: str, num_results: int) -> List[Dict[str, str]]:
-    """Google 검색 API를 동기적으로 호출하는 내부 함수"""
+    # ... (API 호출 및 결과 파싱 로직 - 이전 답변 참고) ...
     service = build("customsearch", "v1", developerKey=settings.GOOGLE_API_KEY)
-    # API 호출: cse().list() 사용
-    response = service.cse().list(
-        q=query,
-        cx=settings.GOOGLE_CSE_ID,
-        num=num_results # 한 번에 가져올 결과 수 (최대 10)
-        # 필요한 다른 파라미터 추가 가능 (예: siteSearch 특정 사이트 검색)
-    ).execute()
-
-    # 결과 파싱
+    response = service.cse().list(q=query, cx=settings.GOOGLE_CSE_ID, num=num_results).execute()
     search_results: List[Dict[str, str]] = []
     if 'items' in response:
         for item in response['items']:
@@ -94,3 +73,4 @@ if __name__ == '__main__':
     # .env 파일 로드를 위해 settings를 먼저 로드하도록 할 수 있음 (config.__init__ 등에서)
     # 여기서는 간단히 asyncio.run 사용
     asyncio.run(main())
+

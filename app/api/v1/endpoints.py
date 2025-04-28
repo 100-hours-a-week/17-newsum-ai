@@ -1,140 +1,133 @@
+# app/api/v1/endpoints.py
 import logging
 import json
 import asyncio
-from fastapi import APIRouter, HTTPException, Body, Request
+from fastapi import APIRouter, HTTPException, Body, Request, BackgroundTasks, Path # Path 추가
 from fastapi.responses import StreamingResponse
-from sse_starlette.sse import EventSourceResponse # SSE 사용 시 더 편리한 라이브러리 (선택 사항)
+# from sse_starlette.sse import EventSourceResponse # SSE 라이브러리 사용 고려
 
-# 워크플로우 상태 및 컴파일된 그래프 import
-from app.workflows.state import AppState
-from app.workflows.main_workflow import compiled_workflow # 컴파일된 그래프 객체 (가정)
+# 워크플로우 관련 (background_tasks에서 호출되므로 직접 import 필요 없을 수 있음)
+# from app.workflows.state import ComicState
+# from app.workflows.main_workflow import compiled_workflow
 
-# API 스키마 import
-from .schemas import ComicRequest, ComicResponse, StreamChunk
+# API 스키마 및 백그라운드 작업 함수 import
+from .schemas import AsyncComicRequest, AsyncComicResponse, StreamStatusUpdate
+from .background_tasks import trigger_workflow_task
+# DB 클라이언트 (스트리밍 시 상태 조회용)
+from app.services.database_client import DatabaseClient
 
 logger = logging.getLogger(__name__)
+db_client = DatabaseClient() # DB 클라이언트 인스턴스화 (위치 고려 필요)
 
-# /api/v1 경로 아래에 엔드포인트들을 정의할 라우터 생성
 router = APIRouter(
     prefix="/v1",
-    tags=["Comics V1"] # Swagger UI 태그
+    tags=["Comics V1"]
 )
 
 @router.post(
     "/comics",
-    response_model=ComicResponse, # 응답 형식 지정
-    summary="Generate Comic Synchronously",
-    description="Receives a query, runs the full LangGraph workflow, and returns the final result.",
+    response_model=AsyncComicResponse, # 수정된 응답 모델
+    summary="Request Comic Generation (Async)",
+    description="Accepts a query, starts the comic generation workflow in the background, and returns a comic ID.",
+    status_code=202 # 202 Accepted 상태 코드 사용 권장
 )
-async def generate_comic(
-    request: ComicRequest = Body(...) # 요청 본문을 Pydantic 모델로 받음
+async def request_comic_generation(
+    request: AsyncComicRequest = Body(...),
+    background_tasks: BackgroundTasks = BackgroundTasks() # BackgroundTasks 주입
 ):
     """
-    만화 생성 요청을 받아 워크플로우를 동기식으로 실행하고 최종 결과를 반환합니다.
-    (주의: 워크플로우가 길면 타임아웃 발생 가능성이 있으므로 실제 서비스에서는 비동기 처리 또는 스트리밍 권장)
+    만화 생성 워크플로우를 백그라운드에서 시작하고 즉시 comic_id를 반환합니다.
     """
-    logger.info(f"[/v1/comics] 요청 수신: query='{request.query}'")
-
-    # 초기 상태 설정
-    initial_state = AppState(initial_query=request.query)
-
+    logger.info(f"[/v1/comics] 비동기 생성 요청 수신: query='{request.query}'")
     try:
-        # LangGraph 워크플로우 비동기 실행 (전체 완료까지 대기)
-        # config={"recursion_limit": 100} 등 실행 옵션 추가 가능
-        final_state = await compiled_workflow.ainvoke(initial_state)
+        # 백그라운드 작업 트리거 함수 호출
+        comic_id = await trigger_workflow_task(request.query, background_tasks)
+        logger.info(f"Workflow task started in background with comic_id: {comic_id}")
 
-        # 오류 발생 여부 확인 (상태 내 error_message 필드 활용)
-        if final_state.get("error_message"):
-            logger.error(f"워크플로우 실행 중 오류 발생: {final_state['error_message']}")
-            return ComicResponse(
-                success=False,
-                message=final_state["error_message"],
-                result=final_state # 오류 상태 포함 반환
-            )
-
-        logger.info(f"[/v1/comics] 워크플로우 실행 완료.")
-        return ComicResponse(
-            success=True,
-            message="Comic generation workflow completed successfully.",
-            result=final_state # 최종 상태 반환
+        return AsyncComicResponse(
+            comic_id=comic_id,
+            status="PENDING", # 초기 상태 PENDING 또는 STARTED
+            message="Comic generation task accepted and started in the background."
         )
-
     except Exception as e:
-        logger.exception(f"[/v1/comics] 엔드포인트 처리 중 예외 발생: {e}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        logger.exception(f"[/v1/comics] 요청 처리 중 예외 발생: {e}")
+        # 오류 발생 시 응답 형식 준수
+        return AsyncComicResponse(
+             comic_id=None, # ID 생성 전 실패 시 None
+             status="ERROR",
+             message=f"Failed to start workflow: {str(e)}"
+         ) # 500 대신 오류 응답 객체 반환 고려
 
 
-@router.post(
-    "/comics/stream",
-    summary="Generate Comic with Streaming Updates",
-    description="Runs the LangGraph workflow and streams updates using Server-Sent Events (SSE)."
+@router.post( # API 명세는 POST 지만, GET이 더 적합할 수 있음
+    "/comics/{comic_id}/stream",
+    summary="Subscribe to Comic Generation Status Updates",
+    description="Subscribes to Server-Sent Events (SSE) for status updates of an existing comic generation task."
 )
-async def generate_comic_stream(
-    request_body: ComicRequest = Body(...)
+async def stream_comic_status(
+    comic_id: str = Path(..., description="The ID of the comic generation task to track."),
+    # request_body: Dict = Body(None) # 명세상 body가 있지만, 여기서는 사용 안 함
 ):
     """
-    만화 생성 워크플로우를 실행하고 각 단계의 진행 상황 또는 결과를 SSE로 스트리밍합니다.
+    지정된 comic_id 작업의 상태를 SSE로 스트리밍합니다.
+    (주의: 이 예시는 DB 폴링 방식이며, 실제 환경에서는 Pub/Sub 등 사용 권장)
     """
-    logger.info(f"[/v1/comics/stream] 스트리밍 요청 수신: query='{request_body.query}'")
-    initial_state = AppState(initial_query=request_body.query)
+    logger.info(f"[/v1/comics/{comic_id}/stream] 상태 스트리밍 구독 요청")
 
-    async def event_generator():
-        try:
-            # LangGraph의 astream_events 사용 (더 상세한 이벤트 제공)
-            # version="v1" 또는 "v2" (v2가 더 많은 메타데이터 제공)
-            async for event in compiled_workflow.astream_events(initial_state, version="v2"):
-                event_type = event["event"]
-                event_name = event.get("name", "") # 어떤 노드/그래프 관련 이벤트인지
-                event_data = event.get("data", {})
+    async def status_event_generator(task_id: str):
+        last_status = None
+        error_count = 0
+        max_errors = 3 # DB 조회 실패 시 최대 재시도 횟수
 
-                logger.debug(f"SSE Event: type={event_type}, name={event_name}, data_keys={list(event_data.keys())}")
+        while True:
+            try:
+                # DB에서 현재 상태 조회
+                current_data = await db_client.get(task_id) # DB get 메서드 구현 필요
+                error_count = 0 # 성공 시 에러 카운트 초기화
 
-                chunk_data: Dict[str, Any] | None = None
-                message: str | None = None
-
-                # 관심 있는 이벤트 타입만 클라이언트에 전송
-                if event_type == "on_chain_start":
-                    message = f"Workflow started for node: {event_name}"
-                    chunk_data = event_data.get("input") # 입력 데이터 포함 가능
-                elif event_type == "on_chain_stream":
-                     # astream() 사용 시 중간 결과 (청크)를 받을 수 있음
-                     chunk_data = event_data.get("chunk")
-                elif event_type == "on_chain_end":
-                    message = f"Node finished: {event_name}"
-                    chunk_data = event_data.get("output") # 노드의 최종 출력 (상태)
-                elif event_type == "on_chat_model_stream":
-                     # LLM 스트리밍 시 토큰별 데이터 처리
-                     chunk_data = {"token": event_data.get("chunk").content}
-                     message = "LLM token stream"
-                elif event_type == "on_chain_error":
-                    message = f"Error in node {event_name}: {event_data.get('error')}"
-                    logger.error(message)
-                    # 오류 발생 시 스트림 종료 또는 오류 메시지 전송 후 계속 진행 결정 필요
-
-                # 클라이언트에 전송할 데이터 구성
-                if message or chunk_data:
-                    stream_chunk = StreamChunk(
-                        event_type=event_type,
-                        data=chunk_data,
-                        message=message
+                if not current_data:
+                    logger.warning(f"Stream: Task ID {task_id} not found in DB.")
+                    status_update = StreamStatusUpdate(
+                        comic_id=task_id, status="NOT_FOUND", message="Task ID not found."
                     )
-                    # 직렬화 가능한 형태로 변환 (Pydantic 모델 -> dict) 후 JSON 문자열로 변환
-                    yield f"data: {stream_chunk.model_dump_json()}\n\n"
-                await asyncio.sleep(0.01) # 너무 빠른 전송 방지 (선택 사항)
+                    yield f"data: {status_update.model_dump_json()}\n\n"
+                    break # 작업 없음 종료
 
-            # 워크플로우 최종 완료 시 (선택 사항)
-            # yield f"data: {json.dumps({'event_type': 'workflow_end', 'message': 'Workflow finished.'})}\n\n"
+                current_status = current_data.get("status", "UNKNOWN")
+                current_message = current_data.get("message")
 
-        except Exception as e:
-            logger.exception(f"[/v1/comics/stream] 스트리밍 중 예외 발생: {e}")
-            error_chunk = StreamChunk(
-                event_type="error",
-                message=f"Streaming failed: {str(e)}"
-            )
-            yield f"data: {error_chunk.model_dump_json()}\n\n"
+                # 상태가 변경되었을 때만 클라이언트에 전송 (선택 사항)
+                if current_status != last_status:
+                    logger.info(f"Stream: Task {task_id} status update: {current_status}")
+                    status_update = StreamStatusUpdate(
+                        comic_id=task_id,
+                        status=current_status,
+                        message=current_message
+                        # 필요한 다른 데이터 추가 (예: current_data.get('result'))
+                    )
+                    yield f"data: {status_update.model_dump_json()}\n\n"
+                    last_status = current_status
 
-    # EventSourceResponse 사용 (더 편리)
-    # return EventSourceResponse(event_generator())
+                # 종료 상태(DONE, FAILED, NOT_FOUND 등)이면 스트림 종료
+                if current_status in ["DONE", "FAILED", "NOT_FOUND", "ERROR"]:
+                    logger.info(f"Stream: Task {task_id} reached terminal state: {current_status}. Closing stream.")
+                    break
 
-    # 또는 기본 StreamingResponse 사용
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+            except Exception as e:
+                error_count += 1
+                logger.exception(f"Stream: Error polling status for task {task_id}: {e} (Attempt {error_count})")
+                if error_count >= max_errors:
+                    status_update = StreamStatusUpdate(
+                        comic_id=task_id, status="ERROR", message=f"Failed to poll status after multiple attempts: {str(e)}"
+                    )
+                    yield f"data: {status_update.model_dump_json()}\n\n"
+                    break # 폴링 실패 시 종료
+                await asyncio.sleep(2) # 오류 발생 시 잠시 대기 후 재시도
+                continue # 다음 폴링 시도
+
+            # 폴링 간격 (예: 1초)
+            await asyncio.sleep(1)
+
+    # EventSourceResponse 사용 권장
+    # return EventSourceResponse(status_event_generator(comic_id))
+    return StreamingResponse(status_event_generator(comic_id), media_type="text/event-stream")
