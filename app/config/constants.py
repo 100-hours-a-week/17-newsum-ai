@@ -1,0 +1,12 @@
+# app/config/constants.py
+
+"""
+프로젝트 전역에서 사용하는 상수 정의
+"""
+
+NEWS_SEARCH_LIMIT = 5
+SCRAPE_TIMEOUT_SECONDS = 10
+IMAGE_GENERATION_TIMEOUT_SECONDS = 60
+MAX_SUMMARY_LENGTH = 500
+MAX_SCENARIO_TOKENS = 300
+COMIC_S3_FOLDER = "comics/"
