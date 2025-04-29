@@ -23,16 +23,16 @@ print(f"현재 디렉토리 파일 목록: {os.listdir()}")
 
 # 준비: 테스트용 입력 이미지 (test_image.png 파일 읽기)
 try:
-    with open("test_image.png", "rb") as f:
+    with open("i2i_test_image.png", "rb") as f:
         img_byte_arr = io.BytesIO(f.read())
         img_byte_arr.seek(0)
 except FileNotFoundError:
-    print("❌ 'test_image.png' 파일을 현재 디렉토리에서 찾을 수 없습니다.")
+    print("❌ 'i2i_test_image.png' 파일을 현재 디렉토리에서 찾을 수 없습니다.")
     raise
 
 # 파일 및 폼 데이터 준비
 files = {
-    "image": ("test_image.png", img_byte_arr, "image/png"),
+    "image": ("i2i_test_image.png", img_byte_arr, "image/png"),
     "prompt": (None, PROMPT),
     "negative_prompt": (None, NEGATIVE_PROMPT),
     "lora_scale": (None, str(LORA_SCALE)),
