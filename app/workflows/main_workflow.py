@@ -21,7 +21,7 @@ def build_main_workflow() -> StateGraph:
     # 노드 등록
     graph.add_node("collect", collect_news)
 
-    # graph.add_node("scrape", ScraperAgent().run)
+    graph.add_node("scrape", ScraperAgent().run)
     # graph.add_node("analyze", AnalyzerAgent().run)
     # graph.add_node("humor", HumoratorAgent().run)
     # graph.add_node("scenario", ScenarioWriterAgent().run)
@@ -31,8 +31,8 @@ def build_main_workflow() -> StateGraph:
 
     # 흐름 연결
     graph.set_entry_point("collect")
-    graph.add_edge("collect", END)
-    # graph.add_edge("collect", "scrape")
+    graph.add_edge("collect", "scrape")
+    graph.add_edge("scrape", END)
     # graph.add_edge("scrape", "analyze")
     # graph.add_edge("analyze", "humor")
     # graph.add_edge("humor", "scenario")
