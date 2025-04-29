@@ -27,6 +27,7 @@ langgraph>=0.0.22
 langsmith>=0.1.147
 orjson>=3.10.16
 packaging>=23.2
+pillow>=9.5.0
 pluggy>=1.5.0
 proto-plus>=1.26.1
 protobuf>=6.30.2
