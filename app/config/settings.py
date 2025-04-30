@@ -30,6 +30,11 @@ class Settings:
     # Bing Search
     BING_SUBSCRIPTION_KEY: Optional[str] = os.getenv("BING_SUBSCRIPTION_KEY")
     BING_SEARCH_URL: Optional[str] = os.getenv("BING_SEARCH_URL", "https://api.bing.microsoft.com/v7.0/search")
+    
+    # YouTube API
+    YOUTUBE_API_KEY: Optional[str] = os.getenv("YOUTUBE_API_KEY")
+    YOUTUBE_MAX_VIDEOS: int = int(os.getenv("YOUTUBE_MAX_VIDEOS", "3"))
+    YOUTUBE_MAX_COMMENTS: int = int(os.getenv("YOUTUBE_MAX_COMMENTS", "50"))
 
     # 검색 기본값
     DEFAULT_SEARCH_ENGINE: str = os.getenv("DEFAULT_SEARCH_ENGINE", "google")
@@ -65,4 +70,5 @@ GOOGLE_API_KEY=YOUR_GOOGLE_API_KEY_HERE
 GOOGLE_CSE_ID=YOUR_GOOGLE_CSE_ID_HERE
 LLM_API_ENDPOINT=http://YOUR_LLM_API_SERVER/generate # 실제 LLM API 주소
 # LLM_API_KEY=YOUR_LLM_API_KEY_IF_NEEDED
+YOUTUBE_API_KEY=YOUR_YOUTUBE_API_KEY # YouTube API 키
 """
