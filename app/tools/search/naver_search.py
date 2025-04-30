@@ -1,4 +1,5 @@
 # app/tools/search/naver_search.py
+
 import logging
 import httpx
 import re # HTML 태그 제거용
