@@ -1,6 +1,7 @@
 # app/config/settings.py
 import os
 from dotenv import load_dotenv
+from pathlib import Path
 from typing import List, Dict, Optional
 
 # .env 파일 로드 (프로젝트 루트에 .env 파일이 있다고 가정)
@@ -48,6 +49,13 @@ class Settings:
     SEARCH_INCLUDE_DOMAINS: Optional[List[str]] = os.getenv("SEARCH_INCLUDE_DOMAINS",
                                                             None)  # 예: "example.com,anothersite.net"
     SEARCH_EXCLUDE_DOMAINS: Optional[List[str]] = os.getenv("SEARCH_EXCLUDE_DOMAINS", None)
+    
+    # 에이전트 결과 저장 설정
+    RESULTS_DIR: str = os.getenv("RESULTS_DIR", os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'results'))
+    SAVE_AGENT_RESULTS: bool = os.getenv("SAVE_AGENT_RESULTS", "True").lower() in ["true", "1", "yes"]
+    SAVE_AGENT_INPUTS: bool = os.getenv("SAVE_AGENT_INPUTS", "False").lower() in ["true", "1", "yes"]
+    SAVE_DEBUG_INFO: bool = os.getenv("SAVE_DEBUG_INFO", "True").lower() in ["true", "1", "yes"]
 
     # --- Helper to parse list from env var ---
     @staticmethod
@@ -60,6 +68,9 @@ class Settings:
         # 문자열로 로드된 도메인 리스트를 실제 리스트로 변환
         self.SEARCH_INCLUDE_DOMAINS = self._parse_list(os.getenv("SEARCH_INCLUDE_DOMAINS"))
         self.SEARCH_EXCLUDE_DOMAINS = self._parse_list(os.getenv("SEARCH_EXCLUDE_DOMAINS"))
+        
+        # 결과 디렉토리 생성
+        os.makedirs(self.RESULTS_DIR, exist_ok=True)
 
 
 # 설정 객체 생성 (싱글톤처럼 사용 가능)
@@ -72,4 +83,8 @@ GOOGLE_CSE_ID=YOUR_GOOGLE_CSE_ID_HERE
 LLM_API_ENDPOINT=http://YOUR_LLM_API_SERVER/generate # 실제 LLM API 주소
 # LLM_API_KEY=YOUR_LLM_API_KEY_IF_NEEDED
 YOUTUBE_API_KEY=YOUR_YOUTUBE_API_KEY # YouTube API 키
+SAVE_AGENT_RESULTS=True # 에이전트 결과 저장 활성화
+SAVE_AGENT_INPUTS=False # 입력 상태 저장 비활성화
+SAVE_DEBUG_INFO=True # 디버그 정보 저장 활성화
+RESULTS_DIR=/path/to/results # 결과 저장 디렉토리 커스텀 (선택 사항)
 """
