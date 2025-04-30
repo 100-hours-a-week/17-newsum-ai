@@ -17,6 +17,7 @@ class Settings:
     LLM_API_RETRY_DELAY: int = int(os.getenv("LLM_API_RETRY_DELAY", "1")) # 기본 재시도 간격 1초
 
     # Image API (이후 사용)
+    IMAGE_SERVER_URL: Optional[str] = os.getenv("IMAGE_SERVER_URL")
     # IMAGE_API_ENDPOINT: Optional[str] = os.getenv("IMAGE_API_ENDPOINT")
     # IMAGE_API_KEY: Optional[str] = os.getenv("IMAGE_API_KEY")
 
