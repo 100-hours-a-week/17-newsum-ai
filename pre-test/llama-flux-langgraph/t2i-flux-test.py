@@ -1,18 +1,20 @@
 import requests
 import io
 from PIL import Image
+import os
+from typing import Optional
 
 # FastAPI 서버의 URL (Ngrok URL 또는 로컬 서버 주소)
 # Ngrok URL 예: "https://your-ngrok-url.ngrok-free.app"
 # 로컬 서버 예: "http://127.0.0.1:8000"
-SERVER_URL = "https://publicly-capable-monkfish.ngrok-free.app/"    # static url
+IMAGE_SERVER_URL = "https://clam-talented-promptly.ngrok-free.app"
 
 # API 엔드포인트
-TEXT_TO_IMAGE_ENDPOINT = f"{SERVER_URL}/generate/text-to-image"
+TEXT_TO_IMAGE_ENDPOINT = f"{IMAGE_SERVER_URL}/generate/text-to-image"
 
 # 요청 데이터 (텍스트-이미지 생성용)
 payload = {
-    "prompt": "A futuristic cityscape with flying cars and neon lights",
+    "prompt": "A burning Earth model in the center of a modern conference room, surrounded by politicians in suits, wide angle composition, warm cinematic lighting, surreal and dramatic atmosphere, Studio Ghibli style",
     "negative_prompt": "(worst quality, low quality, normal quality:1.2), deformed, blurry, text, signature",
     "num_inference_steps": 30,
     "guidance_scale": 3.5,

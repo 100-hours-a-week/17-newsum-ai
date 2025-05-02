@@ -18,6 +18,7 @@ class ComicState(BaseModel):
     public_sentiment: Optional[Dict[str, Dict[str, float]]] = Field(default=None, description="감정 분석 결과")
     humor_texts: Optional[List[str]] = Field(default_factory=list, description="유머 포인트 목록")
     scenarios: Optional[List[Dict[str, Any]]] = Field(default_factory=list, description="4컷 만화 시나리오")
+    lora_style: Optional[str] = Field(default=None, description="Flux 프롬프트에 적용할 LoRA 스타일 문장 (예: 'in Pixar style')")
     image_urls: Optional[List[str]] = Field(default_factory=list, description="생성된 이미지 URL 목록")
     final_comic_url: Optional[str] = Field(default=None, description="최종 조합된 만화 URL")
     translated_texts: Optional[List[str]] = Field(default_factory=list, description="번역된 텍스트(대사 등)")
