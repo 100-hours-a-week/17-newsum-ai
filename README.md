@@ -16,6 +16,8 @@ LangGraph와 FastAPI를 사용하여 뉴스 기사로부터 4컷 만화를 생�
   - LLM API (OpenAI 또는 유사 서비스)
   - 검색 API (Google, Naver, Kakao, Tavily 중 하나 이상)
   - 소셜 미디어 API (Twitter/X, Reddit)
+  - 이미지 생성 API (추가됨)
+  - 네이버 Papago 번역 API (추가됨)
 
 ### 설치 방법
 
@@ -82,13 +84,43 @@ GOOGLE_API_KEY=your_google_api_key
 NAVER_CLIENT_ID=your_naver_client_id
 NAVER_CLIENT_SECRET=your_naver_client_secret
 TWITTER_API_KEY=your_twitter_api_key
+TWITTER_BEARER_TOKEN=your_twitter_bearer_token  # 추가됨: TwitterCountsTool용
 REDDIT_CLIENT_ID=your_reddit_client_id
 REDDIT_CLIENT_SECRET=your_reddit_client_secret
+IMAGE_SERVER_URL=your_image_server_url          # 추가됨: 이미지 생성 API 엔드포인트
+IMAGE_SERVER_API_TOKEN=your_image_api_token     # 추가됨: 이미지 생성 API 인증 토큰
 
 # 서비스 설정
 REDIS_URL=redis://localhost:6379/0
 DEFAULT_LLM_MODEL=gpt-4-0125-preview
 DEFAULT_LANG=ko
+DEFAULT_SOURCE_LANG=ko                          # 추가됨: 번역 소스 언어
+DEFAULT_TARGET_LANG=en                          # 추가됨: 번역 타겟 언어
+ENABLE_TRANSLATION=True                         # 추가됨: 번역 활성화 여부
+DEFAULT_TRANSLATOR_CONCURRENCY=3                # 추가됨: 번역 동시성 제한
+
+# 이미지 생성 설정 (추가됨)
+DEFAULT_IMAGE_MODEL=sdxl                        # 이미지 생성 모델
+DEFAULT_IMAGE_HEIGHT=1024                       # 이미지 높이
+DEFAULT_IMAGE_WIDTH=1024                        # 이미지 너비
+DEFAULT_IMAGE_STYLE=comic book, manhwa style   # 기본 스타일
+DEFAULT_IMAGE_STYLE_PRESET=comic               # 스타일 프리셋
+DEFAULT_IMAGE_NEGATIVE_PROMPT=ugly, deformed    # 네거티브 프롬프트
+DEFAULT_MAX_IMAGE_PROMPT_LEN=500               # 최대 프롬프트 길이
+IMAGE_STORAGE_PATH=./results/images            # 이미지 저장 경로
+IMAGE_API_RETRIES=3                            # 이미지 API 재시도 횟수
+
+# ControlNet 설정 (추가됨)
+ENABLE_CONTROLNET=False                        # ControlNet 활성화 여부
+DEFAULT_CONTROLNET_TYPE=previous_panel         # ControlNet 타입
+DEFAULT_CONTROLNET_WEIGHT=0.5                  # ControlNet 가중치
+
+# 트렌드 분석 설정 (추가됨)
+PYTRENDS_TIMEFRAME=now 7-d                     # Google Trends 시간 범위
+PYTRENDS_GEO=KR                                # 지역 제한
+PYTRENDS_HL=ko                                 # 언어 설정
+PYTRENDS_BATCH_DELAY_SEC=3                     # 배치 간 딜레이
+TWITTER_COUNTS_DELAY_SEC=1                     # Twitter API 호출 간 딜레이
 
 # 결과 저장 설정
 SAVE_AGENT_RESULTS=True
@@ -100,6 +132,44 @@ RESULTS_DIR=./results
 LANGSMITH_API_KEY=your_langsmith_api_key  # (선택사항) 워크플로우 모니터링용
 SEARCH_ENGINE=google  # 기본 검색 엔진 (google, naver, kakao, tavily)
 ```
+
+## 새로 추가된 기능
+
+### 1. 트렌드 분석 도구
+- **GoogleTrendsTool**: 키워드 관련 Google Trends 데이터를 가져와서 관심도 점수 분석
+  - `pytrends` 라이브러리 활용
+  - 배치 처리 및 내부 재시도 로직 구현
+  - 설정 예시: `PYTRENDS_TIMEFRAME`, `PYTRENDS_GEO`, `PYTRENDS_HL`, `PYTRENDS_BATCH_DELAY_SEC`
+
+- **TwitterCountsTool**: Twitter의 최근 트윗 카운트 API를 활용한 트렌드 분석
+  - 키워드별 최근 7일간 트윗 수 계산
+  - 비동기 처리 및 내부 재시도 로직 구현
+  - 설정 예시: `TWITTER_BEARER_TOKEN`, `TWITTER_COUNTS_DELAY_SEC`
+
+### 2. 이미지 생성 클라이언트
+- **ImageGenerationClient**: 외부 이미지 생성 API와 상호작용
+  - 다양한 이미지 생성 파라미터 지원 (모델, 크기, 스타일 등)
+  - 에러 처리 및 응답 타입 유연한 처리 (JSON 또는 바이너리 이미지)
+  - 로컬 이미지 저장 기능 
+  - 설정 예시: `IMAGE_SERVER_URL`, `IMAGE_SERVER_API_TOKEN`, `IMAGE_STORAGE_PATH`
+
+### 3. 번역 서비스
+- **PapagoTranslationService**: 네이버 Papago NMT API를 활용한 번역 
+  - 스크립트 대사 등의 다국어 지원 (기본: 한국어→영어)
+  - 비동기 API 호출 및 내부 재시도 로직 구현
+  - 설정 예시: `NAVER_CLIENT_ID`, `NAVER_CLIENT_SECRET`, `DEFAULT_SOURCE_LANG`, `DEFAULT_TARGET_LANG`
+
+### 4. 새 노드 구현
+- **ImagerNode (n17)**: 4컷 시나리오 각 패널에 대한 이미지 생성
+  - ImageGenerationClient 활용
+  - 프롬프트 자동 구성 및 최적화
+  - ControlNet 지원 옵션 (이전 패널 이미지 참조 등)
+  - 병렬 처리 대신 순차 처리로 일관성 유지
+
+- **TranslatorNode (n18)**: 시나리오 대사 및 텍스트 번역
+  - PapagoTranslationService 활용
+  - 멀티스레딩으로 동시 번역 처리 최적화
+  - 비활성화 옵션 지원 (`ENABLE_TRANSLATION`)
 
 ## 폴더 구조
 
@@ -127,20 +197,21 @@ ai/                             # AI 서비스 루트 디렉토리
 │   │   ├── n09_opinion_summarizer_node.py # 의견 요약
 │   │   ├── n10_synthesis_summarizer_node.py # 종합 요약
 │   │   ├── n11_evaluate_summary_node.py # 요약 평가
-│   │   ├── n12_trend_analyzer_node.py # 트렌드 분석
+│   │   ├── n12_trend_analyzer_node.py # 트렌드 분석 (구현됨)
 │   │   ├── n13_progress_report_node.py # 진행 보고서
 │   │   ├── n14_idea_generator_node.py # 아이디어 생성
 │   │   ├── n15_scenario_writer_node.py # 시나리오 작성
 │   │   ├── n16_scenario_report_node.py # 시나리오 보고서
-│   │   ├── n17_imager_node.py        # 이미지 생성
-│   │   ├── n18_translator_node.py    # 텍스트 번역
+│   │   ├── n17_imager_node.py        # 이미지 생성 (구현됨)
+│   │   ├── n18_translator_node.py    # 텍스트 번역 (구현됨)
 │   │   └── n19_postprocessor_node.py # 최종 후처리
 │   │
 │   ├── services/               # 외부 API/서비스 클라이언트
 │   │   ├── database_con_client_v2.py # 데이터베이스(Redis) 클라이언트
-│   │   ├── image_server_client_v2.py # 이미지 생성 API 클라이언트
+│   │   ├── image_server_client_v2.py # 이미지 생성 API 클라이언트 (추가됨)
 │   │   ├── langsmith_client_v2.py # LangSmith 모니터링 클라이언트
 │   │   ├── llm_server_client_v2.py # LLM API 클라이언트
+│   │   ├── papago_translation_service.py # Papago API 클라이언트 (추가됨)
 │   │   ├── spam_detector.py   # 스팸 필터링 서비스
 │   │   └── storage_client_v2.py # 스토리지 클라이언트
 │   │
@@ -158,9 +229,12 @@ ai/                             # AI 서비스 루트 디렉토리
 │   │   │   ├── google.py      # Google 검색
 │   │   │   ├── naver.py       # Naver 검색
 │   │   │   └── rss.py         # RSS 피드 검색
-│   │   └── social/            # 소셜 미디어 도구
-│   │       ├── reddit.py      # Reddit 도구
-│   │       └── twitter.py     # Twitter(X) 도구
+│   │   ├── social/            # 소셜 미디어 도구
+│   │   │   ├── reddit.py      # Reddit 도구
+│   │   │   └── twitter.py     # Twitter(X) 도구
+│   │   └── trends/            # 트렌드 분석 도구 (추가됨)
+│   │       ├── google_trends.py # Google Trends 분석 (추가됨)
+│   │       └── twitter_counts.py # Twitter 카운트 분석 (추가됨)
 │   │
 │   ├── utils/                  # 유틸리티 함수
 │   │   ├── agent_wrapper.py   # 에이전트 래퍼
@@ -214,54 +288,34 @@ ai/                             # AI 서비스 루트 디렉토리
    - 스팸 필터링
    - 의견 클러스터링
 
-6. **콘텐츠 요약 (미구현)**
+6. **콘텐츠 요약**
    - **뉴스 요약 (n08_news_summarizer_node)**
    - **의견 요약 (n09_opinion_summarizer_node)**
    - **종합 요약 (n10_synthesis_summarizer_node)**
 
-7. **요약 평가 및 트렌드 분석 (미구현)**
+7. **요약 평가 및 트렌드 분석**
    - **요약 평가 (n11_evaluate_summary_node)**
-   - **트렌드 분석 (n12_trend_analyzer_node)**
+   - **트렌드 분석 (n12_trend_analyzer_node)** (구현됨)
+     - Google Trends 분석
+     - Twitter 카운트 분석 
 
-8. **만화 생성 (미구현)**
+8. **아이디어 생성 및 시나리오 작성**
+   - **진행 보고서 (n13_progress_report_node)**
    - **아이디어 생성 (n14_idea_generator_node)**
    - **시나리오 작성 (n15_scenario_writer_node)**
-   - **이미지 생성 (n17_imager_node)**
-   - **번역 (n18_translator_node)**
+   - **시나리오 보고서 (n16_scenario_report_node)**
+
+9. **만화 생성 및 후처리** (구현됨)
+   - **이미지 생성 (n17_imager_node)** (구현됨)
+     - 각 패널별 이미지 생성
+     - ControlNet 지원 (옵션)
+   - **번역 (n18_translator_node)** (구현됨)
+     - 대사 등의 다국어 지원
    - **최종 후처리 (n19_postprocessor_node)**
+     - 이미지와 텍스트 결합
+     - 최종 만화 생성
 
-**참고**: 현재 워크플로우는 7번째 단계(의견 필터링 및 클러스터링)까지만 구현되어 있습니다.
-
-## API 엔드포인트
-
-### 1. 만화 생성 요청
-```
-POST /v1/comics/generate
-```
-- **설명**: 사용자 쿼리를 받아 만화 생성 워크플로우를 백그라운드에서 실행합니다.
-- **요청 파라미터**: `query` (string) - 만화로 변환할 주제 쿼리
-- **응답**: 작업 ID와 상태 메시지
-```json
-{
-  "message": "만화 생성 작업이 시작되었습니다.",
-  "comic_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6"
-}
-```
-
-### 2. 만화 생성 상태 조회
-```
-GET /v1/comics/status/{comic_id}
-```
-- **설명**: 특정 comic_id에 대한 만화 생성 작업의 현재 상태를 조회합니다.
-- **URL 파라미터**: `comic_id` (string) - 조회할 만화 생성 작업의 ID
-- **응답**: 작업 상태, 메시지, 결과(완료된 경우)
-```json
-{
-  "status": "IN_PROGRESS",
-  "message": "의견 스크래핑 중...",
-  "timestamp_start": "2024-05-01T14:30:00.123456Z"
-}
-```
+**참고**: 워크플로우는 이제 9번째 단계(만화 생성 및 후처리)까지 구현되었습니다.
 
 ## 주요 컴포넌트 설명
 
@@ -277,7 +331,7 @@ GET /v1/comics/status/{comic_id}
 - **필터링 결과**: `opinions_clean`
 - **요약 결과**: `news_summaries`, `opinion_summaries`, `final_summary`
 - **평가 및 분석**: `evaluation_metrics`, `decision`, `trend_scores`
-- **창작 컨텐츠**: `comic_ideas`, `chosen_idea`, `scenarios`, `image_urls`
+- **창작 컨텐츠**: `comic_ideas`, `chosen_idea`, `scenarios`, `image_urls`, `translated_text`
 - **최종 결과**: `final_comic`
 - **기타**: `used_links`, `processing_stats`, `error_message`
 
@@ -326,145 +380,33 @@ FastAPI의 `BackgroundTasks`를 활용하여 장시간 실행 작업을 비동�
    - 최종 상태 추출 및 DB 업데이트
    - 예외 처리 및 오류 상태 기록
 
-## 개발 가이드
+## API 엔드포인트
 
-### 새 노드 추가하기
-
-1. `app/nodes/` 디렉토리에 새 노드 클래스 파일 생성:
-```python
-# app/nodes/nXX_new_node.py
-from app.utils.logger import get_logger
-from app.workflows.state import ComicState
-from typing import Dict, Any
-
-logger = get_logger("NewNode")
-
-class NewNode:
-    def __init__(self, dependency1, dependency2):
-        self.dependency1 = dependency1
-        self.dependency2 = dependency2
-    
-    async def execute(self, state: ComicState) -> Dict[str, Any]:
-        """
-        노드 실행 메서드
-        
-        Args:
-            state: 현재 워크플로우 상태
-            
-        Returns:
-            업데이트할 ComicState 필드 딕셔너리
-        """
-        try:
-            # 노드 로직 구현
-            result = await self._process_data(state.some_field)
-            
-            # 결과 및 처리 시간 반환
-            return {
-                "output_field": result,
-                "error_message": None
-            }
-        except Exception as e:
-            logger.error(f"Error in NewNode: {str(e)}", exc_info=True)
-            return {"error_message": f"NewNode failed: {str(e)}"}
-            
-    async def _process_data(self, data):
-        # 내부 처리 로직
-        return processed_data
+### 1. 만화 생성 요청
+```
+POST /v1/comics/generate
+```
+- **설명**: 사용자 쿼리를 받아 만화 생성 워크플로우를 백그라운드에서 실행합니다.
+- **요청 파라미터**: `query` (string) - 만화로 변환할 주제 쿼리
+- **응답**: 작업 ID와 상태 메시지
+```json
+{
+  "message": "만화 생성 작업이 시작되었습니다.",
+  "comic_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+}
 ```
 
-2. `main.py`의 `lifespan` 함수에 노드 인스턴스 생성 추가:
-```python
-# ... 기존 코드 ...
-from app.nodes import nXX_new_node
-# ... 기존 코드 ...
-
-# 노드 인스턴스화
-nodeXX = nXX_new_node.NewNode(dependency1=some_service, dependency2=some_tool)
+### 2. 만화 생성 상태 조회
 ```
-
-3. `app/workflows/main_workflow.py`에 노드 추가:
-```python
-# import 추가
-from app.nodes.nXX_new_node import NewNode
-
-# build_main_workflow 함수 파라미터 추가
-def build_main_workflow(
-    # ... 기존 노드 파라미터 ...
-    new_node: NewNode,
-    # ...
-) -> StateGraph:
-    # ... 기존 코드 ...
-    
-    # 노드 추가
-    graph.add_node("new_step", new_node.execute)
-    
-    # 엣지 추가 (예: node07 다음에 실행)
-    graph.add_edge("filter_opinions", "new_step")
-    
-    # 다음 노드가 없으면 END로 연결
-    graph.add_edge("new_step", END)
-    
-    # ... 기존 코드 ...
+GET /v1/comics/status/{comic_id}
 ```
-
-### 배포 고려사항
-
-1. **메모리 관리**:
-   - `lifespan` 컨텍스트 매니저에서 모든 리소스를 적절히 초기화하고 정리
-   - 특히 Selenium 등의 무거운 리소스 사용 시 주의
-
-2. **확장성**:
-   - 워크플로우를 더 작은 서브그래프로 분할하여 관리 용이성 향상
-   - 각 노드의 독립적 테스트 가능성 확보
-
-3. **오류 처리**:
-   - 각 노드에서 적절한 예외 처리 및 로깅
-   - 중요 노드의 실패 시 대체 전략 구현 (예: 백업 API 사용)
-
-4. **모니터링**:
-   - LangSmith 및 내부 로깅을 통한 워크플로우 실행 추적
-   - 성능 병목 식별 및 최적화
-
-## 문제 해결 가이드
-
-### 일반적인 문제
-
-1. **Redis 연결 오류**
-   - 문제: `Cannot connect to Redis at localhost:6379`
-   - 해결: Redis 서버가 실행 중인지 확인하고, 올바른 포트와 인증 정보를 설정했는지 확인합니다.
-
-2. **LLM API 응답 파싱 오류**
-   - 문제: `Topic analyzer failed: Failed to parse LLM response`
-   - 해결: `app/nodes/n02_topic_analyzer_node.py`의 응답 파싱 로직을 확인하고, LLM 서비스 응답 형식에 맞게 조정합니다.
-
-3. **병렬 처리 이슈**
-   - 문제: 뉴스와 의견 수집이 동시에 실행되지 않음
-   - 해결: LangGraph 그래프 구성을 확인하고, 병렬 실행을 위한 엣지 연결이 올바른지 확인합니다.
-
-4. **메모리 누수**
-   - 문제: 장시간 실행 시 메모리 사용량 증가
-   - 해결: `lifespan` 및 `finally` 블록에서 모든 리소스가 제대로 정리되고 있는지 확인합니다.
-
-## 다음 단계
-
-현재 구현된 7단계 이후의 노드들을 구현하여 완전한 만화 생성 파이프라인을 완성할 수 있습니다:
-
-1. **요약 노드 구현 (n08~n10)**
-   - 뉴스 및 의견 요약
-   - 종합 요약 생성
-
-2. **평가 및 분석 노드 구현 (n11~n12)**
-   - 요약 품질 평가
-   - 트렌드 분석
-
-3. **만화 생성 노드 구현 (n14~n19)**
-   - 아이디어 생성
-   - 시나리오 작성
-   - 이미지 생성 및 후처리
-
-## 참고 문서
-
-- FastAPI 공식 문서: https://fastapi.tiangolo.com/
-- LangGraph 공식 문서: https://python.langchain.com/docs/langgraph/
-- Pydantic 공식 문서: https://docs.pydantic.dev/
-- Redis 공식 문서: https://redis.io/documentation
+- **설명**: 특정 comic_id에 대한 만화 생성 작업의 현재 상태를 조회합니다.
+- **URL 파라미터**: `comic_id` (string) - 조회할 만화 생성 작업의 ID
+- **응답**: 작업 상태, 메시지, 결과(완료된 경우)
+```json
+{
+  "status": "IN_PROGRESS",
+  "message": "이미지 생성 중...",
+  "timestamp_start": "2024-05-01T14:30:00.123456Z"
+}
+```

@@ -235,7 +235,7 @@ class DatabaseClientV2:
         # PubSub 닫기
         if self.pubsub:
             try:
-                await self.pubsub.unsubscribe() # 모든 채널 구독 취소
+                await self.pubsub.unsubscribe()  # 모든 채널 구독 취소
                 await self.pubsub.close()
                 logger.info("Redis PubSub connection closed.")
                 self.pubsub = None
@@ -245,8 +245,10 @@ class DatabaseClientV2:
         # 클라이언트 닫기 (Connection Pool이 없으므로 직접 닫음)
         if self.client:
             try:
-                await self.client.close()
-                await self.client.wait_closed() # 닫힐 때까지 대기 (redis-py 4.1 이상)
+                logger.info(f"Closing Redis client connection...")  # 로깅 추가
+                await self.client.close()  # 연결 종료 요청
+                # --- 수정: 아래 라인 제거 또는 주석 처리 ---
+                # await self.client.wait_closed() # 'Redis' 객체에 없는 메소드 호출 제거
                 logger.info("Redis client connection closed.")
                 self.client = None
             except Exception as e:

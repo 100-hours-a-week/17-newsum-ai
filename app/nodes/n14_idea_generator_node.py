@@ -1,33 +1,31 @@
-# app/nodes/14_idea_generator_node.py
+# app/nodes/14_idea_generator_node.py (Improved Version)
 
 import asyncio
 import re
 import json
-# --- datetime, timezone 임포트 추가 ---
 from datetime import datetime, timezone
-# ------------------------------------
 from typing import List, Dict, Any, Optional
 import tenacity
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, stop_after_attempt, wait_exponential, RetryError
 
-# --- 프로젝트 구성 요소 임포트 ---
-from app.config.settings import settings            # 설정 객체 (재시도 횟수 등 참조)
-from app.services.llm_service_v2 import LLMService # 실제 LLM 서비스 클라이언트
+# 프로젝트 구성 요소 임포트
+from app.config.settings import settings # 기본값 참조용
+from app.services.llm_server_client_v2 import LLMService # LLM 서비스 클라이언트
 # from app.services.langsmith_service_v2 import LangSmithService # 필요시
 from app.utils.logger import get_logger             # 로거 유틸리티
 from app.workflows.state import ComicState          # 워크플로우 상태 모델
 
-# --- 로거 설정 ---
-logger = get_logger("IdeaGeneratorNode")
+# 로거 설정
+logger = get_logger(__name__)
 
 class IdeaGeneratorNode:
     """
-    (Refactored) 최종 요약과 트렌드 점수를 기반으로 4컷 만화 아이디어를 생성합니다.
-    - LLMService를 사용하여 아이디어 생성 및 자체 평가 수행.
-    - 설정은 상태의 config 딕셔너리에서 로드.
+    최종 요약과 트렌드 점수를 기반으로 4컷 만화 아이디어를 생성합니다.
+    - LLMService를 사용하여 아이디어 생성 및 자체 평가 수행 (JSON 형식).
+    - 설정은 `state.config`를 우선 사용하며, 없으면 `settings`의 기본값을 사용합니다.
     """
 
-    # 상태 입력/출력 정의 (ComicState 필드 기준)
+    # 상태 입력/출력 정의 (참고용)
     inputs: List[str] = ["final_summary", "trend_scores", "trace_id", "config", "processing_stats"]
     outputs: List[str] = ["comic_ideas", "processing_stats", "error_message"]
 
@@ -37,12 +35,22 @@ class IdeaGeneratorNode:
         llm_client: LLMService,
         # langsmith_service: Optional[LangSmithService] = None # 선택적
     ):
+        if not llm_client: raise ValueError("LLMService is required for IdeaGeneratorNode")
         self.llm_client = llm_client
         # self.langsmith_service = langsmith_service
-        logger.info("IdeaGeneratorNode initialized with LLMService.")
+        logger.info("IdeaGeneratorNode initialized.")
+
+    # --- 내부 설정 로드 (실행 시점) ---
+    def _load_runtime_config(self, config: Dict[str, Any]):
+        """실행 시 필요한 설정을 config 또는 settings에서 로드"""
+        self.llm_temp_creative = float(config.get("llm_temperature_creative", settings.DEFAULT_LLM_TEMP_CREATIVE))
+        self.max_tokens_idea = int(config.get("llm_max_tokens_idea", settings.DEFAULT_MAX_TOKENS_IDEA))
+        self.top_n_trends_for_prompt = int(config.get("trends_report_top_n", settings.DEFAULT_TRENDS_REPORT_TOP_N))
+
+        logger.debug(f"Runtime config loaded. LLM Temp: {self.llm_temp_creative}, Max Tokens: {self.max_tokens_idea}, Top Trends: {self.top_n_trends_for_prompt}")
+
 
     # --- LLM 호출 래퍼 (재시도 적용) ---
-    # 이전 노드들과 동일한 래퍼 사용
     @tenacity.retry(
         stop=stop_after_attempt(settings.LLM_API_RETRIES),
         wait=wait_exponential(multiplier=1, min=2, max=10),
@@ -51,19 +59,14 @@ class IdeaGeneratorNode:
     )
     async def _call_llm_with_retry(self, prompt: str, temperature: float, max_tokens: int,
                                    trace_id: Optional[str] = None, **kwargs) -> str:
-        """(Refactored) LLMService.generate_text를 재시도 로직과 함께 호출"""
+        """LLMService.generate_text를 재시도 로직과 함께 호출"""
         log_prefix = f"[{trace_id}]" if trace_id else ""
         logger.debug(f"{log_prefix} Calling LLMService (Temp: {temperature}, MaxTokens: {max_tokens})...")
 
-        # LLMService의 generate_text 메서드 호출
         result = await self.llm_client.generate_text(
-            prompt=prompt,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            **kwargs # response_format={"type": "json_object"} 등 전달
+            prompt=prompt, temperature=temperature, max_tokens=max_tokens, **kwargs
         )
 
-        # 결과 처리
         if "error" in result:
             error_msg = result['error']
             logger.error(f"{log_prefix} LLMService call failed: {error_msg}")
@@ -76,12 +79,12 @@ class IdeaGeneratorNode:
             return result["generated_text"].strip()
 
     # --- 프롬프트 생성 ---
-    def _prepare_trend_info_for_prompt(self, trend_scores: List[Dict[str, Any]], top_n: int) -> str:
+    def _prepare_trend_info_for_prompt(self, trend_scores: List[Dict[str, Any]]) -> str:
         """LLM 프롬프트용 상위 트렌드 정보 포맷팅"""
         if not trend_scores: return "No specific trending topics identified recently."
 
-        # 점수 0 초과 필터링 및 정렬 (Node 12에서 이미 정렬됨)
-        top_trends = [t for t in trend_scores if t.get('score', 0) > 0][:top_n]
+        # Node 12에서 이미 점수 내림차순 정렬됨
+        top_trends = [t for t in trend_scores if t.get('score', 0) > 0][:self.top_n_trends_for_prompt]
 
         if not top_trends: return "No significant trending topics identified recently."
 
@@ -151,13 +154,10 @@ Generate 5 distinct 4-panel comic ideas inspired by the following news summary a
         log_prefix = f"[{trace_id}]" if trace_id else ""
         try:
             logger.debug(f"{log_prefix} Raw LLM response for ideas: {response_json[:500]}...")
-            # 마크다운 코드 블록 제거
             match = re.search(r'```(?:json)?\s*(\[.*?\])\s*```', response_json, re.DOTALL | re.IGNORECASE)
-            if match:
-                json_str = match.group(1)
+            if match: json_str = match.group(1)
             else:
                 json_str = response_json.strip()
-                # 간단한 리스트 형태 보정 시도
                 if not json_str.startswith('['): json_str = '[' + json_str
                 if not json_str.endswith(']'): json_str = json_str + ']'
 
@@ -170,35 +170,28 @@ Generate 5 distinct 4-panel comic ideas inspired by the following news summary a
             required_keys = {"idea_title", "concept", "creative_score"}
             for idx, idea in enumerate(ideas):
                 if isinstance(idea, dict) and required_keys.issubset(idea.keys()):
-                    # 타입 및 값 검증 강화
-                    title = idea['idea_title']
-                    concept = idea['concept']
-                    score_val = idea['creative_score']
+                    title = idea.get('idea_title')
+                    concept = idea.get('concept')
+                    score_val = idea.get('creative_score')
                     if isinstance(title, str) and title.strip() and \
                        isinstance(concept, str) and concept.strip() and \
                        isinstance(score_val, (float, int)):
-                        # 점수 범위 (0.0 ~ 1.0) 확인 및 조정
                         score = max(0.0, min(1.0, float(score_val)))
                         validated_ideas.append({
                             "idea_title": title.strip(),
                             "concept": concept.strip(),
-                            "creative_score": round(score, 3) # 소수점 3자리
+                            "creative_score": round(score, 3)
                         })
-                    else:
-                        logger.warning(f"{log_prefix} Idea #{idx+1} has invalid data types or empty values: {idea}")
-                else:
-                    logger.warning(f"{log_prefix} Idea #{idx+1} has missing keys or is not a dict: {idea}")
+                    else: logger.warning(f"{log_prefix} Idea #{idx+1} has invalid data: {idea}")
+                else: logger.warning(f"{log_prefix} Idea #{idx+1} format invalid: {idea}")
 
-            # 프롬프트에서 5개를 요청했으므로, 결과 개수 확인
-            if len(validated_ideas) < 5:
-                 logger.warning(f"{log_prefix} LLM returned fewer than 5 valid ideas ({len(validated_ideas)} found).")
-            elif len(validated_ideas) > 5:
-                 logger.warning(f"{log_prefix} LLM returned more than 5 valid ideas ({len(validated_ideas)} found). Using first 5.")
+            if len(validated_ideas) < 5: logger.warning(f"{log_prefix} LLM returned fewer than 5 valid ideas ({len(validated_ideas)}).")
+            elif len(validated_ideas) > 5: logger.warning(f"{log_prefix} LLM returned more than 5 ideas. Using first 5.")
 
-            return validated_ideas[:5] # 최대 5개까지만 반환
+            return validated_ideas[:5] # 최대 5개 반환
 
-        except (json.JSONDecodeError, ValueError, TypeError) as e: # 구체적 예외 처리
-            logger.error(f"{log_prefix} Failed parsing/validating LLM idea response: {e}. Response fragment: '{response_json[:200]}...'")
+        except (json.JSONDecodeError, ValueError, TypeError) as e:
+            logger.error(f"{log_prefix} Failed parsing/validating LLM idea response: {e}. Response: '{response_json[:200]}...'")
             return []
         except Exception as e:
             logger.exception(f"{log_prefix} Unexpected error parsing LLM idea response: {e}")
@@ -208,73 +201,67 @@ Generate 5 distinct 4-panel comic ideas inspired by the following news summary a
     async def run(self, state: ComicState) -> Dict[str, Any]:
         """아이디어 생성 프로세스 실행"""
         start_time = datetime.now(timezone.utc)
-        log_prefix = f"[{state.trace_id}]"
+        trace_id = state.trace_id
+        log_prefix = f"[{trace_id}]"
         logger.info(f"{log_prefix} Executing IdeaGeneratorNode...")
 
-        # 상태 및 설정 로드
         final_summary = state.final_summary or ""
         trend_scores = state.trend_scores or []
         config = state.config or {}
         processing_stats = state.processing_stats or {}
 
-        # 입력 유효성 검사
         if not final_summary:
             logger.error(f"{log_prefix} Final summary is missing. Cannot generate ideas.")
             processing_stats['idea_generator_node_time'] = (datetime.now(timezone.utc) - start_time).total_seconds()
-            return {"comic_ideas": [], "processing_stats": processing_stats, "error_message": "Final summary is required for idea generation."}
+            return {"comic_ideas": [], "processing_stats": processing_stats, "error_message": "Final summary is required."}
 
-        # 설정값 로드
-        llm_model = config.get("llm_model", "default_model")
-        llm_temperature = float(config.get("llm_temperature_creative", 0.7))
-        llm_max_tokens = int(config.get("llm_max_tokens_idea", 1024))
-        top_n_trends = config.get("trends_report_top_n", 3) # 보고서용 상위 트렌드 개수 설정 재활용
+        # --- 실행 시점 설정 로드 ---
+        self._load_runtime_config(config)
+        # --------------------------
 
         logger.info(f"{log_prefix} Starting comic idea generation...")
         error_message: Optional[str] = None
         comic_ideas: List[Dict[str, Any]] = []
 
         try:
-            # --- LLM 입력 준비 ---
-            trend_info = self._prepare_trend_info_for_prompt(trend_scores, top_n_trends)
+            # --- LLM 입력 준비 및 호출 ---
+            trend_info = self._prepare_trend_info_for_prompt(trend_scores)
             prompt = self._create_idea_prompt_en(final_summary, trend_info)
-
-            # --- LLM 호출 및 파싱 ---
             llm_kwargs = {"response_format": {"type": "json_object"}} # JSON 모드 요청
+
             response_str = await self._call_llm_with_retry(
                 prompt=prompt,
-                temperature=llm_temperature,
-                max_tokens=llm_max_tokens,
-                trace_id=state.trace_id,
+                temperature=self.llm_temp_creative,
+                max_tokens=self.max_tokens_idea,
+                trace_id=trace_id,
                 **llm_kwargs
             )
-            comic_ideas = self._parse_llm_response(response_str, state.trace_id)
+            comic_ideas = self._parse_llm_response(response_str, trace_id)
 
             if not comic_ideas:
-                 error_message = "Failed to generate any valid comic ideas from LLM."
+                 error_message = "Failed to generate or parse any valid comic ideas from LLM."
                  logger.error(f"{log_prefix} {error_message}")
-                 # 오류가 발생해도 빈 리스트는 반환
             else:
                  logger.info(f"{log_prefix} Successfully generated {len(comic_ideas)} comic ideas.")
 
-        except Exception as e:
-            # _call_llm_with_retry 또는 _parse_llm_response 에서 발생한 예외 처리
+        except RetryError as e: # 모든 재시도 실패
+            error_message = f"LLM call failed after multiple retries: {e}"
+            logger.error(f"{log_prefix} {error_message}")
+        except Exception as e: # 기타 예외
             error_message = f"Idea generation failed: {str(e)}"
             logger.exception(f"{log_prefix} {error_message}")
             comic_ideas = [] # 실패 시 빈 리스트
 
         # --- 처리 시간 및 상태 반환 ---
         end_time = datetime.now(timezone.utc)
-        node_processing_time = (end_time - start_time).total_seconds()
-        processing_stats['idea_generator_node_time'] = node_processing_time
-        logger.info(f"{log_prefix} IdeaGeneratorNode finished in {node_processing_time:.2f} seconds.")
+        processing_stats['idea_generator_node_time'] = (end_time - start_time).total_seconds() # 키 형식 통일
+        logger.info(f"{log_prefix} IdeaGeneratorNode finished in {processing_stats['idea_generator_node_time']:.2f} seconds.")
 
-        # TODO: LangSmith 로깅
-
-        # --- ComicState 업데이트를 위한 결과 반환 ---
+        # ComicState 업데이트
         update_data: Dict[str, Any] = {
-            "comic_ideas": comic_ideas, # 성공 시 생성된 아이디어 리스트, 실패 시 빈 리스트
+            "comic_ideas": comic_ideas,
             "processing_stats": processing_stats,
-            "error_message": error_message # 오류 발생 시 메시지 포함
+            "error_message": error_message
         }
         valid_keys = set(ComicState.model_fields.keys())
         return {k: v for k, v in update_data.items() if k in valid_keys}

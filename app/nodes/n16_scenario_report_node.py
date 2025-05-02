@@ -1,101 +1,112 @@
-# app/nodes/16_scenario_report_node.py
+# app/nodes/16_scenario_report_node.py (Improved Version)
 
 import os
 import re
 import json
 import hashlib
-# --- datetime, timezone 임포트 추가 ---
+import asyncio
 from datetime import datetime, timezone
-# ------------------------------------
 from typing import List, Dict, Any, Optional
+import tenacity
+from tenacity import retry, stop_after_attempt, wait_exponential, RetryError
 
-# --- 프로젝트 구성 요소 임포트 ---
-from app.config.settings import settings            # 설정 객체 (재시도 횟수 등 참조)
-from app.services.llm_service_v2 import LLMService # 실제 LLM 서비스 클라이언트
-# from app.services.langsmith_service_v2 import LangSmithService # 필요시
+# 프로젝트 구성 요소 임포트
+from app.config.settings import settings # 기본값 참조용
+from app.services.llm_server_client_v2 import LLMService # LLM 서비스 클라이언트
 from app.utils.logger import get_logger             # 로거 유틸리티
 from app.workflows.state import ComicState          # 워크플로우 상태 모델
 
-# --- 로거 설정 ---
-logger = get_logger("ScenarioReportNode")
+# 로거 설정
+logger = get_logger(__name__)
 
-# --- Jinja2 의존성 처리 ---
+# Jinja2 의존성 처리
 JINJA2_AVAILABLE = False
-template_env_cache: Optional['jinja2.Environment'] = None # 캐시된 환경 객체
-template_dir_cache: Optional[str] = None # 캐시된 경로
+template_env_cache: Optional[Dict[str, 'jinja2.Environment']] = {} # 경로별 캐시 (Node 13과 공유 가능)
 try:
     import jinja2
     JINJA2_AVAILABLE = True
     logger.info("jinja2 library found.")
 except ImportError:
+    jinja2 = None # type: ignore
     logger.error("jinja2 library not installed. Report generation disabled.")
 except Exception as e:
+    jinja2 = None # type: ignore
     logger.exception(f"Error importing jinja2: {e}")
+
 
 class ScenarioReportNode:
     """
-    (Refactored) 시나리오 중간 보고서(Markdown 템플릿 B)를 생성합니다.
+    시나리오 중간 보고서(Markdown, Template B)를 생성합니다.
     - 시나리오 상세, 링크 사용 정보, LLM 기반 품질 평가 및 제안(선택적) 포함.
-    - LLMService (평가/제안용), Jinja2 사용.
-    - 설정은 상태의 config 딕셔너리에서 로드.
+    - 설정은 `state.config`를 우선 사용하며, 없으면 `settings`의 기본값을 사용합니다.
     """
 
-    # 상태 입력/출력 정의 (ComicState 필드 기준)
+    # 상태 입력/출력 정의 (참고용)
     inputs: List[str] = [
         "scenarios", "chosen_idea", "fact_urls", "opinion_urls", "used_links",
-        "timestamp", "trace_id", "config", "processing_stats", "scenario_prompt"
+        "timestamp", "trace_id", "comic_id", "config", "processing_stats", "scenario_prompt"
     ]
     outputs: List[str] = ["scenario_report", "processing_stats", "error_message"]
 
-    # LLMService 인스턴스를 외부에서 주입받음 (평가/제안이 활성화된 경우 필요)
+    # LLMService는 평가/제안 기능 활성화 시에만 필요
     def __init__(
         self,
-        llm_client: Optional[LLMService] = None, # LLM 클라이언트는 선택적일 수 있음
+        llm_client: Optional[LLMService] = None,
         # langsmith_service: Optional[LangSmithService] = None
     ):
         self.llm_client = llm_client
-        # self.langsmith_service = langsmith_service
-        # Jinja2 환경은 run 시점에 경로 기반으로 로드/캐시 확인
-        self.template_env: Optional[jinja2.Environment] = None
+        # self.langsmith = langsmith_service
         logger.info(f"ScenarioReportNode initialized {'with' if llm_client else 'without'} LLMService.")
         if not JINJA2_AVAILABLE:
-            logger.error("Report generation will be disabled due to missing Jinja2 library.")
+            logger.error("Report generation disabled due to missing Jinja2 library.")
 
-    def _setup_jinja_env(self, template_dir: str) -> bool:
+    # --- 내부 설정 로드 (실행 시점) ---
+    def _load_runtime_config(self, config: Dict[str, Any]):
+        """실행 시 필요한 설정을 config 또는 settings에서 로드"""
+        self.template_dir = config.get("template_dir", settings.DEFAULT_TEMPLATE_DIR)
+        # 템플릿 파일명 B 사용
+        self.template_name = config.get("progress_report_template_b_filename", settings.DEFAULT_TEMPLATE_B_FILENAME)
+        # LLM 기반 평가/제안 관련 설정
+        self.enable_scenario_evaluation = config.get("enable_scenario_evaluation", settings.ENABLE_SCENARIO_EVALUATION)
+        self.llm_temp_scenario_eval = float(config.get("llm_temperature_scenario_eval", settings.DEFAULT_LLM_TEMP_SCENARIO_EVAL))
+        self.max_tokens_scenario_eval = int(config.get("llm_max_tokens_scenario_eval", settings.DEFAULT_MAX_TOKENS_SCENARIO_EVAL))
+        # 텍스트 길이 제한 (템플릿 및 평가용)
+        self.max_title_len = config.get("report_max_title_len", 40)
+        self.max_panel_text_len = config.get("report_max_panel_text_len", 25)
+        self.max_scenario_eval_len = config.get("max_scenario_eval_len", 2000)
+
+        logger.debug(f"Runtime config loaded. TemplateDir: {self.template_dir}, TemplateName: {self.template_name}")
+        logger.debug(f"Scenario Eval Enabled: {self.enable_scenario_evaluation}")
+        if self.enable_scenario_evaluation:
+             logger.debug(f"Eval LLM Temp: {self.llm_temp_scenario_eval}, Max Tokens: {self.max_tokens_scenario_eval}")
+
+
+    def _setup_jinja_env(self, trace_id: Optional[str]) -> Optional['jinja2.Environment']:
         """설정된 경로로 Jinja2 환경 로드 또는 캐시된 환경 반환"""
-        global template_env_cache, template_dir_cache # 전역 캐시 사용
-        if not JINJA2_AVAILABLE: return False
-
-        # 경로가 같고 캐시된 환경이 있으면 재사용
-        if template_env_cache and template_dir_cache == template_dir:
-            self.template_env = template_env_cache
-            return True
-
-        # 새로 로드
+        # Node 13과 동일한 로직 사용
+        log_prefix = f"[{trace_id}]" if trace_id else ""
+        if not JINJA2_AVAILABLE or not self.template_dir: return None
+        if self.template_dir in template_env_cache:
+            logger.debug(f"{log_prefix} Using cached Jinja2 environment for {self.template_dir}")
+            return template_env_cache[self.template_dir]
         try:
-            if not os.path.isdir(template_dir):
-                logger.error(f"Jinja2 template directory not found: {template_dir}")
-                self.template_env = None; template_env_cache = None; template_dir_cache = None
-                return False
-
-            loader = jinja2.FileSystemLoader(searchpath=template_dir)
+            if not os.path.isdir(self.template_dir):
+                logger.error(f"{log_prefix} Jinja2 template directory not found: {self.template_dir}")
+                return None
+            loader = jinja2.FileSystemLoader(searchpath=self.template_dir)
             env = jinja2.Environment(
                 loader=loader,
                 autoescape=jinja2.select_autoescape(['html', 'xml', 'md']),
                 undefined=jinja2.StrictUndefined
             )
-            logger.info(f"Jinja2 environment loaded from: {template_dir}")
-            self.template_env = env
-            template_env_cache = env # 캐시 업데이트
-            template_dir_cache = template_dir
-            return True
+            logger.info(f"{log_prefix} Jinja2 environment loaded from: {self.template_dir}")
+            template_env_cache[self.template_dir] = env
+            return env
         except Exception as e:
-            logger.exception(f"Error initializing Jinja2 environment from {template_dir}: {e}")
-            self.template_env = None; template_env_cache = None; template_dir_cache = None
-            return False
+            logger.exception(f"{log_prefix} Error initializing Jinja2 environment from {self.template_dir}: {e}")
+            return None
 
     # --- LLM 호출 래퍼 (평가/제안용) ---
-    # 이전 노드들의 _call_llm_with_retry 와 동일하게 사용 가능
     @tenacity.retry(
         stop=stop_after_attempt(settings.LLM_API_RETRIES or 2), # 평가용은 재시도 줄일 수 있음
         wait=wait_exponential(multiplier=1, min=1, max=5),
@@ -105,43 +116,31 @@ class ScenarioReportNode:
     async def _call_llm_with_retry(self, prompt: str, temperature: float, max_tokens: int,
                                    trace_id: Optional[str] = None, **kwargs) -> str:
         """LLMService.generate_text를 재시도 로직과 함께 호출 (평가/제안용)"""
-        if not self.llm_client: raise RuntimeError("LLM client is not available for this node.") # LLM 없으면 오류
-
+        if not self.llm_client: raise RuntimeError("LLM client is not available for scenario evaluation.")
         log_prefix = f"[{trace_id}]" if trace_id else ""
         logger.debug(f"{log_prefix} Calling LLMService for Report Eval/Suggest (Temp: {temperature}, MaxTokens: {max_tokens})...")
-
         result = await self.llm_client.generate_text(
             prompt=prompt, temperature=temperature, max_tokens=max_tokens, **kwargs
         )
-
-        if "error" in result:
-            error_msg = result['error']
-            logger.error(f"{log_prefix} LLMService call failed: {error_msg}")
-            raise RuntimeError(f"LLMService error: {error_msg}")
-        elif "generated_text" not in result or not isinstance(result.get("generated_text"), str) or not result["generated_text"].strip():
-            logger.error(f"{log_prefix} LLMService returned invalid/empty text. Response: {result}")
+        if "error" in result: raise RuntimeError(f"LLMService error: {result['error']}")
+        if "generated_text" not in result or not isinstance(result.get("generated_text"), str) or not result["generated_text"].strip():
             raise ValueError("LLMService returned invalid or empty text")
-        else:
-            logger.debug(f"{log_prefix} LLMService call successful.")
-            return result["generated_text"].strip()
+        return result["generated_text"].strip()
 
-    # --- LLM 기반 평가 및 제안 (선택적) ---
-    async def _evaluate_scenario_quality(self, scenario_text: str, config: Dict, trace_id: Optional[str]) -> Dict[str, int]:
+    # --- LLM 기반 평가 및 제안 ---
+    async def _evaluate_scenario_quality(self, scenario_text: str, trace_id: Optional[str]) -> Dict[str, int]:
         """LLM으로 시나리오 품질 평가 (점수: 1-5)"""
         default_scores = {"consistency": 0, "flow": 0, "dialogue": 0}
         if not scenario_text or not self.llm_client: return default_scores
+        log_prefix = f"[{trace_id}]" if trace_id else ""
 
-        # 설정 로드
-        llm_model = config.get("llm_model", "default_model")
-        temperature = config.get("llm_temperature_scenario_eval", 0.3)
-        max_tokens = config.get("llm_max_tokens_scenario_eval", 512)
-
+        # 프롬프트 정의 (이전과 유사)
         prompt = f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
 You are a script evaluator. Analyze the provided 4-panel comic scenario based on consistency, flow, and dialogue quality. Respond ONLY with a JSON object containing integer scores from 1 (Poor) to 5 (Excellent) for each category.<|eot_id|><|start_header_id|>user<|end_header_id|>
 Evaluate the quality of the following 4-panel comic scenario based on the criteria below.
 
 [Scenario Text]
-{scenario_text}
+{scenario_text[:self.max_scenario_eval_len]}
 
 [Evaluation Criteria]
 1.  **Consistency**: Are the characters, setting, and tone consistent across the 4 panels?
@@ -150,55 +149,51 @@ Evaluate the quality of the following 4-panel comic scenario based on the criter
 
 [Instructions]
 - Assign an integer score from 1 (Poor) to 5 (Excellent) for each criterion.
-- Respond ONLY with a single, valid JSON object in the format:
-  `{{"consistency": score, "flow": score, "dialogue": score}}`
+- Respond ONLY with a single, valid JSON object in the format: `{{"consistency": score, "flow": score, "dialogue": score}}`
 
 [Evaluation Scores]
 <|eot_id|><|start_header_id|>assistant<|end_header_id|>
 ```json
 """
         try:
-            # JSON 모드 요청
             response_str = await self._call_llm_with_retry(
-                prompt, temperature, max_tokens, trace_id, response_format={"type": "json_object"}
+                prompt, self.llm_temp_scenario_eval, self.max_tokens_scenario_eval, trace_id,
+                response_format={"type": "json_object"} # JSON 모드 요청
             )
-            # JSON 파싱
             match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', response_str, re.DOTALL | re.IGNORECASE)
             json_str = match.group(1) if match else response_str.strip()
             eval_data = json.loads(json_str)
 
-            scores = default_scores.copy() # 기본값으로 시작
-            # 점수 검증 및 범위 제한 (1-5)
+            scores = default_scores.copy()
             for key in scores.keys():
                  score_val = eval_data.get(key)
-                 if isinstance(score_val, int):
-                      scores[key] = max(1, min(5, score_val))
-                 else:
-                      logger.warning(f"[{trace_id}] Invalid or missing score for '{key}' in LLM evaluation: {score_val}")
-                      scores[key] = 0 # 유효하지 않으면 0점 처리
-
-            logger.info(f"[{trace_id}] Scenario quality evaluated by LLM: {scores}")
+                 if isinstance(score_val, int): scores[key] = max(1, min(5, score_val))
+                 else: logger.warning(f"{log_prefix} Invalid score for '{key}': {score_val}")
+            logger.info(f"{log_prefix} Scenario quality evaluated by LLM: {scores}")
             return scores
+        except RetryError as e:
+            logger.error(f"{log_prefix} LLM evaluation failed after retries: {e}")
+            return default_scores
+        except (json.JSONDecodeError, ValueError, TypeError) as e:
+            logger.error(f"{log_prefix} Failed parsing LLM evaluation response: {e}. Response: '{response_str[:100]}...'")
+            return default_scores
         except Exception as e:
-            logger.error(f"[{trace_id}] Failed to evaluate scenario quality using LLM: {e}")
-            return default_scores # 오류 시 기본 점수 반환
+            logger.exception(f"{log_prefix} Unexpected error during scenario evaluation: {e}")
+            return default_scores
 
-    async def _generate_suggestions(self, scenario_text: str, config: Dict, trace_id: Optional[str]) -> List[str]:
+    async def _generate_suggestions(self, scenario_text: str, trace_id: Optional[str]) -> List[str]:
          """LLM으로 시나리오 개선 제안 생성"""
          default_suggestion = ["Failed to generate suggestions."]
          if not scenario_text or not self.llm_client: return default_suggestion
+         log_prefix = f"[{trace_id}]" if trace_id else ""
 
-         # 설정 로드
-         llm_model = config.get("llm_model", "default_model")
-         temperature = config.get("llm_temperature_scenario_eval", 0.3)
-         max_tokens = config.get("llm_max_tokens_scenario_eval", 512)
-
+         # 프롬프트 정의 (이전과 유사)
          prompt = f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
 You are a helpful script doctor. Provide constructive suggestions to improve the following 4-panel comic scenario.<|eot_id|><|start_header_id|>user<|end_header_id|>
 Review the following 4-panel comic scenario and provide 2-3 specific, actionable suggestions for improvement. Focus on clarity, engagement, visual interest, or humor.
 
 [Scenario Text]
-{scenario_text}
+{scenario_text[:self.max_scenario_eval_len]}
 
 [Instructions]
 - Provide 2 to 3 concrete suggestions.
@@ -208,173 +203,166 @@ Review the following 4-panel comic scenario and provide 2-3 specific, actionable
 - <|eot_id|><|start_header_id|>assistant<|end_header_id|>
 - """
          try:
-              response_str = await self._call_llm_with_retry(prompt, temperature, max_tokens, trace_id)
-              # 응답 파싱 (줄바꿈 기준, '-' 시작 필터링)
+              response_str = await self._call_llm_with_retry(
+                  prompt, self.llm_temp_scenario_eval, self.max_tokens_scenario_eval, trace_id
+              )
               suggestions = [line.strip('- ').strip() for line in response_str.strip().split('\n')
-                             if line.strip().startswith('-')]
+                             if line.strip().startswith('-') and line.strip('- ').strip()]
               if suggestions:
-                  logger.info(f"[{trace_id}] Generated {len(suggestions)} improvement suggestions.")
+                  logger.info(f"{log_prefix} Generated {len(suggestions)} improvement suggestions.")
                   return suggestions
               else:
-                  logger.warning(f"[{trace_id}] LLM did not return suggestions in the expected format.")
+                  logger.warning(f"{log_prefix} LLM did not return suggestions in expected format. Response: '{response_str[:100]}...'")
                   return ["No specific suggestions generated."]
+         except RetryError as e:
+              logger.error(f"{log_prefix} LLM suggestion generation failed after retries: {e}")
+              return default_suggestion
          except Exception as e:
-              logger.error(f"[{trace_id}] Failed to generate suggestions using LLM: {e}")
+              logger.exception(f"{log_prefix} Failed to generate suggestions using LLM: {e}")
               return default_suggestion
 
-    # --- 데이터 준비 헬퍼 ---
-    def _prepare_mapping_rows(self, chosen_idea: Optional[Dict], scenarios: List[Dict]) -> List[Dict]:
-        """매핑 테이블 데이터 준비 (Node 13과 유사)"""
+    # --- 데이터 준비 헬퍼 (Node 13과 유사/재사용) ---
+    def _truncate_text(self, text: Optional[str], max_length: int) -> str:
+        if not text: return ""
+        return text[:max_length - 3] + "..." if len(text) > max_length else text
+
+    def _prepare_mapping_rows(self, chosen_idea: Optional[Dict], scenarios: List[Dict], trace_id: Optional[str]) -> List[Dict]:
+        """보고서용 매핑 테이블 데이터 준비"""
+        log_prefix = f"[{trace_id}]" if trace_id else ""
         rows = []
         default_row = {'num': 1, 'title': 'N/A', 'c1': '-', 'c2': '-', 'c3': '-', 'c4': '-'}
         if not chosen_idea or not scenarios or len(scenarios) != 4:
-             logger.warning("Cannot prepare mapping rows: chosen idea or valid 4-panel scenario missing.")
+             logger.warning(f"{log_prefix} Cannot prepare mapping rows: chosen idea or 4 panels missing.")
              return [default_row]
 
-        title = self._truncate_text(chosen_idea.get('idea_title', 'N/A'), 30)
+        title = self._truncate_text(chosen_idea.get('idea_title', 'N/A'), self.max_title_len)
         try:
-            # 패널 텍스트 추출 (설명 또는 대화)
-            c1 = self._truncate_text(scenarios[0].get('panel_description') or scenarios[0].get('dialogue', '-'), 25)
-            c2 = self._truncate_text(scenarios[1].get('panel_description') or scenarios[1].get('dialogue', '-'), 25)
-            c3 = self._truncate_text(scenarios[2].get('panel_description') or scenarios[2].get('dialogue', '-'), 25)
-            c4 = self._truncate_text(scenarios[3].get('panel_description') or scenarios[3].get('dialogue', '-'), 25)
+            get_panel_text = lambda p: p.get('panel_description') or p.get('dialogue', '-')
+            c1 = self._truncate_text(get_panel_text(scenarios[0]), self.max_panel_text_len)
+            c2 = self._truncate_text(get_panel_text(scenarios[1]), self.max_panel_text_len)
+            c3 = self._truncate_text(get_panel_text(scenarios[2]), self.max_panel_text_len)
+            c4 = self._truncate_text(get_panel_text(scenarios[3]), self.max_panel_text_len)
             rows.append({'num': 1, 'title': title, 'c1': c1, 'c2': c2, 'c3': c3, 'c4': c4})
         except IndexError:
-             logger.error("Error accessing scenario panels while preparing mapping rows.")
-             rows.append(default_row) # 오류 시 기본값
+             logger.error(f"{log_prefix} Error accessing scenario panels preparing mapping rows.")
+             rows.append(default_row)
         return rows
 
-    def _calculate_link_usage(self, fact_urls: List[Dict], opinion_urls: List[Dict], used_links: List[Dict]) -> Dict[str, int]:
-        """시나리오 컨텍스트 링크 사용량 계산 (Node 13과 동일)"""
+    def _calculate_link_usage(self, fact_urls: List[Dict], opinion_urls: List[Dict], used_links: List[Dict], trace_id: Optional[str]) -> Dict[str, int]:
+        """시나리오 컨텍스트 링크 사용량 계산"""
+        log_prefix = f"[{trace_id}]" if trace_id else ""
         usage = {'used_news': 0, 'total_news': len(fact_urls), 'used_op': 0, 'total_op': len(opinion_urls)}
         if not used_links: return usage
-        context_urls = set(link.get('url') for link in used_links if "Scenario Context" in link.get('purpose', '') and link.get('url'))
+        # Node 15에서 'context_used' 상태로 업데이트된 링크 필터링
+        context_urls = set(link.get('url') for link in used_links if link.get('status') == 'context_used' and link.get('url'))
         if not context_urls: return usage
+
         original_fact_urls = set(f.get('url') for f in fact_urls if f.get('url'))
         original_opinion_urls = set(o.get('url') for o in opinion_urls if o.get('url'))
         usage['used_news'] = len(context_urls.intersection(original_fact_urls))
         usage['used_op'] = len(context_urls.intersection(original_opinion_urls))
+        logger.debug(f"{log_prefix} Link usage calculated: News {usage['used_news']}/{usage['total_news']}, Opinion {usage['used_op']}/{usage['total_op']}")
         return usage
 
     def _calculate_prompt_hash(self, prompt: Optional[str]) -> str:
-        """시나리오 생성 프롬프트 해시 계산 (Node 13과 동일)"""
+        """시나리오 생성 프롬프트 해시 계산"""
         if not prompt: return "N/A"
         try: return hashlib.sha256(prompt.encode('utf-8')).hexdigest()[:16]
-        except Exception: return "Error"
-
-    def _truncate_text(self, text: Optional[str], max_length: int) -> str:
-        """텍스트 축약 (Node 13과 동일)"""
-        if not text: return ""
-        return text[:max_length - 3] + "..." if len(text) > max_length else text
+        except Exception: return "Error Calculating Hash"
 
     # --- 메인 실행 메서드 ---
     async def run(self, state: ComicState) -> Dict[str, Any]:
         """시나리오 보고서 생성 실행"""
         start_time = datetime.now(timezone.utc)
-        log_prefix = f"[{state.trace_id}]"
+        trace_id = state.trace_id
+        log_prefix = f"[{trace_id}]"
         logger.info(f"{log_prefix} Executing ScenarioReportNode...")
 
         config = state.config or {}
         processing_stats = state.processing_stats or {}
+        report_content = "# Scenario Report Generation Failed\n\nInitial error."
         error_message: Optional[str] = None
-        report_content = f"# Scenario Report Generation Failed\n\nJinja2 library not available." # 기본 오류
 
-        # Jinja2 및 템플릿 확인
-        if not JINJA2_AVAILABLE:
-            error_message = "Jinja2 library not available."
+        # --- 실행 시점 설정 로드 ---
+        self._load_runtime_config(config)
+        # --------------------------
+
+        jinja_env = self._setup_jinja_env(trace_id)
+        if not JINJA2_AVAILABLE or not jinja_env:
+            error_message = "Jinja2 library or environment not available."
+            report_content = f"# Scenario Report Generation Failed\n\n{error_message}"
+        elif not self.template_name:
+            error_message = "Template B filename not configured."
+            report_content = f"# Scenario Report Generation Failed\n\n{error_message}"
         else:
-            template_dir = config.get("template_dir")
-            template_name = config.get("progress_report_template_b_filename") # 설정에서 템플릿 B 파일명 로드
-            if not template_dir or not template_name:
-                error_message = "Template directory or filename for Scenario Report (Template B) not found in config."
-                report_content = f"# Report Generation Failed\n\n{error_message}"
-            elif not self._setup_jinja_env(template_dir):
-                error_message = f"Failed to initialize Jinja2 environment from directory: {template_dir}"
-                report_content = f"# Report Generation Failed\n\n{error_message}"
-
-        # 템플릿 준비 완료 시 보고서 생성 시도
-        if not error_message and self.template_env:
-            logger.info(f"{log_prefix} Generating scenario report using template: {template_name}")
+            logger.info(f"{log_prefix} Generating scenario report using template: {self.template_name}")
             try:
-                template = self.template_env.get_template(template_name)
-
+                template = jinja_env.get_template(self.template_name)
                 # --- 템플릿 데이터 준비 ---
                 logger.debug(f"{log_prefix} Preparing data for scenario report template...")
                 scenarios = state.scenarios or []
                 chosen_idea = state.chosen_idea
 
-                # 시나리오 텍스트 조합 (평가/제안용)
                 scenario_full_text = ""
                 if scenarios and len(scenarios) == 4:
-                    scenario_full_text = "\n\n".join([
-                        f"Panel {p.get('scene', i+1)}:\nDesc: {p.get('panel_description', '')}\nDialogue: {p.get('dialogue', '')}"
-                        for i, p in enumerate(scenarios)
-                    ])
-                    scenario_full_text = self._truncate_text(scenario_full_text, 2000) # 평가용 길이 제한
+                    # 텍스트 조합 (길이 제한 적용)
+                    panel_texts = [f"Panel {p.get('scene', i+1)}: Desc: {p.get('panel_description', '')} Dialogue: {p.get('dialogue', '')}"
+                                   for i, p in enumerate(scenarios)]
+                    scenario_full_text = "\n\n".join(panel_texts)
 
-                # LLM 평가 및 제안 (선택적 실행)
                 quality_scores = {"consistency": 0, "flow": 0, "dialogue": 0}
                 suggestions = ["Evaluation disabled or failed."]
-                if config.get("enable_scenario_evaluation", False) and self.llm_client and scenario_full_text:
-                     logger.info(f"{log_prefix} Performing LLM-based scenario evaluation/suggestion...")
-                     # 동시 실행 또는 순차 실행 선택 가능
-                     eval_task = self._evaluate_scenario_quality(scenario_full_text, config, state.trace_id)
-                     sugg_task = self._generate_suggestions(scenario_full_text, config, state.trace_id)
+                if self.enable_scenario_evaluation and self.llm_client and scenario_full_text:
+                     logger.info(f"{log_prefix} Performing LLM scenario evaluation/suggestion...")
+                     eval_task = self._evaluate_scenario_quality(scenario_full_text, trace_id)
+                     sugg_task = self._generate_suggestions(scenario_full_text, trace_id)
                      eval_results = await asyncio.gather(eval_task, sugg_task, return_exceptions=True)
-
                      if isinstance(eval_results[0], dict): quality_scores = eval_results[0]
-                     else: logger.error(f"{log_prefix} Evaluation task failed: {eval_results[0]}")
-
+                     else: logger.error(f"{log_prefix} Evaluation task failed: {eval_results[0]}", exc_info=isinstance(eval_results[0], Exception) and eval_results[0])
                      if isinstance(eval_results[1], list): suggestions = eval_results[1]
-                     else: logger.error(f"{log_prefix} Suggestion task failed: {eval_results[1]}")
-                else:
-                     logger.info(f"{log_prefix} Skipping LLM-based scenario evaluation/suggestion.")
+                     else: logger.error(f"{log_prefix} Suggestion task failed: {eval_results[1]}", exc_info=isinstance(eval_results[1], Exception) and eval_results[1])
+                else: logger.info(f"{log_prefix} Skipping LLM scenario evaluation/suggestion.")
 
-                # 타임스탬프 포맷팅
                 timestamp_str = state.timestamp or datetime.now(timezone.utc).isoformat()
                 formatted_timestamp = timestamp_str
                 try: formatted_timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00')).strftime("%Y-%m-%d %H:%M:%S %Z")
                 except ValueError: pass
 
-                # 컨텍스트 준비
                 context = {
                     "timestamp": formatted_timestamp,
-                    "trace_id": state.trace_id,
-                    "mapping_rows": self._prepare_mapping_rows(chosen_idea, scenarios),
-                    "chosen_title": self._truncate_text(chosen_idea.get('idea_title', 'N/A') if chosen_idea else 'N/A', 40),
-                    "link_usage": self._calculate_link_usage(state.fact_urls or [], state.opinion_urls or [], state.used_links or []),
+                    "trace_id": trace_id,
+                    "mapping_rows": self._prepare_mapping_rows(chosen_idea, scenarios, trace_id),
+                    "chosen_title": self._truncate_text(chosen_idea.get('idea_title', 'N/A') if chosen_idea else 'N/A', self.max_title_len),
+                    "link_usage": self._calculate_link_usage(state.fact_urls or [], state.opinion_urls or [], state.used_links or [], trace_id),
                     "quality_scores": quality_scores,
                     "suggestions": suggestions,
                     "prompt_hash": self._calculate_prompt_hash(state.scenario_prompt)
                 }
                 logger.debug(f"{log_prefix} Scenario report template data prepared.")
-
-                # 템플릿 렌더링
                 report_content = template.render(**context)
                 logger.info(f"{log_prefix} Scenario report generated successfully.")
 
             except jinja2.TemplateNotFound:
-                error_message = f"Template file '{template_name}' not found in directory '{template_dir}'."
+                error_message = f"Template '{self.template_name}' not found in '{self.template_dir}'."
                 logger.error(f"{log_prefix} {error_message}")
                 report_content = f"# Report Generation Failed\n\n{error_message}"
             except Exception as e:
-                error_message = f"Failed to prepare data or render scenario template: {str(e)}"
-                logger.exception(f"{log_prefix} {error_message}")
-                report_content = f"# Scenario Report Generation Error\n\nAn unexpected error occurred: {str(e)}"
+                error_message = f"Failed to prepare/render template '{self.template_name}': {str(e)}"
+                logger.exception(f"{log_prefix} Template rendering error:", exc_info=e)
+                report_content = f"# Scenario Report Generation Error\n\n{error_message}"
+
+        if error_message: logger.error(f"{log_prefix} Scenario report generation failed: {error_message}")
 
         # --- 처리 시간 및 상태 반환 ---
         end_time = datetime.now(timezone.utc)
-        node_processing_time = (end_time - start_time).total_seconds()
-        processing_stats['scenario_report_node_time'] = node_processing_time
-        logger.info(f"{log_prefix} ScenarioReportNode finished in {node_processing_time:.2f} seconds.")
+        processing_stats['scenario_report_node_time'] = (end_time - start_time).total_seconds() # 키 형식 통일
+        logger.info(f"{log_prefix} ScenarioReportNode finished in {processing_stats['scenario_report_node_time']:.2f} seconds.")
 
-        # TODO: LangSmith 로깅
-
-        # --- ComicState 업데이트를 위한 결과 반환 ---
+        # ComicState 업데이트
         update_data: Dict[str, Any] = {
-            "scenario_report": report_content, # 성공/실패 시 모두 생성된 내용을 담음
+            "scenario_report": report_content,
             "processing_stats": processing_stats,
-            "error_message": error_message # 생성 중 발생한 오류 메시지
+            "error_message": error_message
         }
         valid_keys = set(ComicState.model_fields.keys())
         return {k: v for k, v in update_data.items() if k in valid_keys}

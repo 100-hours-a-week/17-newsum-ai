@@ -1,326 +1,328 @@
-# app/nodes/06_opinion_scraper_node.py
+# app/nodes/06_opinion_scraper_node.py (Improved Version)
 
 import asyncio
 import random
 import re
 import traceback
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Set
 from urllib.parse import urlparse
 from datetime import datetime, timezone
 from collections import defaultdict
 
-# --- 리팩토링된 임포트 ---
+# 프로젝트 구성 요소 임포트
 from app.utils.logger import get_logger
 from app.workflows.state import ComicState
-# 필요한 Tool 임포트 (경로 및 파일명 확인)
 from app.tools.social.twitter import TwitterTool
 from app.tools.social.reddit import RedditTool
 from app.tools.search.google import GoogleSearchTool
-from app.tools.scraping.selenium_scraper import SeleniumScraperTool # 신규 Selenium 도구
-from app.config.settings import settings
+from app.tools.scraping.selenium_scraper import SeleniumScraperTool
+from app.config.settings import settings # 기본 설정 참조용
 
 # 로거 설정
-logger = get_logger("OpinionScraperNode")
+logger = get_logger(__name__)
 
 class OpinionScraperNode:
     """
-    (리팩토링됨) 수집된 의견 URL에 대해 상세 콘텐츠(텍스트, 작성자, 시간, 좋아요 등)를 스크랩합니다.
-    API 우선 접근 방식을 사용하며, 실패 또는 해당 없을 시 Selenium 기반 웹 스크래핑으로 대체합니다.
-    주입된 도구들을 사용하여 실제 API 호출 및 스크래핑 작업을 위임합니다.
+    수집된 의견 URL에 대해 상세 콘텐츠(텍스트, 작성자 등)를 스크랩합니다.
+    API 우선 접근 방식을 사용하며, 실패 시 Selenium 기반 웹 스크래핑으로 대체합니다.
+    - 설정은 `state.config`를 우선 사용하며, 없으면 `settings`의 기본값을 사용합니다.
     """
 
     # 상태 입력/출력 정의 (참고용)
-    inputs: List[str] = ["opinion_urls", "trace_id", "used_links", "config", "processing_stats"]
+    inputs: List[str] = ["opinion_urls", "trace_id", "comic_id", "used_links", "config", "processing_stats"]
     outputs: List[str] = ["opinions_raw", "used_links", "processing_stats", "error_message"]
 
+    # 의존성 주입
     def __init__(
         self,
         twitter_tool: Optional[TwitterTool] = None,
         reddit_tool: Optional[RedditTool] = None,
-        google_tool: Optional[GoogleSearchTool] = None,
-        selenium_tool: Optional[SeleniumScraperTool] = None # Selenium 도구 주입
+        Google_Search_tool: Optional[GoogleSearchTool] = None, # 이름 일관성 유지
+        selenium_tool: Optional[SeleniumScraperTool] = None
+        # langsmith_service: Optional[LangSmithService] = None
     ):
-        """
-        OpinionScraperNode 초기화. API 및 스크래핑 도구를 주입받습니다.
-
-        Args:
-            twitter_tool (Optional[TwitterTool]): 트위터 상호작용 도구.
-            reddit_tool (Optional[RedditTool]): 레딧 상호작용 도구.
-            google_tool (Optional[GoogleSearchTool]): 구글 검색 도구 (주로 YouTube API용).
-            selenium_tool (Optional[SeleniumScraperTool]): Selenium 웹 스크래핑 도구.
-        """
         self.twitter_tool = twitter_tool
         self.reddit_tool = reddit_tool
-        self.google_tool = google_tool
+        self.Google_Search_tool = Google_Search_tool # 속성명도 통일
         self.selenium_tool = selenium_tool
+        # self.langsmith = langsmith_service
 
-        # 필수 도구 누락 시 경고 로깅
-        if not self.selenium_tool:
-            logger.warning("SeleniumScraperTool이 주입되지 않았습니다. 웹 스크래핑 대체 기능이 비활성화됩니다.")
-        # API 도구 누락 시 해당 API 우선 접근 불가
-        if not self.twitter_tool: logger.warning("TwitterTool이 주입되지 않아 트위터 API 우선 접근이 비활성화됩니다.")
-        if not self.reddit_tool: logger.warning("RedditTool이 주입되지 않아 레딧 API 우선 접근이 비활성화됩니다.")
-        if not self.google_tool: logger.warning("GoogleSearchTool이 주입되지 않아 유튜브 API 우선 접근이 비활성화됩니다.")
+        if not self.selenium_tool: logger.warning("SeleniumScraperTool not injected. Web scraping fallback disabled.")
+        if not self.twitter_tool: logger.warning("TwitterTool not injected. Twitter API priority access disabled.")
+        if not self.reddit_tool: logger.warning("RedditTool not injected. Reddit API priority access disabled.")
+        if not self.Google_Search_tool: logger.warning("GoogleSearchTool not injected. YouTube API priority access disabled.")
+        logger.info("OpinionScraperNode initialized.")
+
+    # --- 내부 설정 로드 (실행 시점) ---
+    def _load_runtime_config(self, config: Dict[str, Any]):
+        """실행 시 필요한 설정을 config 또는 settings에서 로드"""
+        # 노드별 동시성 설정
+        self.concurrency_limit = config.get('opinion_scraper_concurrency', settings.OPINION_SCRAPER_CONCURRENCY)
+        # 최소 텍스트 길이 설정
+        self.min_text_length = config.get('min_extracted_text_length', settings.MIN_EXTRACTED_TEXT_LENGTH)
+        # 타겟 커뮤니티/블로그 도메인 (필터링용)
+        self.target_community_domains = config.get('target_community_domains', settings.TARGET_COMMUNITY_DOMAINS)
+        self.target_blog_domains = config.get('target_blog_domains', settings.TARGET_BLOG_DOMAINS)
+
+        logger.debug(f"Runtime config loaded. Concurrency: {self.concurrency_limit}, MinTextLen: {self.min_text_length}")
+        logger.debug(f"Target Community Domains: {self.target_community_domains}")
+        logger.debug(f"Target Blog Domains: {self.target_blog_domains}")
 
 
-    # --- 플랫폼 식별 및 ID 추출 (노드 레벨 유지) ---
+    # --- 플랫폼 식별 및 ID 추출 ---
+    # 참고: 이 로직은 플랫폼 URL 구조 변경에 취약할 수 있음. 지속적인 관리가 필요.
     def _identify_platform(self, url: str) -> str:
-        """URL을 기반으로 플랫폼을 식별합니다."""
+        """URL 기반 플랫폼 식별 (개선된 휴리스틱)"""
+        if not url: return 'Unknown'
         try:
-            domain = urlparse(url).netloc.lower()
+            parsed = urlparse(url)
+            domain = parsed.netloc.lower()
+
             if 'twitter.com' in domain or 'x.com' in domain: return 'Twitter'
             if 'reddit.com' in domain: return 'Reddit'
-            # googleusercontent URL 형식 개선 (Node 04 반환 형식과 일치 필요)
-            if 'youtube.com' in domain or 'youtu.be' in domain or 'googleusercontent.com/youtube.com' in url: return 'YouTube'
+            # youtube.com 또는 youtu.be
+            if 'youtube.com' in domain or 'youtu.be' in domain: return 'YouTube'
+            # 설정된 커뮤니티 도메인 확인
+            if any(domain == d or domain.endswith('.' + d) for d in self.target_community_domains): return 'Community'
+            # 설정된 블로그 도메인 확인
+            if any(domain == d or domain.endswith('.' + d) for d in self.target_blog_domains): return 'Blog'
+            # 기타 기본적인 블로그 패턴 확인 (보수적)
+            if '/blog/' in parsed.path.lower() or '/post/' in parsed.path.lower(): return 'Blog'
 
-            # TODO: 설정에서 로드된 커뮤니티 도메인 목록과 비교하여 'Community' 식별 로직 추가
-            # community_domains = settings.TARGET_COMMUNITY_DOMAINS
-            # if any(domain == comm_domain or domain.endswith('.' + comm_domain) for comm_domain in community_domains):
-            #     return 'Community'
-
-            # 블로그 플랫폼 식별 (단순 버전)
-            blog_platforms = [ "blogspot.com", "wordpress.com", "medium.com", "tumblr.com",
-                               "tistory.com", "blog.naver.com", "brunch.co.kr", "velog.io", "substack.com" ]
-            if any(domain == platform or domain.endswith('.' + platform) for platform in blog_platforms):
-                return 'Blog'
-
-            # 위 경우에 해당하지 않으면 일반 웹사이트로 간주
-            return 'OtherWeb'
+            return 'OtherWeb' # 그 외 웹사이트
         except Exception:
-            logger.warning(f"URL '{url}'에서 플랫폼 식별 실패")
+            logger.warning(f"Failed to identify platform for URL: {url}")
             return 'Unknown'
 
     def _extract_platform_ids(self, url: str, platform: str) -> Dict[str, Optional[str]]:
-        """플랫폼에 따라 URL에서 관련 ID를 추출합니다."""
+        """플랫폼에 따라 URL에서 관련 ID 추출 (개선된 정규식)"""
         ids = {"tweet_id": None, "submission_id": None, "comment_id": None, "video_id": None}
+        if not url: return ids
         try:
             if platform == 'Twitter':
-                # 트윗 ID 추출 (status/statuses 다음 숫자)
                 match = re.search(r'/status(?:es)?/(\d+)', url)
                 if match: ids['tweet_id'] = match.group(1)
             elif platform == 'Reddit':
-                # 레딧 게시글/댓글 ID 추출
-                match = re.search(r'/comments/([a-z0-9]+)(?:/[^/]+/([a-z0-9]+))?', url)
+                match = re.search(r'/comments/([a-zA-Z0-9]+)(?:/[^/]+/([a-zA-Z0-9]+))?', url)
                 if match:
-                     ids['submission_id'] = match.group(1) # 게시글 ID
-                     ids['comment_id'] = match.group(2) # 댓글 ID (있을 경우)
+                     ids['submission_id'] = match.group(1)
+                     ids['comment_id'] = match.group(2) # 댓글 ID (Optional)
             elif platform == 'YouTube':
-                 # 유튜브 비디오 ID 추출 (다양한 URL 형식 지원)
-                 match_v = re.search(r'[?&]v=([^&]+)', url) # ?v= 형식
-                 match_short = re.search(r'youtu\.be/([^?&]+)', url) # youtu.be/ 형식
-                 match_embed = re.search(r'/embed/([^?&]+)', url) # /embed/ 형식
-                 # googleusercontent 형식 (가정)
-                 match_guc = re.search(r'googleusercontent.com/youtube.com/\d([a-zA-Z0-9_-]+)', url)
-
-                 if match_v: ids['video_id'] = match_v.group(1)
-                 elif match_short: ids['video_id'] = match_short.group(1)
-                 elif match_embed: ids['video_id'] = match_embed.group(1)
-                 elif match_guc: ids['video_id'] = match_guc.group(1)
-
+                 # 다양한 YouTube URL 형식 처리
+                 patterns = [
+                     r'[?&]v=([^&]+)',           # youtube.com/watch?v=VIDEO_ID
+                     r'youtu\.be/([^?&]+)',      # youtu.be/VIDEO_ID
+                     r'/embed/([^?&]+)',         # youtube.com/embed/VIDEO_ID
+                     r'/shorts/([^?&]+)'        # youtube.com/shorts/VIDEO_ID
+                 ]
+                 for pattern in patterns:
+                      match = re.search(pattern, url)
+                      if match:
+                           ids['video_id'] = match.group(1)
+                           break # 첫 번째 매칭 사용
         except Exception as e:
-            logger.warning(f"'{platform}' URL '{url}'에서 ID 추출 실패: {e}")
+            logger.warning(f"Failed to extract IDs from {platform} URL '{url}': {e}")
         return ids
 
     # --- API 및 Selenium 호출 로직 (도구 위임) ---
-
     async def _fetch_opinion_api(self, platform: str, ids: Dict[str, Optional[str]], trace_id: str, comic_id: str) -> Optional[Dict[str, Any]]:
-        """플랫폼별 API 도구를 호출하여 상세 정보를 가져옵니다."""
+        """플랫폼별 API 도구를 호출하여 상세 정보 가져오기 (도구 내 재시도 가정)"""
         extra_log_data = {'trace_id': trace_id, 'comic_id': comic_id, 'platform': platform, 'ids': ids}
         api_result = None
         try:
             if platform == 'Twitter' and ids.get('tweet_id') and self.twitter_tool:
                  api_result = await self.twitter_tool.get_tweet_details(ids['tweet_id'], trace_id)
             elif platform == 'Reddit' and self.reddit_tool:
-                 if ids.get('comment_id'): # 댓글 ID가 있으면 댓글 정보 우선 조회
-                      api_result = await self.reddit_tool.get_comment_details(ids['comment_id'], trace_id)
-                 elif ids.get('submission_id'): # 댓글 ID 없고 게시글 ID만 있으면 게시글 정보 조회
-                      api_result = await self.reddit_tool.get_submission_details(ids['submission_id'], trace_id)
-            elif platform == 'YouTube' and ids.get('video_id') and self.google_tool:
-                 api_result = await self.google_tool.get_youtube_details(ids['video_id'], trace_id)
+                 # 댓글 ID 우선 조회, 없으면 게시글 ID 조회
+                 comment_id = ids.get('comment_id')
+                 submission_id = ids.get('submission_id')
+                 if comment_id: api_result = await self.reddit_tool.get_comment_details(comment_id, trace_id)
+                 elif submission_id: api_result = await self.reddit_tool.get_submission_details(submission_id, trace_id)
+            elif platform == 'YouTube' and ids.get('video_id') and self.Google_Search_tool:
+                 # YouTube 상세 정보는 GoogleSearchTool의 다른 메서드 사용 가정
+                 api_result = await self.Google_Search_tool.get_youtube_details(ids['video_id'], trace_id)
 
-            if api_result:
-                 logger.info(f"API 통해 데이터 가져오기 성공", extra=extra_log_data)
+            if api_result: logger.info(f"Successfully fetched data via API.", extra=extra_log_data)
             return api_result
         except Exception as api_err:
-            # 도구 내부에서 재시도 후에도 실패한 경우
-            logger.warning(f"API 호출 실패 (재시도 후): {api_err}", extra=extra_log_data)
-            return None # 실패 시 None 반환
-
-    async def _scrape_with_selenium(self, url: str, platform: str, trace_id: str, comic_id: str) -> Optional[Dict[str, Any]]:
-        """SeleniumScraperTool을 호출하여 웹 스크래핑을 수행합니다."""
-        extra_log_data = {'trace_id': trace_id, 'comic_id': comic_id, 'url': url, 'platform': platform}
-        if not self.selenium_tool:
-            logger.warning("Selenium 도구가 없어 스크래핑 불가", extra=extra_log_data)
+            logger.warning(f"API call failed (after internal retries): {api_err}", extra=extra_log_data)
             return None
 
-        logger.debug(f"Selenium 스크래핑 시도...", extra=extra_log_data)
+    async def _scrape_with_selenium(self, url: str, platform: str, trace_id: str, comic_id: str) -> Optional[Dict[str, Any]]:
+        """SeleniumScraperTool을 호출하여 웹 스크래핑 수행 (도구 내 재시도 가정)"""
+        extra_log_data = {'trace_id': trace_id, 'comic_id': comic_id, 'url': url, 'platform': platform}
+        if not self.selenium_tool:
+            logger.warning("Selenium tool unavailable, cannot scrape.", extra=extra_log_data)
+            return None
+
+        logger.debug(f"Attempting Selenium scraping...", extra=extra_log_data)
         try:
-            # Selenium 도구의 scrape_url 메서드 호출
             scraped_data = await self.selenium_tool.scrape_url(url, platform, trace_id, comic_id)
-            if scraped_data:
-                logger.info(f"Selenium 스크래핑 성공", extra=extra_log_data)
-            else:
-                logger.warning(f"Selenium 스크래핑 결과 없음", extra=extra_log_data)
+            if scraped_data: logger.info(f"Selenium scraping successful.", extra=extra_log_data)
+            else: logger.warning(f"Selenium scraping returned no data.", extra=extra_log_data)
             return scraped_data
         except Exception as sel_err:
-            # Selenium 도구 내부에서 재시도 후에도 실패한 경우
-            logger.error(f"Selenium 스크래핑 최종 실패: {sel_err}", exc_info=True, extra=extra_log_data)
-            return None # 실패 시 None 반환
+            logger.error(f"Selenium scraping ultimately failed: {sel_err}", exc_info=True, extra=extra_log_data)
+            return None
 
     # --- 단일 URL 처리 로직 ---
-    async def _process_url(self, url_info: Dict[str, str], config: Dict, trace_id: str, comic_id: str) -> Optional[Dict[str, Any]]:
-        """
-        단일 의견 URL 처리: 플랫폼 식별, ID 추출, API 우선 시도 후 Selenium 대체.
-        """
+    async def _process_url(self, url_info: Dict[str, Any], trace_id: str, comic_id: str) -> Optional[Dict[str, Any]]:
+        """단일 의견 URL 처리: 플랫폼 식별, ID 추출, API 우선 시도 후 Selenium 대체."""
         url = url_info.get('url')
-        source = url_info.get('source', 'Unknown') # Node 04에서 전달된 소스 정보
-        extra_log_data = {'trace_id': trace_id, 'comic_id': comic_id, 'url': url, 'source': source}
+        # Node 04에서 전달된 원본 소스 및 키워드 포함
+        source_info = {
+            "original_source": url_info.get('source', 'Unknown'),
+            "search_keyword": url_info.get('search_keyword', 'N/A')
+        }
+        extra_log_data = {'trace_id': trace_id, 'comic_id': comic_id, 'url': url, **source_info}
         if not url: return None
 
-        logger.info(f"의견 URL 처리 시작...", extra=extra_log_data)
-        platform = self._identify_platform(url) # 플랫폼 식별
-        ids = self._extract_platform_ids(url, platform) # ID 추출
+        logger.info(f"Processing opinion URL: {url[:80]}...", extra=extra_log_data)
+        platform = self._identify_platform(url)
+        ids = self._extract_platform_ids(url, platform)
         scraped_data: Optional[Dict[str, Any]] = None
-        method_used = "Unknown" # 사용된 방법 기록
+        method_used = "Unknown"
 
-        # 1. API 우선 시도 (해당 플랫폼 및 ID 존재 시)
-        if platform in ['Twitter', 'Reddit', 'YouTube'] and any(v for k, v in ids.items() if k.endswith('_id')):
-            logger.debug(f"API 우선 접근 시도 ({platform})", extra=extra_log_data)
+        # 1. API 우선 시도
+        can_try_api = platform in ['Twitter', 'Reddit', 'YouTube'] and any(v for k, v in ids.items() if k.endswith('_id'))
+        if can_try_api:
+            logger.debug(f"Attempting API access for {platform}...", extra=extra_log_data)
             scraped_data = await self._fetch_opinion_api(platform, ids, trace_id, comic_id)
-            if scraped_data:
-                method_used = f"API ({platform})"
+            if scraped_data: method_used = f"API ({platform})"
 
-        # 2. Selenium 대체 시도 (API 실패 또는 해당 없음 & Selenium 도구 사용 가능 시)
+        # 2. Selenium 대체 시도
         if not scraped_data and self.selenium_tool:
-             logger.debug(f"API 실패 또는 해당 없음. Selenium 대체 스크래핑 시도 ({platform})", extra=extra_log_data)
+             logger.debug(f"API failed or not applicable. Trying Selenium fallback for {platform}...", extra=extra_log_data)
              scraped_data = await self._scrape_with_selenium(url, platform, trace_id, comic_id)
-             if scraped_data:
-                  method_used = f"Selenium ({platform})"
-        elif not scraped_data and not self.selenium_tool:
-             logger.warning("API 접근 불가 및 Selenium 도구 없음. 스크래핑 불가.", extra=extra_log_data)
+             if scraped_data: method_used = f"Selenium ({platform})"
+        elif not scraped_data:
+             logger.warning(f"No data fetched via API and Selenium tool unavailable/failed.", extra=extra_log_data)
 
         # 3. 결과 포맷팅 및 반환
         if scraped_data:
-             # 결과 딕셔너리 구성
-             result = {
-                 "url": url, # Node 04에서 받은 원본 URL
-                 "source": source, # Node 04에서 받은 원본 소스
-                 "platform": platform, # 식별된 플랫폼
-                 "method": method_used, # 사용된 추출 방법
-                 "text": scraped_data.get("text", ""), # 추출된 텍스트
-                 "author": scraped_data.get("author"), # 추출된 작성자
-                 "timestamp": scraped_data.get("timestamp"), # 추출된 타임스탬프
-                 "likes": scraped_data.get("likes", 0), # 추출된 좋아요 수
-                 "title": scraped_data.get("title"), # 추출된 제목 (있을 경우)
-                 # "raw_data": scraped_data.get("raw_data") # 원본 API/HTML 데이터 (필요 시)
-             }
+             text_content = scraped_data.get("text", "")
              # 최소 텍스트 길이 검증
-             if not result["text"] or len(result["text"]) < settings.MIN_EXTRACTED_TEXT_LENGTH:
-                  logger.warning(f"추출된 텍스트가 너무 짧음 ({len(result['text'])}자). 처리 실패 간주. ({method_used})", extra=extra_log_data)
+             if not text_content or len(text_content) < self.min_text_length:
+                  logger.warning(f"Extracted text too short ({len(text_content)} chars, min: {self.min_text_length}). Discarding. ({method_used})", extra=extra_log_data)
                   return None
+
+             # 최종 결과 구조화
+             result = {
+                 "url": url,
+                 "platform": platform,
+                 "method": method_used,
+                 "text": text_content,
+                 "author": scraped_data.get("author"),
+                 "timestamp": scraped_data.get("timestamp"),
+                 "likes": scraped_data.get("likes", 0),
+                 "title": scraped_data.get("title"),
+                 # 원본 소스 정보 포함
+                 **source_info
+             }
              return result
         else:
-            # 최종 실패
-            logger.warning(f"모든 방법으로 데이터 추출 실패.", extra=extra_log_data)
+            logger.warning(f"Failed to extract data using all available methods.", extra=extra_log_data)
             return None
 
-    # --- 메인 실행 메서드 ---
-    async def execute(self, state: ComicState) -> Dict[str, Any]:
+    # --- 메인 실행 메서드 (run으로 이름 변경) ---
+    async def run(self, state: ComicState) -> Dict[str, Any]:
         """주입된 도구를 사용하여 의견 스크래핑 프로세스를 실행합니다."""
         start_time = datetime.now(timezone.utc)
         comic_id = state.comic_id
-        trace_id = state.trace_id or comic_id or "unknown_trace"
+        trace_id = state.trace_id
         extra_log_data = {'trace_id': trace_id, 'comic_id': comic_id}
+        log_prefix = f"[{trace_id}]"
 
-        logger.info("OpinionScraperNode 실행 시작...", extra=extra_log_data)
+        logger.info(f"{log_prefix} OpinionScraperNode starting...")
 
-        # 상태에서 필요한 정보 로드
-        opinion_urls = state.opinion_urls
-        config = state.config
-        current_used_links = state.used_links
-        processing_stats = state.processing_stats
+        opinion_urls = state.opinion_urls or []
+        config = state.config or {}
+        current_used_links = state.used_links or []
+        processing_stats = state.processing_stats or {}
 
-        # 스크랩할 URL 없으면 종료
         if not opinion_urls:
-            logger.warning("스크랩할 의견 URL이 없습니다.", extra=extra_log_data)
-            return {"opinions_raw": [], "used_links": current_used_links}
+            logger.warning(f"{log_prefix} No opinion URLs to scrape.", extra=extra_log_data)
+            processing_stats['opinion_scraper_node_time'] = (datetime.now(timezone.utc) - start_time).total_seconds()
+            return {"opinions_raw": [], "used_links": current_used_links, "processing_stats": processing_stats}
 
-        logger.info(f"{len(opinion_urls)}개의 의견 URL 스크래핑 시작...", extra=extra_log_data)
+        # --- 실행 시점 설정 로드 ---
+        self._load_runtime_config(config)
+        semaphore = asyncio.Semaphore(self.concurrency_limit)
+        # --------------------------
 
-        # 동시성 제한 설정 (설정값 또는 기본값 사용)
-        concurrency_limit = config.get('opinion_scraper_concurrency', settings.OPINION_SCRAPER_CONCURRENCY)
-        semaphore = asyncio.Semaphore(concurrency_limit)
+        logger.info(f"{log_prefix} Starting scraping for {len(opinion_urls)} opinion URLs (Concurrency: {self.concurrency_limit})...", extra=extra_log_data)
 
-        # --- 태스크 생성 및 실행 ---
         tasks = []
         for url_info in opinion_urls:
-             async def task_with_semaphore(ui): # 세마포 래퍼
+             async def task_with_semaphore(ui):
                   async with semaphore:
-                       return await self._process_url(ui, config, trace_id, comic_id)
-             tasks.append(task_with_semaphore(url_info)) # 래핑된 태스크 추가
+                       return await self._process_url(ui, trace_id, comic_id)
+             tasks.append(task_with_semaphore(url_info))
 
-        # 모든 태스크 병렬 실행 및 결과 취합
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # --- 결과 처리 ---
-        opinions_raw: List[Dict[str, Any]] = [] # 최종 결과 목록
-        successful_urls = set() # 성공한 원본 URL 추적용
-        failed_count = 0 # 실패 카운터
+        opinions_raw: List[Dict[str, Any]] = []
+        successful_urls = set()
+        failed_count = 0
+        task_errors: List[str] = []
 
-        # gather 결과 순회
         for i, res in enumerate(results):
-            original_url = opinion_urls[i].get('url', 'Unknown URL')
-            if isinstance(res, dict) and res is not None: # 성공 시
+            original_url = opinion_urls[i].get('url', f'Unknown_URL_{i}')
+            if isinstance(res, dict) and res is not None:
                 opinions_raw.append(res)
-                successful_urls.add(original_url) # 성공 목록에 원본 URL 추가
-            elif isinstance(res, Exception): # gather가 예외 반환 시
-                logger.error(f"스크래핑 태스크 실패 (gather 예외): {original_url} | 예외: {res}", exc_info=res, extra=extra_log_data)
-                failed_count += 1
-            # _process_url에서 None 반환 시 (실패 또는 건너뜀)는 이미 로깅됨
+                successful_urls.add(original_url)
+            else:
+                 failed_count += 1
+                 # 래퍼 내부 또는 gather 에서 발생한 예외 로깅 및 에러 메시지 기록
+                 if isinstance(res, Exception):
+                      err_msg = f"Scraping task failed for {original_url}: {res}"
+                      logger.error(f"{log_prefix} {err_msg}", exc_info=res)
+                      task_errors.append(err_msg)
+                 # else: res is None (처리 실패 또는 필터링됨, _process_url에서 로깅)
 
-        successful_count = len(opinions_raw)
-        total_attempted = len(opinion_urls)
-        final_failed_count = total_attempted - successful_count # 최종 실패 수 계산
-
-        logger.info(f"의견 스크래핑 완료. 성공: {successful_count}. 실패/건너<0xEB><0x9C><0x94>: {final_failed_count}.", extra=extra_log_data)
+        logger.info(f"{log_prefix} Opinion scraping complete. Success: {len(successful_urls)}, Failed/Skipped: {failed_count}.", extra=extra_log_data)
 
         # --- used_links 상태 업데이트 ---
         updated_used_links = []
+        links_updated_count = 0
         for link in current_used_links:
             url = link.get('url')
-            # 이 노드의 입력 URL이었는지 확인
             is_opinion_input = any(op_url.get('url') == url for op_url in opinion_urls)
 
-            if is_opinion_input: # 이 노드에서 처리 시도한 URL인 경우
-                 if url in successful_urls: # 성공했으면
-                      link['purpose'] = link.get('purpose', '').replace('(Opinion)', '(Scraped Opinion)') # 목적 업데이트
-                      link['status'] = "processed" # 상태: 처리됨
-                 else: # 실패했으면
-                      link['purpose'] = link.get('purpose', '') + " (Opinion Scraping Failed)" # 실패 정보 추가
-                      link['status'] = "failed" # 상태: 실패
-            updated_used_links.append(link) # 업데이트된 정보 또는 원본 링크 추가
+            if is_opinion_input:
+                 links_updated_count += 1
+                 if url in successful_urls:
+                      link['purpose'] = link.get('purpose', '').replace('(Opinion)', '(Scraped Opinion)')
+                      link['status'] = "processed"
+                 else:
+                      link['purpose'] += " (Opinion Scraping Failed/Filtered)"
+                      link['status'] = "failed_or_filtered" # 상태 명시
+            updated_used_links.append(link)
+        logger.info(f"{log_prefix} Updated status for {links_updated_count} opinion link entries in used_links.")
 
-
-        # --- Selenium 드라이버 종료 (노드 실행 끝날 때) ---
+        # --- Selenium 드라이버 종료 (존재 시) ---
         if self.selenium_tool:
-            # Selenium 도구의 close 메서드 호출 (내부적으로 quit_driver 호출)
-            await self.selenium_tool.close(trace_id, comic_id)
+            try:
+                 # close 메서드가 비동기일 수 있음
+                 await self.selenium_tool.close(trace_id, comic_id)
+            except Exception as close_err:
+                 logger.error(f"{log_prefix} Error closing Selenium tool: {close_err}", exc_info=True)
 
         # --- 시간 기록 및 상태 업데이트 반환 ---
         end_time = datetime.now(timezone.utc)
-        node_processing_time = (end_time - start_time).total_seconds()
-        processing_stats['node_06_opinion_scraper_time'] = node_processing_time # 통계 기록
-        logger.info(f"OpinionScraperNode 완료. 소요 시간: {node_processing_time:.2f} 초.", extra=extra_log_data)
+        processing_stats['opinion_scraper_node_time'] = (end_time - start_time).total_seconds() # 키 형식 통일
+        logger.info(f"{log_prefix} OpinionScraperNode finished. Elapsed time: {processing_stats['opinion_scraper_node_time']:.2f} seconds.", extra=extra_log_data)
+
+        final_error_message = "; ".join(task_errors) if task_errors else None
+        if final_error_message:
+             logger.warning(f"{log_prefix} Some errors occurred during opinion scraping: {final_error_message}")
 
         # 상태 업데이트 딕셔너리 생성
         updates = {
-            "opinions_raw": opinions_raw, # 스크랩된 의견 목록
-            "used_links": updated_used_links, # 업데이트된 사용 링크 목록
-            "processing_stats": processing_stats # 업데이트된 처리 통계
+            "opinions_raw": opinions_raw,
+            "used_links": updated_used_links,
+            "processing_stats": processing_stats,
+            "error_message": final_error_message
         }
-        # 이 노드 관련 이전 오류 메시지 상태 초기화
-        current_error = state.error_message
-        if current_error and "OpinionScraperNode" in current_error:
-             updates["error_message"] = None # 성공 시 None으로 설정
-
-        return updates # 상태 업데이트 반환
+        valid_keys = set(ComicState.model_fields.keys())
+        return {k: v for k, v in updates.items() if k in valid_keys}

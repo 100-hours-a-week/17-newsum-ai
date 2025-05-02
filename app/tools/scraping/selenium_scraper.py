@@ -297,6 +297,8 @@ class SeleniumScraperTool:
 
         return scraped_data
 
-    async def close(self, trace_id: str, comic_id: str):
+    async def close(self):
         """도구 사용 완료 후 WebDriver 인스턴스를 종료합니다."""
-        self.quit_driver(trace_id, comic_id)
+        # quit_driver 호출 시 임시 ID 또는 None 전달 (quit_driver 구현에 따라 다름)
+        # quit_driver 내부 로깅에서 해당 ID 사용 시 None 체크 필요
+        self.quit_driver(trace_id="shutdown", comic_id="cleanup")

@@ -74,9 +74,24 @@ class Settings:
     REDDIT_PASSWORD: Optional[str] = os.getenv("REDDIT_PASSWORD") # 선택적: Reddit 스크립트 인증용 비밀번호.
 
     # --- Redis Cache/DB ---
-    # 캐싱/데이터 저장에 Redis 사용 시 필요합니다.
-    REDIS_HOST: str = os.getenv("REDIS_HOST", "localhost") # 권장: 운영 환경에서는 'localhost' 대신 실제 Redis 호스트 주소 설정 권장.
-    REDIS_PASSWORD: Optional[str] = os.getenv("REDIS_PASSWORD") # 필수 (Redis 비밀번호 설정 시): Redis 인증 비밀번호.
+    REDIS_HOST: str = os.getenv("REDIS_HOST", "localhost")
+    REDIS_PORT: int = int(os.getenv("REDIS_PORT", "6379"))
+    REDIS_PASSWORD: Optional[str] = os.getenv("REDIS_PASSWORD")
+    REDIS_DB: int = int(os.getenv("REDIS_DB", "0"))  # 기본 캐시/DB 번호
+
+    # --- LangGraph Redis Checkpointer URL ---
+    # 환경 변수 REDIS_CHECKPOINT_URL이 있으면 사용하고, 없으면 기본값 생성
+    # 체크포인트용 DB는 캐시(DB 0)와 분리하기 위해 다른 번호(예: 1) 권장
+    _default_checkpoint_db = 1
+    _redis_checkpoint_host = os.getenv("REDIS_HOST", "localhost")  # 체크포인트용 호스트가 다를 수 있다면 별도 변수 사용
+    _redis_checkpoint_port = int(os.getenv("REDIS_PORT", "6379"))  # 체크포인트용 포트가 다를 수 있다면 별도 변수 사용
+    _redis_checkpoint_password = os.getenv("REDIS_PASSWORD")  # 동일 비밀번호 가정
+
+    _redis_checkpoint_base = f"redis://{_redis_checkpoint_host}:{_redis_checkpoint_port}/{_default_checkpoint_db}"
+    if _redis_checkpoint_password:
+        _redis_checkpoint_base = f"redis://:{_redis_checkpoint_password}@{_redis_checkpoint_host}:{_redis_checkpoint_port}/{_default_checkpoint_db}"
+
+    REDIS_CHECKPOINT_URL: str = os.getenv("REDIS_CHECKPOINT_URL", _redis_checkpoint_base)
 
     # --- LangSmith (Optional Observability) ---
     # LangSmith 연동 시 필요합니다.
@@ -86,6 +101,10 @@ class Settings:
     # UPLOAD_TO_S3=True 일 경우 아래 값들이 필수입니다.
     S3_BUCKET_NAME: Optional[str] = os.getenv("S3_BUCKET_NAME") # 필수 (S3 업로드 사용 시): 대상 S3 버킷 이름.
     AWS_REGION: Optional[str] = os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION")) # 필수 (S3 업로드 사용 시): 대상 S3 버킷의 AWS 리전.
+    LOCAL_STORAGE_PATH: str = os.getenv(  # Optional[str] 대신 str 로 변경하고 기본값 지정
+        "LOCAL_STORAGE_PATH",
+        os.path.join(PROJECT_ROOT_DIR, 'storage', 'local_fallback')  # 기본 로컬 저장 경로
+    )
 
     # ======================================================================
     # 코어 설정 및 기능 활성화 플래그 (Core Settings & Feature Flags)
@@ -163,6 +182,8 @@ class Settings:
     # --- 검색/트렌드 도구 동작 튜닝 ---
     Google_Search_API_RETRIES: int = int(os.getenv("Google_Search_API_RETRIES", TOOL_RETRY_ATTEMPTS)) # Google Search 전용 재시도 (기본 도구 재시도 따름).
     # Google Trends (PyTrends)
+    TREND_GOOGLE_WEIGHT: float = float(os.getenv("TREND_GOOGLE_WEIGHT", "0.6"))
+    TREND_TWITTER_WEIGHT: float = float(os.getenv("TREND_TWITTER_WEIGHT", "0.4"))
     PYTRENDS_TIMEFRAME: str = os.getenv("PYTRENDS_TIMEFRAME", "today 7-d") # Google Trends 조회 기간.
     PYTRENDS_GEO: str = os.getenv("PYTRENDS_GEO", "") # Google Trends 지역 필터 (e.g., 'US', 'KR').
     PYTRENDS_HL: str = os.getenv("PYTRENDS_HL", "en-US") # Google Trends 인터페이스 언어.

@@ -32,55 +32,49 @@ class StorageClient:
         self,
         bucket_name: Optional[str] = None,
         region_name: Optional[str] = None,
-        # access_key_id: Optional[str] = None, # 비권장: 코드에 키 직접 명시 X
-        # secret_access_key: Optional[str] = None, # 비권장: 코드에 키 직접 명시 X
         logger_name: str = "StorageClient"
     ):
-        """
-        스토리지 클라이언트 초기화.
-
-        Args:
-            bucket_name (Optional[str]): 사용할 S3 버킷 이름. 기본값: 환경변수 S3_BUCKET_NAME.
-            region_name (Optional[str]): AWS 리전 이름. 기본값: 환경변수 AWS_REGION 또는 AWS_DEFAULT_REGION.
-            logger_name (str): 로거 인스턴스 이름.
-        """
         self.logger = get_logger(logger_name)
         self.s3_client = None
         self._session = None
+        self.use_local_fallback = False # 로컬 폴백 사용 여부 플래그
+        self.local_storage_path = settings.LOCAL_STORAGE_PATH # 설정에서 로컬 경로 읽기
 
         if not AIOBOTOCORE_AVAILABLE:
             self.logger.error("필수 라이브러리(aiobotocore, aiofiles)가 없어 StorageClient를 초기화할 수 없습니다.")
+            # 로컬 폴백을 강제하거나, 여기서 에러를 발생시킬지 결정 필요
+            # 예: self.use_local_fallback = True 또는 raise ImportError(...)
+            # 여기서는 S3 시도 자체를 못하므로 에러 발생이 더 적합할 수 있음
             raise ImportError("aiobotocore and aiofiles must be installed to use StorageClient.")
 
-        # 설정 값 로드 (인자 > 환경 변수)
+        # 설정 값 로드
         self.bucket_name = bucket_name or settings.S3_BUCKET_NAME
         self.region_name = region_name or settings.AWS_REGION
 
-        if not self.bucket_name:
-            self.logger.error("S3 버킷 이름이 설정되지 않았습니다 (인자 또는 S3_BUCKET_NAME 환경 변수 필요).")
-            raise ValueError("S3 bucket name must be provided.")
-
-        # aiobotocore 클라이언트 생성
+        # S3 클라이언트 생성 시도
         try:
+            if not self.bucket_name:
+                 # 버킷 이름이 없으면 S3는 어차피 사용 불가
+                 raise ValueError("S3 bucket name must be provided for S3 mode.")
+
             self._session = aiobotocore.session.get_session()
-            # 비동기 환경 설정 (선택 사항)
-            aio_config = AioConfig(
-                connect_timeout=10,
-                read_timeout=60,
-                # retries={'max_attempts': 3} # 재시도 설정 가능
-            )
-            # 클라이언트 생성 (자격 증명은 자동으로 검색됨)
-            # region_name이 None이면 기본 설정 사용
+            aio_config = AioConfig(connect_timeout=10, read_timeout=60)
             self.s3_client = self._session.create_client(
                 's3',
                 region_name=self.region_name,
                 config=aio_config
             )
-            self.logger.info(f"StorageClient 초기화 완료. Bucket: {self.bucket_name}, Region: {self.region_name or 'default'}")
+            self.logger.info(f"StorageClient S3 모드로 초기화 완료. Bucket: {self.bucket_name}, Region: {self.region_name or 'default'}")
+
         except Exception as e:
-            self.logger.error(f"aiobotocore S3 클라이언트 생성 실패: {e}", exc_info=True)
-            self.s3_client = None # 실패 시 None 유지
-            raise ConnectionError(f"Failed to create aiobotocore S3 client: {e}") from e
+            self.logger.warning(f"aiobotocore S3 클라이언트 생성 실패: {e}. 로컬 스토리지 폴백 모드로 전환합니다 (경로: {self.local_storage_path}).", exc_info=True)
+            self.s3_client = None # S3 클라이언트 없음 명시
+            self.use_local_fallback = True # 로컬 폴백 활성화
+            if not self.local_storage_path:
+                self.logger.error("S3 초기화 실패 및 로컬 스토리지 경로(LOCAL_STORAGE_PATH)가 설정되지 않아 StorageClient 사용 불가.")
+                # 로컬 경로도 없으면 동작 불가하므로 에러 발생
+                raise ValueError("S3 initialization failed and LOCAL_STORAGE_PATH is not configured.")
+            # 로컬 경로가 있으면 경고만 하고 객체 생성은 계속 진행
 
     async def upload_file(
         self,
