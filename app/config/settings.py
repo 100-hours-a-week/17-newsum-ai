@@ -11,7 +11,8 @@ load_dotenv()
 class Settings:
 
     # LLM API
-    LLM_API_ENDPOINT: Optional[str] = os.getenv("LLM_API_ENDPOINT", "http://localhost:8000/v1/llm/generate") # 기본값 설정 예시
+    LLM_API_ENDPOINT: Optional[str] = os.getenv("LLM_API_ENDPOINT", "http://localhost:8000/v1/chat/completions") # 기본값 설정 예시
+    LLM_API_MODEL: Optional[str] = os.getenv("LLM_API_MODEL", "./merged_model") # 기본 모델 예시
     LLM_API_KEY: Optional[str] = os.getenv("LLM_API_KEY") # 필요시
     LLM_API_TIMEOUT: int = int(os.getenv("LLM_API_TIMEOUT", "60")) # 기본 타임아웃 60초
     LLM_API_RETRIES: int = int(os.getenv("LLM_API_RETRIES", "2")) # 기본 재시도 2회
