@@ -1,8 +1,6 @@
 # app/dependencies.py
 
 from fastapi import Request, HTTPException, status
-from typing import Annotated # Python 3.9+ 권장
-from fastapi import Depends # Depends 는 함수 인자 타입 힌트에 사용
 
 # 필요한 클래스 임포트 (경로 주의)
 from app.services.database_con_client_v2 import DatabaseClientV2

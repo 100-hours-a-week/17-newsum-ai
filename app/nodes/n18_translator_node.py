@@ -1,191 +1,223 @@
-# app/nodes/18_translator_node.py (Improved Version)
+# app/nodes/18_translator_node.py (Refactored)
 
 import asyncio
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
-import aiohttp # 세션 관리용
+import aiohttp
 
 # 프로젝트 구성 요소 임포트
-from app.config.settings import settings # 기본값 참조용
-from app.services.papago_translation_service import PapagoTranslationService # 번역 서비스
-# from app.services.langsmith_service_v2 import LangSmithService # 필요시
-from app.utils.logger import get_logger
+from app.config.settings import settings
+from app.services.papago_translation_service import PapagoTranslationService
+from app.utils.logger import get_logger, summarize_for_logging # MODIFIED: Added summarize_for_logging
 from app.workflows.state import ComicState
 
-# 로거 설정
 logger = get_logger(__name__)
 
 class TranslatorNode:
     """
     (선택적) 시나리오 대사를 번역합니다.
-    - PapagoTranslationService 사용 (재시도 로직은 서비스 내부에 구현 가정).
-    - `state.config`의 `translation_enabled` 플래그 및 서비스 자체 활성화 여부에 따라 실행.
+    [... existing docstring ...]
     """
+    inputs: List[str] = ["scenarios", "config", "trace_id", "comic_id"] # MODIFIED: Added comic_id
+    outputs: List[str] = ["translated_text", "node18_processing_stats", "error_message"]
 
-    # 상태 입력/출력 정의 (ComicState 필드 기준)
-    inputs: List[str] = ["scenarios", "config", "trace_id", "processing_stats"]
-    outputs: List[str] = ["translated_text", "processing_stats", "error_message"]
-
-    # PapagoTranslationService 인스턴스를 외부에서 주입받음
-    def __init__(
-        self,
-        translator_client: PapagoTranslationService,
-        # langsmith_service: Optional[LangSmithService] = None # 선택적
-    ):
+    def __init__(self, translator_client: PapagoTranslationService):
         if not translator_client: raise ValueError("PapagoTranslationService is required.")
         self.translator = translator_client
-        # self.langsmith = langsmith_service
         logger.info("TranslatorNode initialized.")
 
-    # --- 내부 설정 로드 (실행 시점) ---
-    def _load_runtime_config(self, config: Dict[str, Any]):
+    # --- MODIFIED: Added extra_log_data argument ---
+    def _load_runtime_config(self, config: Dict[str, Any], extra_log_data: Dict):
         """실행 시 필요한 설정을 config 또는 settings에서 로드"""
         self.translation_enabled = config.get("translation_enabled", settings.ENABLE_TRANSLATION)
         self.target_lang = config.get("target_language", settings.DEFAULT_TARGET_LANG)
-        # 소스 언어: config 우선, 없으면 target 기반 추론, 그것도 안되면 settings 기본값
         self.source_lang = config.get("source_language")
         if not self.source_lang:
-             self.source_lang = "ko" if self.target_lang == "en" else "en" # 간단 휴리스틱
-             logger.warning(f"Source language not specified, assuming '{self.source_lang}' based on target '{self.target_lang}'.")
-        self.source_lang = self.source_lang or settings.DEFAULT_SOURCE_LANG # 최종 fallback
-
+             self.source_lang = "ko" if self.target_lang == "en" else "en"
+             logger.warning(f"Source language not specified, assuming '{self.source_lang}' based on target '{self.target_lang}'.", extra=extra_log_data) # MODIFIED
+        self.source_lang = self.source_lang or settings.DEFAULT_SOURCE_LANG
         self.concurrency_limit = int(config.get('translator_concurrency', settings.DEFAULT_TRANSLATOR_CONCURRENCY))
-        # HTTP 타임아웃 (번역 서비스 호출 시 사용)
         self.http_timeout = config.get('http_timeout', settings.DEFAULT_HTTP_TIMEOUT)
 
-        logger.debug(f"Runtime config loaded. Enabled: {self.translation_enabled}, Source: {self.source_lang}, Target: {self.target_lang}")
-        logger.debug(f"Concurrency: {self.concurrency_limit}, Timeout: {self.http_timeout}")
+        logger.debug(f"Runtime config loaded. Enabled: {self.translation_enabled}, Source: {self.source_lang}, Target: {self.target_lang}", extra=extra_log_data) # MODIFIED
+        logger.debug(f"Concurrency: {self.concurrency_limit}, Timeout: {self.http_timeout}", extra=extra_log_data) # MODIFIED
 
-
+    # --- MODIFIED: Added comic_id argument ---
     async def _translate_dialogue_wrapper(
-        self, dialogue: str, session: aiohttp.ClientSession, trace_id: Optional[str]
+        self, dialogue: str, session: aiohttp.ClientSession, trace_id: Optional[str], comic_id: Optional[str]
         ) -> Optional[str]:
-        """단일 대사 번역 (서비스 호출 및 오류 처리)"""
-        if not dialogue: return "" # 빈 대사는 번역 없이 빈 문자열 반환
-        log_prefix = f"[{trace_id}]" if trace_id else ""
+        """단일 대사 번역. Returns translated text or None on failure."""
+        if not dialogue: return ""
+        trans_log_data = {'trace_id': trace_id, 'comic_id': comic_id} # MODIFIED
         try:
-            # 서비스 클라이언트의 translate 메서드 호출 (내부적으로 재시도 처리 가정)
-            # translate 메서드는 실패 시 None 또는 Exception 발생 가정
-            translated = await self.translator.translate(dialogue, self.source_lang, self.target_lang, session, trace_id)
+            # Pass IDs if service supports them
+            translated = await self.translator.translate(
+                dialogue, self.source_lang, self.target_lang, session, trace_id #, comic_id
+            )
             if translated is None:
-                 logger.warning(f"{log_prefix} Translation returned None for '{dialogue[:30]}...'.")
-            return translated # 성공 시 번역된 텍스트, 실패 시 None
+                 logger.warning(f"Translation returned None for '{dialogue[:30]}...'.", extra=trans_log_data) # MODIFIED
+            return translated # Could be None
         except Exception as e:
-            # 서비스 클라이언트 재시도 실패 후 발생한 최종 예외 처리
-            logger.error(f"{log_prefix} Translation failed for '{dialogue[:30]}...': {e}", exc_info=True)
-            return None # 최종 실패 시 None 반환
+            # Service internal retries failed
+            logger.error(f"Translation failed for '{dialogue[:30]}...': {e}", exc_info=True, extra=trans_log_data) # MODIFIED
+            return None # Indicate failure
 
-    # --- 메인 실행 메서드 ---
     async def run(self, state: ComicState) -> Dict[str, Any]:
         """번역 프로세스 실행 (활성화된 경우)"""
         start_time = datetime.now(timezone.utc)
-        trace_id = state.trace_id
-        log_prefix = f"[{trace_id}]"
-        logger.info(f"{log_prefix} Executing TranslatorNode...")
+        # --- MODIFIED: Get trace_id and comic_id safely ---
+        comic_id = getattr(state, 'comic_id', 'unknown_comic')
+        trace_id = getattr(state, 'trace_id', comic_id)
+        extra_log_data = {'trace_id': trace_id, 'comic_id': comic_id}
+        # -------------------------------------------------
 
-        scenarios = state.scenarios or []
-        config = state.config or {}
-        processing_stats = state.processing_stats or {}
-        error_message: Optional[str] = None
-
-        # --- 실행 시점 설정 로드 ---
-        self._load_runtime_config(config)
+        node_class_name = self.__class__.__name__
+        # --- ADDED: Start Logging ---
+        logger.info(f"--- Executing {node_class_name} ---", extra=extra_log_data)
+        logger.debug(f"Entering state:\n{summarize_for_logging(state, is_state_object=True)}", extra=extra_log_data)
         # --------------------------
 
-        # 번역 비활성화 조건 확인 (설정 또는 서비스 자체)
+        scenarios = getattr(state, 'scenarios', None) # Safe access
+        config = getattr(state, 'config', {}) or {}
+        error_message: Optional[str] = None
+        translated_text_output: Optional[List[Dict[str, Any]]] = None # Default to None if disabled
+
+        # --- MODIFIED: Pass log data ---
+        self._load_runtime_config(config, extra_log_data)
+        # --------------------------
+
+        # --- ADDED: Check if enabled ---
         if not self.translation_enabled or not self.translator.is_enabled:
             status = "disabled in config" if not self.translation_enabled else "service unavailable"
-            logger.info(f"{log_prefix} Translation {status}. Skipping.")
-            processing_stats['translator_node_time'] = (datetime.now(timezone.utc) - start_time).total_seconds()
-            # translated_text는 Optional 이므로 None 반환
-            return {"translated_text": None, "processing_stats": processing_stats}
+            logger.info(f"Translation {status}. Skipping.", extra=extra_log_data)
+            end_time = datetime.now(timezone.utc)
+            node18_processing_stats = (end_time - start_time).total_seconds()
+            update_data = {
+                "translated_text": None, # Explicitly None when skipped
+                "node18_processing_stats": node18_processing_stats,
+                "error_message": None # Not an error, just skipped
+            }
+            # --- ADDED: End Logging (Skipped Case) ---
+            logger.debug(f"Returning updates (skipped):\n{summarize_for_logging(update_data, is_state_object=False)}", extra=extra_log_data)
+            logger.info(f"--- Finished {node_class_name} (Skipped) --- (Elapsed: {node18_processing_stats:.2f}s)", extra=extra_log_data)
+            # ------------------------------------------
+            valid_keys = set(ComicState.model_fields.keys())
+            return {k: v for k, v in update_data.items() if k in valid_keys}
+        # ---------------------------------
 
-        if not scenarios or len(scenarios) != 4:
-            logger.warning(f"{log_prefix} Invalid or missing scenarios ({len(scenarios)} found). Cannot translate.")
-            processing_stats['translator_node_time'] = (datetime.now(timezone.utc) - start_time).total_seconds()
-            return {"translated_text": [], "processing_stats": processing_stats} # 빈 리스트 반환
+        # --- ADDED: Input Validation ---
+        if not scenarios or not isinstance(scenarios, list) or len(scenarios) != 4 or not all(isinstance(p, dict) for p in scenarios):
+            error_message = "Invalid or missing 4-panel 'scenarios' list for translation."
+            logger.error(error_message, extra=extra_log_data)
+            translated_text_output = [] # Return empty list on error
+            end_time = datetime.now(timezone.utc)
+            node18_processing_stats = (end_time - start_time).total_seconds()
+            update_data = {
+                "translated_text": translated_text_output,
+                "node18_processing_stats": node18_processing_stats,
+                "error_message": error_message
+            }
+             # --- ADDED: End Logging (Error Case) ---
+            logger.debug(f"Returning updates (input error):\n{summarize_for_logging(update_data, is_state_object=False)}", extra=extra_log_data)
+            logger.info(f"--- Finished {node_class_name} (Input Error) --- (Elapsed: {node18_processing_stats:.2f}s)", extra=extra_log_data)
+            # ----------------------------------------
+            valid_keys = set(ComicState.model_fields.keys())
+            return {k: v for k, v in update_data.items() if k in valid_keys}
+        # -------------------------------
 
-        logger.info(f"{log_prefix} Starting translation of {len(scenarios)} panels from '{self.source_lang}' to '{self.target_lang}'...")
+        logger.info(f"Starting translation of {len(scenarios)} panels from '{self.source_lang}' to '{self.target_lang}'...", extra=extra_log_data)
 
-        # translated_text 필드 형식: List[Dict[str, Optional[str]]]
-        # {"scene": int, "original_dialogue": str, "translated_dialogue": Optional[str]}
         translated_results: List[Optional[Dict[str, Any]]] = [None] * len(scenarios)
         tasks = []
         task_errors: List[str] = []
-        panel_indices_to_translate = [] # 실제 번역 작업 대상 인덱스
 
-        # aiohttp 세션 생성 (타임아웃 적용)
-        timeout = aiohttp.ClientTimeout(total=self.http_timeout)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            semaphore = asyncio.Semaphore(self.concurrency_limit)
-            for i, panel in enumerate(scenarios):
-                original_dialogue = panel.get('dialogue', '')
-                scene_num = panel.get('scene', i + 1)
+        try:
+            timeout = aiohttp.ClientTimeout(total=self.http_timeout)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                semaphore = asyncio.Semaphore(self.concurrency_limit)
+                for i, panel in enumerate(scenarios):
+                    original_dialogue = panel.get('dialogue', '')
+                    scene_num = panel.get('scene', i + 1)
 
-                if original_dialogue: # 대사가 있는 경우에만 번역
-                    panel_indices_to_translate.append(i) # 인덱스 저장
-                    async def translate_task(dialogue, panel_idx):
-                        async with semaphore:
-                            translated = await self._translate_dialogue_wrapper(dialogue, session, trace_id)
-                            return panel_idx, translated # 원래 인덱스와 결과 반환
+                    if original_dialogue and isinstance(original_dialogue, str): # Ensure it's a string
+                        async def translate_task(dialogue, panel_idx, scene_n):
+                            async with semaphore:
+                                # Pass comic_id
+                                translated = await self._translate_dialogue_wrapper(dialogue, session, trace_id, comic_id)
+                                return panel_idx, scene_n, dialogue, translated # Return enough info
 
-                    tasks.append(translate_task(original_dialogue, i))
+                        tasks.append(translate_task(original_dialogue, i, scene_num))
+                    else:
+                        # Store result for panels with no dialogue immediately
+                        translated_results[i] = {
+                            "scene": scene_num, "original_dialogue": "", "translated_dialogue": ""
+                        }
+
+                if tasks:
+                    # MODIFIED: Use return_exceptions=True
+                    gather_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                    # MODIFIED: Process results carefully
+                    for result in gather_results:
+                        if isinstance(result, Exception):
+                            # Log exception details
+                            err_msg = f"A translation task failed: {result}"
+                            logger.error(err_msg, exc_info=result, extra=extra_log_data)
+                            task_errors.append(f"Translation Task Failed: {result}") # Summary
+                            # How to know which panel failed? We don't easily here.
+                            # Mark overall error, but can't mark specific panel as failed easily.
+                        elif isinstance(result, tuple) and len(result) == 4:
+                            panel_idx, scene_n, orig_dialogue, trans_dialogue = result
+                            # Store result, trans_dialogue might be None if wrapper failed
+                            translated_results[panel_idx] = {
+                                "scene": scene_n,
+                                "original_dialogue": orig_dialogue,
+                                "translated_dialogue": trans_dialogue
+                            }
+                            if trans_dialogue is None: # Explicitly record wrapper failure
+                                task_errors.append(f"Panel {scene_n} translation failed (returned None).")
+                        else:
+                            # Unexpected result type from gather
+                            logger.warning(f"Unexpected result type from translation task: {type(result)}", extra=extra_log_data)
+                            task_errors.append(f"Unexpected translation result type: {type(result)}")
                 else:
-                    # 대사 없는 패널은 미리 결과 저장
-                    translated_results[i] = {
-                        "scene": scene_num,
-                        "original_dialogue": "",
-                        "translated_dialogue": "" # 번역 결과도 빈 문자열
-                    }
+                     logger.info("No dialogues found needing translation.", extra=extra_log_data)
 
-            # 번역 작업 실행 (대사가 있는 패널만)
-            if tasks:
-                 gather_results = await asyncio.gather(*tasks, return_exceptions=True)
+        except Exception as e:
+            # Catch errors setting up session or gather
+            logger.exception("Error during translation task setup or execution.", extra=extra_log_data) # Use exception
+            error_message = f"Unexpected error during translation: {e}"
+            task_errors.append(error_message)
 
-                 # 결과 처리 (반환된 인덱스 사용)
-                 for result in gather_results:
-                      if isinstance(result, Exception):
-                           # 특정 태스크 실패 (어떤 패널인지 알기 어려움 - 개선 필요)
-                           err_msg = f"A translation task failed: {result}"
-                           logger.error(f"{log_prefix} {err_msg}")
-                           task_errors.append(err_msg)
-                           # 실패한 패널을 특정하기 어려우므로, 일단 오류 메시지만 기록
-                      elif isinstance(result, tuple) and len(result) == 2:
-                           panel_idx, translated_dialogue = result
-                           original_panel = scenarios[panel_idx]
-                           scene_num = original_panel.get('scene', panel_idx + 1)
-                           original_dialogue = original_panel.get('dialogue', '')
-                           # 결과 저장 (번역 실패 시 translated_dialogue는 None일 수 있음)
-                           translated_results[panel_idx] = {
-                               "scene": scene_num,
-                               "original_dialogue": original_dialogue,
-                               "translated_dialogue": translated_dialogue
-                           }
-                           if translated_dialogue is None: # 명시적 실패 기록
-                               task_errors.append(f"Panel {scene_num} translation failed (returned None).")
-            else:
-                 logger.info(f"{log_prefix} No dialogues found needing translation.")
-
-        # 최종 결과 리스트 (None 항목 제거)
+        # Prepare final output list, filtering out potential Nones if setup failed badly
         final_output = [res for res in translated_results if res is not None]
-        successful_translations = sum(1 for res in final_output if res.get("translated_dialogue") is not None)
-        failed_translations = len(final_output) - successful_translations - sum(1 for res in final_output if res.get("original_dialogue") == "") # 빈 대사 제외
-        logger.info(f"{log_prefix} Translation tasks finished. Successful: {successful_translations}, Failed: {failed_translations}.")
+        successful_translations = sum(1 for res in final_output if isinstance(res.get("translated_dialogue"), str)) # Count successful strings
+        failed_translations = len(final_output) - successful_translations - sum(1 for res in final_output if res.get("original_dialogue") == "")
+        logger.info(f"Translation tasks finished. Successful: {successful_translations}, Failed/Skipped: {failed_translations}.", extra=extra_log_data)
 
         final_error_message = "; ".join(task_errors) if task_errors else None
-        if final_error_message:
-             logger.warning(f"{log_prefix} Some errors occurred during translation: {final_error_message}")
+        # Combine setup/gather errors with task errors
+        if error_message and final_error_message: error_message = f"{error_message}; {final_error_message}"
+        elif final_error_message: error_message = final_error_message
 
-        # --- 처리 시간 및 상태 반환 ---
+        if error_message:
+             logger.warning(f"Some errors occurred during translation: {error_message}", extra=extra_log_data)
+
         end_time = datetime.now(timezone.utc)
-        processing_stats['translator_node_time'] = (end_time - start_time).total_seconds() # 키 형식 통일
-        logger.info(f"{log_prefix} TranslatorNode finished in {processing_stats['translator_node_time']:.2f} seconds.")
+        node18_processing_stats = (end_time - start_time).total_seconds()
 
-        # ComicState 업데이트
         update_data: Dict[str, Any] = {
-            "translated_text": final_output if self.translation_enabled else None,
-            "processing_stats": processing_stats,
-            "error_message": final_error_message
+            "translated_text": final_output, # Return list even if errors occurred
+            "node18_processing_stats": node18_processing_stats,
+            "error_message": error_message
         }
+
+        # --- ADDED: End Logging ---
+        log_level = logger.warning if error_message else logger.info
+        log_level(f"Translation result: {successful_translations}/{len(final_output)} dialogues translated. Errors: {error_message is not None}", extra=extra_log_data)
+        logger.debug(f"Returning updates:\n{summarize_for_logging(update_data, is_state_object=False)}", extra=extra_log_data)
+        logger.info(f"--- Finished {node_class_name} --- (Elapsed: {node18_processing_stats:.2f}s)", extra=extra_log_data)
+        # -------------------------
+
         valid_keys = set(ComicState.model_fields.keys())
         return {k: v for k, v in update_data.items() if k in valid_keys}

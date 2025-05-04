@@ -3,7 +3,6 @@ import asyncio
 import aiohttp
 from typing import List, Dict, Optional, Any
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-from urllib.parse import quote_plus
 
 from app.config.settings import settings # 설정 임포트
 from app.utils.logger import get_logger # 로거 임포트

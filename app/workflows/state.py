@@ -1,7 +1,18 @@
 # app/workflows/state.py
 
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Annotated
+import operator
+
+# --- 리듀서 함수 정의 (예: 문자열 연결) ---
+def append_error_reducer(left: Optional[str], right: Optional[str]) -> Optional[str]:
+    """오류 메시지를 안전하게 연결하는 리듀서"""
+    if right: # 새로운 오류 메시지가 있는 경우에만 처리
+        if left:
+            return f"{left}; {right}" # 세미콜론으로 구분하여 연결
+        return right # 기존 메시지가 없으면 새 메시지 사용
+    return left # 새로운 메시지가 없으면 기존 메시지 유지
+# -----------------------------------------
 
 class ComicState(BaseModel):
     """
@@ -57,12 +68,40 @@ class ComicState(BaseModel):
     # --- 최종 결과물 (노드 19 출력) ---
     final_comic: Dict[str, Optional[str]] = Field(default_factory=dict, description="최종 만화 결과물 상세 정보 (예: {'png_url': ..., 'webp_url': ..., 'alt_text': ...})")
 
-    # --- 추적 및 통계 ---
-    used_links: List[Dict[str, str]] = Field(default_factory=list, description="프로세스 중 사용된 URL 목록 [{'url': str, 'purpose': str, 'status': Optional[str]}].")
-    processing_stats: Dict[str, float] = Field(default_factory=dict, description="노드별 처리 시간 저장 딕셔너리 {'node_name_time': float, ...}.")
+    # # --- 추적 및 통계 ---
+    # used_links: List[Dict[str, str]] = Field(default_factory=list, description="프로세스 중 사용된 URL 목록 [{'url': str, 'purpose': str, 'status': Optional[str]}].")
+    # operator.add 리듀서를 사용하여 여러 노드에서 반환된 리스트를 이어붙임
+    used_links: Annotated[List[Dict[str, str]], operator.add] = Field(default_factory=list)
+    # ---------------------------
+
+    #processing_stats: Dict[str, float] = Field(default_factory=dict, description="노드별 처리 시간 저장 딕셔너리 {'node_name_time': float, ...}.")
+    node1_processing_stats: Optional[float] = Field(default=None, description="노드1 처리 시간 저장")
+    node2_processing_stats: Optional[float] = Field(default=None, description="노드2 처리 시간 저장")
+    node3_processing_stats: Optional[float] = Field(default=None, description="노드3 처리 시간 저장")
+    node4_processing_stats: Optional[float] = Field(default=None, description="노드4 처리 시간 저장")
+    node5_processing_stats: Optional[float] = Field(default=None, description="노드5 처리 시간 저장")
+    node6_processing_stats: Optional[float] = Field(default=None, description="노드6 처리 시간 저장")
+    node7_processing_stats: Optional[float] = Field(default=None, description="노드7 처리 시간 저장")
+    node8_processing_stats: Optional[float] = Field(default=None, description="노드8 처리 시간 저장")
+    node9_processing_stats: Optional[float] = Field(default=None, description="노드9 처리 시간 저장")
+    node10_processing_stats: Optional[float] = Field(default=None, description="노드10 처리 시간 저장")
+    node11_processing_stats: Optional[float] = Field(default=None, description="노드11 처리 시간 저장")
+    node12_processing_stats: Optional[float] = Field(default=None, description="노드12 처리 시간 저장")
+    node13_processing_stats: Optional[float] = Field(default=None, description="노드13 처리 시간 저장")
+    node14_processing_stats: Optional[float] = Field(default=None, description="노드14 처리 시간 저장")
+    node15_processing_stats: Optional[float] = Field(default=None, description="노드15 처리 시간 저장")
+    node16_processing_stats: Optional[float] = Field(default=None, description="노드16 처리 시간 저장")
+    node17_processing_stats: Optional[float] = Field(default=None, description="노드17 처리 시간 저장")
+    node18_processing_stats: Optional[float] = Field(default=None, description="노드18 처리 시간 저장")
+    node19_processing_stats: Optional[float] = Field(default=None, description="노드19 처리 시간 저장")
 
     # --- 오류 처리 ---
-    error_message: Optional[str] = Field(default=None, description="노드 실행 중 오류 발생 시 메시지 저장.")
+    #error_message: Optional[str] = Field(default=None, description="노드 실행 중 오류 발생 시 메시지 저장.")
+    # --- error_message 필드 수정 ---
+    # Annotated를 사용하여 리듀서 함수 지정
+    error_message: Annotated[Optional[str], append_error_reducer] = None
+    # --- 또는 오류 메시지를 리스트로 관리하는 방법 ---
+    # error_messages: Annotated[List[str], operator.add] # operator.add는 리스트를 이어붙임
 
     class Config:
         # Pydantic 설정: 임의 타입 허용 (사용자 정의 객체 저장 시 유용)

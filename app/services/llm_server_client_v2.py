@@ -17,7 +17,7 @@ class LLMService:
     def __init__(
         self,
         endpoint: Optional[str] = None,
-        api_key: Optional[str] = None, # API 키 (Bearer 토큰 등에 사용)
+        #api_key: Optional[str] = None, # API 키 (Bearer 토큰 등에 사용)
         timeout: Optional[float] = None,
         logger_name: str = "LLMService" # 클래스 이름과 통일
     ):
@@ -32,7 +32,7 @@ class LLMService:
         """
         # 환경 변수 또는 인자 값 사용
         self.endpoint = endpoint or settings.LLM_API_ENDPOINT
-        self.api_key = api_key or settings.LLM_API_KEY
+        #self.api_key = api_key or settings.LLM_API_KEY
 
         # 로거 설정
         self.logger = get_logger(logger_name)
@@ -136,20 +136,19 @@ class LLMService:
 
         # 요청 페이로드 구성
         request_payload: Dict[str, Any] = {
-            "prompt": prompt,
+            "model": settings.DEFAULT_LLM_MODEL,  # 모델 이름 추가 필요 (vLLM OpenAI API는 model 파라미터 필수)
+            "messages": [{"role": "user", "content": prompt}],
             "max_tokens": max_tokens,
             "temperature": temperature,
-            **kwargs # 추가 인자 포함
+            **kwargs
         }
         if stop_sequences:
-            # API가 요구하는 파라미터 이름으로 설정 (예: 'stop', 'stop_sequences')
-            # 실제 API 문서 확인 필요
             request_payload["stop"] = stop_sequences
 
         # 요청 헤더 구성 (Bearer 토큰 기본 사용)
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}" # 표준 Bearer 토큰 사용
+        # if self.api_key:
+        #     headers["Authorization"] = f"Bearer {self.api_key}" # 표준 Bearer 토큰 사용
 
         raw_response_content = None # 오류 발생 시 원본 응답 저장용
         try:

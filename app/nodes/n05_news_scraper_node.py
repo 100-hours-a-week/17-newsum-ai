@@ -1,183 +1,247 @@
-# app/nodes/05_news_scraper_node.py (Improved Version)
+# app/nodes/05_news_scraper_node.py (Refactored)
 
 import asyncio
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
 
 # 프로젝트 구성 요소 임포트
-from app.utils.logger import get_logger
+from app.utils.logger import get_logger, summarize_for_logging # MODIFIED: Added summarize_for_logging
 from app.workflows.state import ComicState
 from app.tools.scraping.article_scraper import ArticleScraperTool
-from app.config.settings import settings # 기본 설정을 위해 임포트
+from app.config.settings import settings
 
-# 로거 설정
 logger = get_logger(__name__)
 
 class NewsScraperNode:
     """
     수집된 뉴스 URL 목록에 대해 ArticleScraperTool을 사용하여 기사 콘텐츠 스크래핑을 조율합니다.
-    결과를 취합하고 언어 필터링을 적용한 후 상태를 업데이트합니다.
-    - 설정은 `state.config`를 우선 사용하며, 없으면 `settings`의 기본값을 사용합니다.
+    [... existing docstring ...]
     """
+    inputs: List[str] = ["fact_urls", "trace_id", "comic_id", "used_links", "config"]
+    outputs: List[str] = ["articles", "used_links", "node5_processing_stats", "error_message"]
 
-    # 상태 입력/출력 정의 (참고용)
-    inputs: List[str] = ["fact_urls", "trace_id", "comic_id", "used_links", "config", "processing_stats"]
-    outputs: List[str] = ["articles", "used_links", "processing_stats", "error_message"]
-
-    # 의존성 주입
     def __init__(self, scraper_tool: ArticleScraperTool):
         if not scraper_tool:
-             logger.error("ArticleScraperTool is required but not provided!")
-             # 필수 의존성이므로 에러 발생시키는 것이 좋을 수 있음
+             # This is a critical dependency, raise error if not provided
+             logger.critical("ArticleScraperTool dependency not provided to NewsScraperNode!")
              raise ValueError("ArticleScraperTool is required for NewsScraperNode")
         self.scraper_tool = scraper_tool
         logger.info("NewsScraperNode initialized.")
 
-    # --- 내부 설정 로드 (실행 시점) ---
-    def _load_runtime_config(self, config: Dict[str, Any]):
-        """실행 시 필요한 설정을 config 또는 settings에서 로드"""
+    def _load_runtime_config(self, config: Dict[str, Any], extra_log_data: Dict): # MODIFIED: Added extra_log_data
         self.allowed_languages = config.get('language_filter', settings.LANGUAGE_FILTER)
         self.concurrency_limit = config.get('scraper_concurrency', settings.SCRAPER_CONCURRENCY)
-        logger.debug(f"Runtime config loaded. Allowed languages: {self.allowed_languages}, Concurrency: {self.concurrency_limit}")
+        # Ensure allowed_languages is a list or set for 'in' check
+        if not isinstance(self.allowed_languages, (list, set)):
+             logger.warning(f"language_filter is not a list or set: {self.allowed_languages}. Using default: {settings.LANGUAGE_FILTER}", extra=extra_log_data) # MODIFIED
+             self.allowed_languages = settings.LANGUAGE_FILTER
+        logger.debug(f"Runtime config loaded. Allowed languages: {self.allowed_languages}, Concurrency: {self.concurrency_limit}", extra=extra_log_data) # MODIFIED
 
     async def _process_single_url_wrapper(
         self,
-        url_info: Dict[str, Any], # url_info는 source, search_keyword 등을 포함할 수 있음
+        url_info: Dict[str, Any],
         trace_id: str,
         comic_id: str
     ) -> Optional[Dict[str, Any]]:
-        """단일 URL 처리 래퍼: 스크래핑 및 언어 필터링"""
+        """단일 URL 처리 래퍼: 스크래핑 및 언어 필터링. Returns scraped data or None on failure/filter."""
         original_url = url_info.get("url")
-        extra_log_data = {'trace_id': trace_id, 'comic_id': comic_id, 'original_url': original_url}
-        if not original_url:
-            logger.warning("URL info is missing 'url' field. Skipping.", extra=extra_log_data)
-            return None
+        # Combine IDs and URL info for logging this specific task
+        wrapper_log_data = {'trace_id': trace_id, 'comic_id': comic_id, 'url': original_url} # MODIFIED
+
+        # --- Input Validation (within wrapper) ---
+        if not original_url or not isinstance(original_url, str):
+            logger.warning("URL info is missing 'url' field or URL is not a string. Skipping.", extra=wrapper_log_data) # MODIFIED
+            return None # Indicate failure for this URL
+        # -----------------------------------------
 
         try:
-            # 스크래핑 도구 호출 (도구 내부에 재시도 로직 포함 가정)
-            # ArticleScraperTool.scrape_article은 trace_id, comic_id를 받을 수 있어야 함
+            # Assume scrape_article handles its own retries and logs internal attempts/failures
+            # Pass trace_id and comic_id for tool's internal logging/tracing
             article_data = await self.scraper_tool.scrape_article(original_url, trace_id, comic_id)
 
             if not article_data or not article_data.get('text'):
-                # 스크래핑 실패 또는 텍스트 없음 (도구 내부에서 로깅됨 가정)
-                logger.warning(f"Scraping failed or no text extracted for {original_url}.", extra=extra_log_data)
-                return None
+                # Log failure reason if possible (scraper tool might return error info)
+                fail_reason = article_data.get('error', 'no text extracted') if article_data else 'scraper returned None'
+                logger.warning(f"Scraping failed or no text extracted for {original_url}. Reason: {fail_reason}", extra=wrapper_log_data) # MODIFIED
+                return None # Indicate failure
 
-            # 언어 필터링 적용
-            language = article_data.get('language', 'und')
-            if language != 'und' and language not in self.allowed_languages:
-                logger.info(f"Skipping scraped article: Language '{language}' not in allowed list {self.allowed_languages}. URL: {article_data.get('url')}", extra=extra_log_data)
-                return None # 필터링됨
+            # Language Filtering
+            language = article_data.get('language', 'und') # Default to 'und' if not detected
+            # Ensure allowed_languages is iterable
+            is_allowed = language == 'und' or (isinstance(self.allowed_languages, (list, set)) and language in self.allowed_languages)
 
-            # 원본 URL 소스 정보 추가 (어떤 검색어로 찾았는지 등)
+            if not is_allowed:
+                logger.info(f"Skipping scraped article: Language '{language}' not in allowed list {self.allowed_languages}. URL: {article_data.get('url')}", extra=wrapper_log_data) # MODIFIED
+                return None # Indicate filtered out
+
+            # Add source info from the original url_info
             article_data['source_search_keyword'] = url_info.get('search_keyword')
-            article_data['source_type'] = url_info.get('source') # 예: "Google", "Naver", "RSS"
-            # 스크랩 성공 시 원본 URL도 명시적으로 추가 (used_links 업데이트용)
-            article_data['original_url_from_source'] = original_url
+            article_data['source_type'] = url_info.get('source') # e.g., "Google", "Naver"
+            article_data['original_url_from_source'] = original_url # Explicitly keep original URL
 
+            logger.debug(f"Successfully scraped and filtered article.", extra=wrapper_log_data) # ADDED
             return article_data
 
         except Exception as e:
-            # 래퍼 레벨 또는 도구 호출의 최종 예외 처리
-            logger.exception(f"Unexpected error processing URL: {original_url} | Error: {e}", extra=extra_log_data)
-            return None
+            # Catch unexpected errors during the wrapper execution
+            logger.exception(f"Unexpected error processing URL {original_url}: {e}", extra=wrapper_log_data) # MODIFIED use exception
+            return None # Indicate failure
 
-    # --- 메인 실행 메서드 (run으로 이름 변경) ---
     async def run(self, state: ComicState) -> Dict[str, Any]:
         """수집된 뉴스 URL 목록에 대해 스크래핑 프로세스를 실행합니다."""
         start_time = datetime.now(timezone.utc)
-        comic_id = state.comic_id
-        trace_id = state.trace_id
+        # --- MODIFIED: Get trace_id and comic_id safely ---
+        comic_id = getattr(state, 'comic_id', 'unknown_comic')
+        trace_id = getattr(state, 'trace_id', comic_id)
         extra_log_data = {'trace_id': trace_id, 'comic_id': comic_id}
-        log_prefix = f"[{trace_id}]" # run 메서드 내에서는 log_prefix 사용
+        # -------------------------------------------------
 
-        logger.info(f"{log_prefix} NewsScraperNode starting...")
+        node_class_name = self.__class__.__name__
+        # --- ADDED: Start Logging ---
+        logger.info(f"--- Executing {node_class_name} ---", extra=extra_log_data)
+        logger.debug(f"Entering state:\n{summarize_for_logging(state, is_state_object=True)}", extra=extra_log_data)
+        # --------------------------
 
-        fact_urls = state.fact_urls or []
-        config = state.config or {}
-        current_used_links = state.used_links or []
-        processing_stats = state.processing_stats or {}
+        fact_urls = getattr(state, 'fact_urls', []) # Safe access
+        config = getattr(state, 'config', {}) or {}
+        current_used_links = getattr(state, 'used_links', []) or []
 
+        # --- ADDED: Input Validation ---
         if not fact_urls:
-            logger.warning(f"{log_prefix} No fact URLs to scrape. Skipping.", extra=extra_log_data)
-            processing_stats['news_scraper_node_time'] = (datetime.now(timezone.utc) - start_time).total_seconds()
-            return {"articles": [], "used_links": current_used_links, "processing_stats": processing_stats}
+            error_message = "No fact URLs provided for scraping."
+            # Use warning as it might be valid that no fact URLs were found previously
+            logger.warning(error_message, extra=extra_log_data)
+            end_time = datetime.now(timezone.utc)
+            node5_processing_stats = (end_time - start_time).total_seconds()
+            update_data = {
+                "articles": [],
+                "used_links": current_used_links,
+                "node5_processing_stats": node5_processing_stats,
+                "error_message": error_message # Pass warning/error
+            }
+            # --- ADDED: End Logging (Early Exit) ---
+            logger.debug(f"Returning updates (no URLs):\n{summarize_for_logging(update_data, is_state_object=False)}", extra=extra_log_data)
+            logger.info(f"--- Finished {node_class_name} (No URLs) --- (Elapsed: {node5_processing_stats:.2f}s)", extra=extra_log_data)
+            # ----------------------------------------
+            valid_keys = set(ComicState.model_fields.keys())
+            return {k: v for k, v in update_data.items() if k in valid_keys}
+        # -------------------------------
 
-        # --- 실행 시점 설정 로드 ---
-        self._load_runtime_config(config)
+        # --- MODIFIED: Pass log data ---
+        self._load_runtime_config(config, extra_log_data)
         semaphore = asyncio.Semaphore(self.concurrency_limit)
         # --------------------------
 
-        logger.info(f"{log_prefix} Starting scraping for {len(fact_urls)} news URLs (Concurrency: {self.concurrency_limit})...", extra=extra_log_data)
+        logger.info(f"Starting scraping for {len(fact_urls)} news URLs (Concurrency: {self.concurrency_limit})...", extra=extra_log_data)
 
         tasks = []
         for url_info in fact_urls:
+             # Define async function inside loop to capture url_info correctly
              async def task_with_semaphore(ui):
                   async with semaphore:
-                       # wrapper 함수에 trace_id, comic_id 전달
+                       # Pass trace_id, comic_id to the wrapper
                        return await self._process_single_url_wrapper(ui, trace_id, comic_id)
              tasks.append(task_with_semaphore(url_info))
 
+        # --- MODIFIED: Use return_exceptions=True ---
         results = await asyncio.gather(*tasks, return_exceptions=True)
+        # ------------------------------------------
 
         scraped_articles: List[Dict[str, Any]] = []
-        processed_url_map: Dict[str, str] = {} # key: original_url, value: status ('processed', 'failed', 'filtered')
-        task_errors: List[str] = []
+        # Map original URL to its processing outcome
+        processed_url_map: Dict[str, str] = {} # status: 'processed', 'failed', 'filtered', 'exception'
+        task_errors: List[str] = [] # Collect summary error messages from gather
 
+        # --- MODIFIED: Process results carefully ---
         for i, res in enumerate(results):
-            original_url = fact_urls[i].get('url', f'Unknown_URL_{i}')
+            # Get the original URL info corresponding to this result
+            # Handle potential index errors if fact_urls list was modified (shouldn't happen)
+            original_url_info = fact_urls[i] if i < len(fact_urls) else {}
+            original_url = original_url_info.get('url', f'Unknown_URL_{i}')
+
             if isinstance(res, dict) and res is not None:
                 scraped_articles.append(res)
                 processed_url_map[original_url] = 'processed'
+            elif res is None:
+                # This means _process_single_url_wrapper returned None (failure or filtered)
+                # The wrapper already logged the specific reason.
+                processed_url_map[original_url] = 'failed_or_filtered'
+                # Optionally add a generic message to task_errors if needed, but might be noisy
+                # task_errors.append(f"Processing failed or filtered for {original_url}")
             elif isinstance(res, Exception):
-                # 래퍼에서 이미 로깅됨, 여기서는 상태 기록 및 에러 메시지 추가
-                processed_url_map[original_url] = 'failed'
-                task_errors.append(f"Scraping failed for {original_url}: {res}")
-            else: # res is None (스크랩 실패 또는 필터링됨)
-                 processed_url_map[original_url] = 'filtered_or_failed' # 좀 더 명확하게
+                # Exception occurred *outside* the wrapper's try/except or during gather setup
+                err_msg = f"Gather exception for URL {original_url}: {res}"
+                logger.error(err_msg, exc_info=res, extra=extra_log_data) # Log exception details
+                processed_url_map[original_url] = 'exception'
+                task_errors.append(f"Exception for {original_url}: {res}") # Summary error
+            else:
+                # Unexpected result type
+                 logger.warning(f"Unexpected result type for {original_url}: {type(res)}", extra=extra_log_data)
+                 processed_url_map[original_url] = 'unknown_error'
+                 task_errors.append(f"Unknown error for {original_url}")
+        # --------------------------------------------
 
         successful_count = len(scraped_articles)
-        failed_or_filtered_count = len(fact_urls) - successful_count
-        logger.info(f"{log_prefix} Scraping complete. Successfully processed articles: {successful_count}. Failed/Filtered URLs: {failed_or_filtered_count}.", extra=extra_log_data)
+        failed_count = len(fact_urls) - successful_count # All non-successes
+        logger.info(f"Scraping complete. Success: {successful_count}, Failed/Filtered/Exception: {failed_count}.", extra=extra_log_data)
 
-        # used_links 상태 업데이트
+        # --- Update used_links status ---
         updated_used_links = []
         links_updated_count = 0
+        processed_in_this_node = set(processed_url_map.keys())
+
         for link in current_used_links:
             url = link.get('url')
-            if url in processed_url_map: # 이 노드에서 처리 시도한 URL
+            # Update status only if this node attempted to process this URL
+            if url in processed_in_this_node:
                  status = processed_url_map[url]
+                 # Create a new dict to avoid modifying the original state directly
+                 updated_link = link.copy()
+                 purpose = updated_link.get('purpose', '')
                  if status == 'processed':
-                      link['purpose'] = link.get('purpose', '').replace('(Fact)', '(Scraped Fact)')
-                      link['status'] = "processed"
-                 elif status == 'failed':
-                      link['purpose'] += " (Scraping Failed)"
-                      link['status'] = "failed"
-                 else: # filtered_or_failed
-                      link['purpose'] += " (Scraping Failed/Filtered)"
-                      link['status'] = "filtered_or_failed" # 상태 명시
-                 updated_used_links.append(link)
+                      updated_link['purpose'] = purpose.replace('(Fact)', '(Scraped Fact)') if '(Fact)' in purpose else f"{purpose} (Scraped Fact)"
+                      updated_link['status'] = "processed"
+                 elif status == 'failed_or_filtered':
+                      updated_link['purpose'] = f"{purpose} (Scraping Failed/Filtered)"
+                      updated_link['status'] = "failed_or_filtered"
+                 elif status == 'exception':
+                      updated_link['purpose'] = f"{purpose} (Scraping Exception)"
+                      updated_link['status'] = "failed" # Treat exception as failure
+                 else: # unknown_error
+                      updated_link['purpose'] = f"{purpose} (Scraping Unknown Error)"
+                      updated_link['status'] = "failed"
+
+                 updated_used_links.append(updated_link)
                  links_updated_count += 1
-            else: # 이 노드에서 처리 안 한 링크
+            else:
+                 # If not processed by this node, pass the link through unchanged
                  updated_used_links.append(link)
-        logger.info(f"{log_prefix} Updated status for {links_updated_count} entries in used_links.")
+
+        logger.info(f"Updated status for {links_updated_count} entries in used_links related to this node's processing.", extra=extra_log_data)
 
 
         # --- 시간 기록 및 반환 ---
         end_time = datetime.now(timezone.utc)
-        processing_stats['news_scraper_node_time'] = (end_time - start_time).total_seconds() # 키 형식 통일
-        logger.info(f"{log_prefix} NewsScraperNode finished. Elapsed time: {processing_stats['news_scraper_node_time']:.2f} seconds.", extra=extra_log_data)
+        node5_processing_stats = (end_time - start_time).total_seconds()
 
         final_error_message = "; ".join(task_errors) if task_errors else None
         if final_error_message:
-             logger.warning(f"{log_prefix} Some errors occurred during scraping: {final_error_message}")
+             logger.warning(f"Some errors occurred during scraping task execution: {final_error_message}", extra=extra_log_data)
 
         # 상태 업데이트 준비
-        updates = {
+        update_data = {
             "articles": scraped_articles,
             "used_links": updated_used_links,
-            "processing_stats": processing_stats,
+            "node5_processing_stats": node5_processing_stats,
             "error_message": final_error_message
         }
+
+        # --- ADDED: End Logging ---
+        log_level = logger.warning if final_error_message else logger.info
+        log_level(f"News scraping result: {successful_count} articles scraped. Errors: {final_error_message is not None}", extra=extra_log_data)
+        logger.debug(f"Returning updates:\n{summarize_for_logging(update_data, is_state_object=False)}", extra=extra_log_data)
+        logger.info(f"--- Finished {node_class_name} --- (Elapsed: {node5_processing_stats:.2f}s)", extra=extra_log_data)
+        # -------------------------
+
         valid_keys = set(ComicState.model_fields.keys())
-        return {k: v for k, v in updates.items() if k in valid_keys}
+        return {k: v for k, v in update_data.items() if k in valid_keys}

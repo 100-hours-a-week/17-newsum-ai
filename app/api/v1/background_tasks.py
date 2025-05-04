@@ -112,7 +112,6 @@ async def trigger_workflow_task(
                 "result": result_data,
                 "timestamp_end": end_run_time.isoformat(),
                 "duration_seconds": round(run_duration, 2), # 소요 시간 추가
-                # "processing_stats": final_state_data.get("processing_stats", {}), # 처리 통계 추가 (선택 사항)
             })
             logger.info(f"워크플로우 완료. 상태: {final_status}, 소요시간: {run_duration:.2f}초", extra=runner_extra_log)
 

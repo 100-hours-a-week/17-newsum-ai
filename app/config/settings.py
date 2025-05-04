@@ -80,9 +80,9 @@ class Settings:
     REDIS_DB: int = int(os.getenv("REDIS_DB", "0"))  # 기본 캐시/DB 번호
 
     # --- LangGraph Redis Checkpointer URL ---
-    # 환경 변수 REDIS_CHECKPOINT_URL이 있으면 사용하고, 없으면 기본값 생성
+    # 환경 변수 REDIS_URL 있으면 사용하고, 없으면 기본값 생성
     # 체크포인트용 DB는 캐시(DB 0)와 분리하기 위해 다른 번호(예: 1) 권장
-    _default_checkpoint_db = 1
+    _default_checkpoint_db = REDIS_DB
     _redis_checkpoint_host = os.getenv("REDIS_HOST", "localhost")  # 체크포인트용 호스트가 다를 수 있다면 별도 변수 사용
     _redis_checkpoint_port = int(os.getenv("REDIS_PORT", "6379"))  # 체크포인트용 포트가 다를 수 있다면 별도 변수 사용
     _redis_checkpoint_password = os.getenv("REDIS_PASSWORD")  # 동일 비밀번호 가정
@@ -91,7 +91,7 @@ class Settings:
     if _redis_checkpoint_password:
         _redis_checkpoint_base = f"redis://:{_redis_checkpoint_password}@{_redis_checkpoint_host}:{_redis_checkpoint_port}/{_default_checkpoint_db}"
 
-    REDIS_CHECKPOINT_URL: str = os.getenv("REDIS_CHECKPOINT_URL", _redis_checkpoint_base)
+    REDIS_URL: str = os.getenv("REDIS_URL", _redis_checkpoint_base)
 
     # --- LangSmith (Optional Observability) ---
     # LangSmith 연동 시 필요합니다.
@@ -121,6 +121,10 @@ class Settings:
     SAVE_AGENT_INPUTS: bool = os.getenv("SAVE_AGENT_INPUTS", "False").lower() in ["true", "1", "yes"] # 선택적: 각 에이전트/노드의 입력 저장 여부.
     SAVE_DEBUG_INFO: bool = os.getenv("SAVE_DEBUG_INFO", "True").lower() in ["true", "1", "yes"] # 선택적: 디버깅 정보 저장 여부 (DEBUG 플래그와 연동 고려).
 
+    DEFAULT_TEMPLATE_DIR: str = os.path.join(PROJECT_ROOT_DIR, "templates") # 예: app/templates
+    DEFAULT_TEMPLATE_A_FILENAME: str = "template_a.md"
+    DEFAULT_TEMPLATE_B_FILENAME: str = "template_b.md"
+
     # ======================================================================
     # 튜닝 가능 파라미터 및 기타 설정 (Tunable Parameters & Other Settings)
     # ======================================================================
@@ -133,12 +137,26 @@ class Settings:
     TOOL_HTTP_TIMEOUT: int = int(os.getenv("TOOL_HTTP_TIMEOUT", "15")) # 도구 일반 HTTP 요청 타임아웃(초).
     # API_FETCH_TIMEOUT is deprecated/merged into TOOL_HTTP_TIMEOUT or specific timeouts below.
 
+
     # --- LLM 동작 튜닝 ---
     LLM_API_TIMEOUT: int = int(os.getenv("LLM_API_TIMEOUT", "60")) # LLM API 호출 타임아웃(초).
     LLM_API_RETRIES: int = int(os.getenv("LLM_API_RETRIES", "3")) # LLM API 호출 재시도 횟수.
     DEFAULT_LLM_MODEL: str = os.getenv("DEFAULT_LLM_MODEL", "gpt-4o-mini") # 기본 사용할 LLM 모델 ID.
     # 작업별 LLM Temperature (창의성 조절)
+    DEFAULT_CACHE_TTL_TOPIC: int = int(os.getenv("DEFAULT_CACHE_TTL_TOPIC", "60")) # Node 02
+    DEFAULT_KEYWORD_CONF_THRESHOLD: float = float(os.getenv("LLM_TEMPERATURE_ANALYSIS", "0.2")) # Node 02
     LLM_TEMPERATURE_ANALYSIS: float = float(os.getenv("LLM_TEMPERATURE_ANALYSIS", "0.2")) # Node 02
+    DEFAULT_SEARCH_RESULTS: int = int(os.getenv("DEFAULT_SEARCH_RESULTS", "10")) # Node 02
+    DEFAULT_TARGET_URLS_PER_KW: int = int(os.getenv("DEFAULT_TARGET_URLS_PER_KW", "4")) # Node 02
+    DEFAULT_HTTP_TIMEOUT: int = int(os.getenv("DEFAULT_HTTP_TIMEOUT", "15")) # Node 02
+    OPINION_COLLECTOR_CONCURRENCY: int = int(os.getenv("OPINION_COLLECTOR_CONCURRENCY", "3")) # Node 02
+    TARGET_BLOG_DOMAINS: List[str] = _parse_list_helper(os.getenv("TARGET_BLOG_DOMAINS")) or ["medium.com", "dev.to", "hashnode.com", "substack.com"]
+
+
+    MAX_OPINION_TEXT_LEN: int = 1000     # LLM 입력용 개별 의견 최대 길이 (MAX_ALT_TEXT_LEN 아님!)
+    MAX_OPINIONS_STANCE: int = 20        # 입장 분석에 사용할 최대 의견 수
+    DEFAULT_MAX_OPINIONS_SENTIMENT: int = 20 # 감성 분석에 사용할 최대 의견 수
+    DEFAULT_SUMMARIZER_CONCURRENCY: int = 3 # Node 9 내부 동시 작업 수
     LLM_TEMPERATURE_EXTRACT: float = float(os.getenv("LLM_TEMPERATURE_EXTRACT", "0.1")) # Node 08
     LLM_TEMPERATURE_SUMMARIZE: float = float(os.getenv("LLM_TEMPERATURE_SUMMARIZE", "0.3")) # Node 08
     LLM_TEMPERATURE_QA_GEN: float = float(os.getenv("LLM_TEMPERATURE_QA_GEN", "0.1")) # Node 08
@@ -150,6 +168,24 @@ class Settings:
     LLM_TEMPERATURE_CREATIVE: float = float(os.getenv("LLM_TEMPERATURE_CREATIVE", "0.7")) # Node 14 (Idea)
     LLM_TEMPERATURE_SCENARIO: float = float(os.getenv("LLM_TEMPERATURE_SCENARIO", LLM_TEMPERATURE_CREATIVE)) # Node 15 (Default to creative)
     LLM_TEMPERATURE_SCENARIO_EVAL: float = float(os.getenv("LLM_TEMPERATURE_SCENARIO_EVAL", "0.3")) # Node 16
+
+    # --- 요약 평가 및 합성 (Node 10, 11) 관련 설정 ---
+    DEFAULT_EVALUATION_THRESHOLDS: Dict[str, float] = {
+        "rouge_l": 0.35,
+        "bert_score": 0.88,
+        "topic_coverage": 0.70
+    }
+    # DEFAULT_DECISION_THRESHOLDS는 Node 11 로직 확인 후 정의 필요 (일단 빈 딕셔너리)
+    DEFAULT_DECISION_THRESHOLDS: Dict[str, Any] = {}
+    DEFAULT_BERTSCORE_LANG: str = "en"
+    DEFAULT_FEQA_THRESHOLD: float = 0.75
+    DEFAULT_MAX_SUMMARIES_SYNTHESIS: int = 3
+    MAX_ARTICLES_SUMMARIZE: int = 5 # 기본값 5로 설정
+
+    DEFAULT_LLM_TEMP_SYNTHESIS: float = 0.5        # Node 10 용
+    DEFAULT_MAX_TOKENS_SYNTHESIS: int = 512        # Node 10 용
+    DEFAULT_SYNTHESIS_WORD_COUNT: int = 200        # Node 10 용
+    # --------------------------------------------------
     # 작업별 최대 토큰 수 (결과 길이 및 비용 조절)
     MAX_TOKENS_EXTRACT: int = int(os.getenv("MAX_TOKENS_EXTRACT", "512")) # Node 08
     MAX_TOKENS_SUMMARIZE: int = int(os.getenv("MAX_TOKENS_SUMMARIZE", "300")) # Node 08
@@ -184,13 +220,15 @@ class Settings:
     # Google Trends (PyTrends)
     TREND_GOOGLE_WEIGHT: float = float(os.getenv("TREND_GOOGLE_WEIGHT", "0.6"))
     TREND_TWITTER_WEIGHT: float = float(os.getenv("TREND_TWITTER_WEIGHT", "0.4"))
-    PYTRENDS_TIMEFRAME: str = os.getenv("PYTRENDS_TIMEFRAME", "today 7-d") # Google Trends 조회 기간.
+    PYTRENDS_TIMEFRAME: str = os.getenv("PYTRENDS_TIMEFRAME", "now 7-d") # Google Trends 조회 기간.
     PYTRENDS_GEO: str = os.getenv("PYTRENDS_GEO", "") # Google Trends 지역 필터 (e.g., 'US', 'KR').
     PYTRENDS_HL: str = os.getenv("PYTRENDS_HL", "en-US") # Google Trends 인터페이스 언어.
     PYTRENDS_BATCH_DELAY_SEC: float = float(os.getenv("PYTRENDS_BATCH_DELAY_SEC", "1.5")) # Pytrends 요청 간 지연 시간(초).
     # Twitter
-    TWITTER_COUNTS_DELAY_SEC: float = float(os.getenv("TWITTER_COUNTS_DELAY_SEC", "0.6")) # Twitter API 요청 간 지연 시간(초).
+    TWITTER_COUNTS_DELAY_SEC: float = float(os.getenv("TWITTER_COUNTS_DELAY_SEC", "3")) # Twitter API 요청 간 지연 시간(초).
     TWITTER_OPINION_MAX_RESULTS: int = int(os.getenv("TWITTER_OPINION_MAX_RESULTS", "15")) # Twitter 의견 수집 시 최대 결과 수.
+    DEFAULT_MIN_OPINIONS_PER_PLATFORM: int = 1
+    DEFAULT_MAX_OPINIONS_PER_PLATFORM: int = 2
     # Reddit
     REDDIT_USER_AGENT: str = os.getenv("REDDIT_USER_AGENT", "ComicGeneratorAgent/1.0") # Reddit API 사용 시 User Agent.
     REDDIT_TARGET_SUBREDDITS: List[str] = _parse_list_helper(

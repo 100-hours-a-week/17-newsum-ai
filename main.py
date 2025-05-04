@@ -9,7 +9,8 @@ from langgraph.graph import StateGraph # 타입 힌트 및 의존성 주입용
 
 # --- 애플리케이션 구성 요소 임포트 ---
 from app.config.settings import settings
-from app.utils.logger import get_logger
+from app.api.v1 import endpoints as v1_endpoints # 라우터 모듈 임포트
+from app.utils.logger import setup_logging, get_logger
 
 # --- 모든 노드 클래스 임포트 ---
 from app.nodes import (
@@ -45,12 +46,20 @@ from app.tools.trends.google_trends import GoogleTrendsTool # 추가
 from app.tools.trends.twitter_counts import TwitterCountsTool # 추가
 
 # 워크플로우 빌더, 의존성 주입, 백그라운드 작업 함수 임포트
-from app.workflows.main_workflow import build_main_workflow # 업그레이드된 빌더 사용
-from app.dependencies import get_compiled_workflow_app, get_db_client
-from app.api.v1.background_tasks import trigger_workflow_task
+from app.workflows.main_workflow import build_main_workflow
+from langgraph.checkpoint.redis.aio import AsyncRedisSaver
 
+# ------------------------------------
+import os
+# main.py 파일의 디렉토리 (프로젝트 루트 가정)
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+YAML_PATH = os.path.join(PROJECT_ROOT, 'app/config/logging_config.yaml')
+
+# 로그 디렉토리 생성 확인 (main.py 등 시작점에서 수행 권장)
+LOG_DIR = os.path.join(PROJECT_ROOT, "app", "log")
+os.makedirs(LOG_DIR, exist_ok=True)
 # 로깅 설정
-# setup_logging('logging_config.yaml') # 앱 시작 시 한 번만 설정 권장
+setup_logging(YAML_PATH) # 앱 시작 시 한 번만 설정 권장
 logger = get_logger("FastAPIApp")
 
 # --- Lifespan 컨텍스트 매니저 ---
@@ -60,8 +69,12 @@ async def lifespan(app: FastAPI):
     FastAPI 앱 시작/종료 시 리소스 관리 (모든 서비스/도구/노드 초기화).
     """
     logger.info("애플리케이션 시작... 리소스 초기화 시작.")
-    # setup_logging('logging_config.yaml') # 여기서 로깅 설정 적용
+    app.state.compiled_workflow_app = None  # 초기 상태는 None
+    app.state.initialization_error = None  # 초기화 오류 상태 초기화
 
+    # --- 2. 서비스 및 도구 인스턴스화 (이전 코드와 동일하게 진행) ---
+    logger.info("서비스/도구 인스턴스화 시작...")
+    # setup_logging('logging_config.yaml') # 여기서 로깅 설정 적용
     # --- 1. 공유 리소스 생성 ---
     # 공유 aiohttp 세션 (여러 도구에서 사용 가능)
     app.state.shared_http_session = aiohttp.ClientSession()
@@ -74,7 +87,7 @@ async def lifespan(app: FastAPI):
     # --- 2. 서비스 및 도구 인스턴스화 ---
     logger.info("서비스/도구 인스턴스화 시작...")
     # 각 도구/서비스 생성 시 필요 시 세션/DB 클라이언트 전달
-    llm_service = LLMService(); # closable_resources.append(llm_service) # close 메서드 없으면 추가 안 함
+    llm_service = LLMService() # closable_resources.append(llm_service) # close 메서드 없으면 추가 안 함
     Google_Search_tool = GoogleSearchTool(session=app.state.shared_http_session) # 세션 전달
     # google_tool의 close 메서드 유무 확인 후 추가
     # if hasattr(Google_Search_tool, 'close'): closable_resources.append(Google_Search_tool)
@@ -140,35 +153,83 @@ async def lifespan(app: FastAPI):
         node18 = n18_translator_node.TranslatorNode(translator_client=translator_client)
         node19 = n19_postprocessor_node.PostprocessorNode(storage_client=storage_client) # Storage 클라이언트 전달
         logger.info("전체 노드 인스턴스화 완료.")
+        # 1. 그래프 구조 빌드 (컴파일되지 않은 StateGraph 객체 반환)
+        logger.info("Building workflow graph structure...")
+        graph_structure: StateGraph = build_main_workflow(
+            node01, node02, node03, node04, node05, node06, node07, node08, node09,
+            node10, node11, node12, node13, node14, node15, node16, node17, node18, node19
+        )
+        logger.info("Workflow graph structure built.")
 
-        # --- 4. 전체 워크플로우 빌드 및 컴파일 ---
-        # build_main_workflow 함수는 모든 노드 인스턴스를 인자로 받아야 함
-        # (main_workflow.py의 build_main_workflow 시그니처 변경 필요)
-        # app.state.compiled_workflow_app = build_main_workflow(
-        #     # 모든 노드 인스턴스 전달
-        #     node01, node02, node03, node04, node05, node06, node07, node08, node09,
-        #     node10, node11, node12, node13, node14, node15, node16, node17, node18, node19
-        # )
+        # --- 2. 체크포인터 설정 (수정됨) ---
+        checkpointer_instance = None  # 컴파일 시 사용할 체크포인터 변수
+        if settings.REDIS_URL:
+            try:
+                logger.info(f"Configuring Redis checkpointer using URL: {settings.REDIS_URL}")
 
-        app.state.compiled_workflow_app = build_main_workflow()
-        logger.info("전체 워크플로우 그래프 빌드 및 컴파일 완료.")
+                # --- async with 사용하여 AsyncRedisSaver 인스턴스 얻기 ---
+                async with AsyncRedisSaver.from_conn_string(settings.REDIS_URL) as cp:
+                    checkpointer_instance = cp  # 얻어진 인스턴스를 변수에 할당
+                    logger.info("AsyncRedisSaver checkpointer configured via from_conn_string.")
+                # async with 블록을 벗어나면 컨텍스트 관리자의 __aexit__가 호출됨 (자동 정리 시작)
+                # 하지만 checkpointer_instance는 컴파일에 사용 가능
 
-    except Exception as init_err:
-         # 초기화 중 심각한 오류 발생 시 로깅하고 앱 상태에 표시
-         logger.critical(f"애플리케이션 초기화 중 심각한 오류 발생: {init_err}", exc_info=True)
-         app.state.initialization_error = str(init_err)
-         app.state.compiled_workflow_app = None # 워크플로우 사용 불가 표시
+            except ImportError:
+                logger.warning(
+                    "AsyncRedisSaver or redis library not available. Checkpointer disabled. Install 'langgraph[redis]'.")
+                checkpointer_instance = None
+            except Exception as cp_err:
+                logger.error(f"Failed to configure Redis checkpointer using from_conn_string: {cp_err}", exc_info=True)
+                checkpointer_instance = None  # 오류 발생 시 None으로 설정
+        else:
+            logger.warning("REDIS_URL not set. Proceeding without checkpointer.")
+        # --- 체크포인터 설정 끝 ---
 
-    # --- 앱 실행 준비 완료 ---
-    if not hasattr(app.state, 'initialization_error'):
-        logger.info("애플리케이션 시작 준비 완료.")
+        # --- 3. 그래프 컴파일 ---
+        logger.info("Compiling the workflow graph...")
+        # checkpointer_instance (None일 수 있음)를 compile 메서드에 전달
+        compiled_graph_object = graph_structure.compile(checkpointer=checkpointer_instance)
+        logger.info("Workflow graph compilation step finished.")
+
+        # 4. 컴파일된 그래프 객체를 app.state에 저장
+        app.state.compiled_workflow_app = compiled_graph_object
+
+        # 컴파일 성공 확인 및 로깅
+        if app.state.compiled_workflow_app:
+            logger.info("Compiled workflow graph assigned to app.state.")
+        else:
+            # 컴파일 실패 시 (이론적으로 compile에서 예외 발생 가능성 높음)
+            raise ValueError("Workflow compilation failed or returned None.")
+
+
+        # 4. 컴파일된 그래프 객체를 app.state에 저장
+        app.state.compiled_workflow_app = compiled_graph_object
+        # --- 체크포인터 설정 끝 ---
+
+        # 컴파일 성공 확인
+        if app.state.compiled_workflow_app:
+            logger.info("Compiled workflow graph assigned to app.state.")
+        else:
+            # .compile()이 실패하거나 None을 반환하는 경우 (이론상 예외 발생)
+            raise ValueError("Workflow compilation failed or returned None.")
+
+    except Exception as build_err:
+        logger.critical(f"Error during workflow build/compile: {build_err}", exc_info=True)
+        app.state.compiled_workflow_app = None  # 오류 시 None 설정
+
+    # --- 앱 준비 상태 확인 ---
+    # getattr 사용으로 안전하게 확인
+    if getattr(app.state, 'compiled_workflow_app', None) is not None:
+        logger.info("Application startup complete. Workflow ready.")
     else:
-        logger.error("애플리케이션 시작 중 오류 발생. 워크플로우를 사용할 수 없습니다.")
+        logger.error("Application startup completed BUT workflow is unavailable due to build/compile errors.")
+        if not hasattr(app.state, 'initialization_error'):
+            app.state.initialization_error = "Workflow compilation failed during startup."
 
-    yield # 애플리케이션 실행
-
+    yield  # 애플리케이션 실행
     # --- 앱 종료 시 리소스 정리 ---
     logger.info("애플리케이션 종료... 리소스 정리 시작.")
+
     for resource in reversed(closable_resources): # 생성 역순으로 정리
          try:
               resource_name = type(resource).__name__
@@ -199,70 +260,72 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# --- API 라우터 정의 ---
-@app.post("/v1/comics/generate", status_code=status.HTTP_202_ACCEPTED, tags=["Comic Generation"])
-async def generate_comic_endpoint(
-    query: str,
-    background_tasks: BackgroundTasks,
-    # 의존성 주입으로 컴파일된 앱과 DB 클라이언트 가져오기
-    compiled_app: StateGraph = Depends(get_compiled_workflow_app),
-    db_client: DatabaseClientV2 = Depends(get_db_client)
-):
-    """
-    만화 생성을 위한 워크플로우를 백그라운드에서 실행합니다.
-
-    - **query**: 만화의 주제가 될 사용자 입력 쿼리 문자열.
-    """
-    # 앱 초기화 오류 확인
-    if hasattr(app.state, 'initialization_error') and app.state.initialization_error:
-         raise HTTPException(
-             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-             detail=f"Workflow service not available due to initialization error: {app.state.initialization_error}"
-         )
-    if not compiled_app:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Workflow is not compiled.")
-
-    logger.info(f"API Request: Generate Comic for query='{query}'")
-    try:
-        # trigger_workflow_task 함수가 comic_id를 반환한다고 가정
-        comic_id = await trigger_workflow_task(query, background_tasks, compiled_app, db_client)
-        logger.info(f"Background task scheduled. Comic ID: {comic_id}")
-        return {"message": "Comic generation task started.", "comic_id": comic_id}
-    except Exception as e:
-        logger.exception("Failed to trigger workflow task.", exc_info=e)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to start comic generation task.")
-
-@app.get("/v1/comics/status/{comic_id}", tags=["Comic Generation"])
-async def get_comic_status_endpoint(
-    comic_id: str,
-    db_client: DatabaseClientV2 = Depends(get_db_client)
-):
-    """
-    주어진 comic_id에 해당하는 만화 생성 작업의 상태를 조회합니다.
-
-    - **comic_id**: 조회할 작업의 고유 ID.
-    """
-    logger.info(f"API Request: Get status for comic_id='{comic_id}'")
-    # DB에서 상태 조회 (DatabaseClientV2에 get_status 와 같은 메서드 필요 가정)
-    # status_data = await db_client.get_status(comic_id) # 예시
-    # 임시로 Redis get 사용 (실제로는 더 구조화된 데이터 필요)
-    status_data = await db_client.get(f"comic_status::{comic_id}") # 예시 키
-
-    if status_data:
-        # status_data가 JSON 문자열이면 파싱 필요할 수 있음
-        try:
-            import json
-            return json.loads(status_data) if isinstance(status_data, str) else status_data
-        except json.JSONDecodeError:
-             return {"status": "unknown", "detail": "Failed to parse status data."}
-    else:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Comic generation task status not found.")
-
-# --- Root Endpoint ---
-@app.get("/", tags=["General"])
-async def read_root():
-    """API 루트 엔드포인트."""
-    return {"message": f"{settings.APP_NAME} running. Version: {settings.APP_VERSION}"}
+app.include_router(v1_endpoints.router)
+logger.info("Included API router from app.api.v1.endpoints")
+# # --- API 라우터 정의 ---
+# @app.post("/v1/comics", status_code=status.HTTP_202_ACCEPTED, tags=["Comic Generation"])
+# async def generate_comic_endpoint(
+#     query: str,
+#     background_tasks: BackgroundTasks,
+#     # 의존성 주입으로 컴파일된 앱과 DB 클라이언트 가져오기
+#     compiled_app: StateGraph = Depends(get_compiled_workflow_app),
+#     db_client: DatabaseClientV2 = Depends(get_db_client)
+# ):
+#     """
+#     만화 생성을 위한 워크플로우를 백그라운드에서 실행합니다.
+#
+#     - **query**: 만화의 주제가 될 사용자 입력 쿼리 문자열.
+#     """
+#     # 앱 초기화 오류 확인
+#     if hasattr(app.state, 'initialization_error') and app.state.initialization_error:
+#          raise HTTPException(
+#              status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+#              detail=f"Workflow service not available due to initialization error: {app.state.initialization_error}"
+#          )
+#     if not compiled_app:
+#         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Workflow is not compiled.")
+#
+#     logger.info(f"API Request: Generate Comic for query='{query}'")
+#     try:
+#         # trigger_workflow_task 함수가 comic_id를 반환한다고 가정
+#         comic_id = await trigger_workflow_task(query, background_tasks, compiled_app, db_client)
+#         logger.info(f"Background task scheduled. Comic ID: {comic_id}")
+#         return {"message": "Comic generation task started.", "comic_id": comic_id}
+#     except Exception as e:
+#         logger.exception("Failed to trigger workflow task.", exc_info=e)
+#         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to start comic generation task.")
+#
+# @app.get("/v1/comics/status/{comic_id}", tags=["Comic Generation"])
+# async def get_comic_status_endpoint(
+#     comic_id: str,
+#     db_client: DatabaseClientV2 = Depends(get_db_client)
+# ):
+#     """
+#     주어진 comic_id에 해당하는 만화 생성 작업의 상태를 조회합니다.
+#
+#     - **comic_id**: 조회할 작업의 고유 ID.
+#     """
+#     logger.info(f"API Request: Get status for comic_id='{comic_id}'")
+#     # DB에서 상태 조회 (DatabaseClientV2에 get_status 와 같은 메서드 필요 가정)
+#     # status_data = await db_client.get_status(comic_id) # 예시
+#     # 임시로 Redis get 사용 (실제로는 더 구조화된 데이터 필요)
+#     status_data = await db_client.get(f"comic_status::{comic_id}") # 예시 키
+#
+#     if status_data:
+#         # status_data가 JSON 문자열이면 파싱 필요할 수 있음
+#         try:
+#             import json
+#             return json.loads(status_data) if isinstance(status_data, str) else status_data
+#         except json.JSONDecodeError:
+#              return {"status": "unknown", "detail": "Failed to parse status data."}
+#     else:
+#         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Comic generation task status not found.")
+#
+# # --- Root Endpoint ---
+# @app.get("/", tags=["General"])
+# async def read_root():
+#     """API 루트 엔드포인트."""
+#     return {"message": f"{settings.APP_NAME} running. Version: {settings.APP_VERSION}"}
 
 
 # --- 메인 실행 블록 (로컬 개발용) ---

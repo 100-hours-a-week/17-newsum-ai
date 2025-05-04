@@ -1,43 +1,42 @@
-# app/nodes/19_postprocessor_node.py (Improved Version)
+# app/nodes/19_postprocessor_node.py (Refactored)
 
 import asyncio
 import os
 import hashlib
 from io import BytesIO
 from datetime import datetime, timezone
-from typing import List, Dict, Any, Optional, Tuple # Tuple 임포트
+from typing import List, Dict, Any, Optional, Tuple
 import aiohttp
 import tenacity
 from tenacity import retry, stop_after_attempt, wait_exponential, RetryError
 
 # 프로젝트 구성 요소 임포트
-from app.config.settings import settings # 기본값 참조용
+from app.config.settings import settings
 from app.services.storage_client_v2 import StorageClient # S3 업로드용
-from app.utils.logger import get_logger
+from app.utils.logger import get_logger, summarize_for_logging # MODIFIED: Added summarize_for_logging
 from app.workflows.state import ComicState
 
-# 로거 설정
 logger = get_logger(__name__)
 
-# Pillow 의존성 처리
 PILLOW_AVAILABLE = False
 try:
     from PIL import Image, ImageDraw, ImageFont
     PILLOW_AVAILABLE = True
     logger.info("Pillow library found.")
 except ImportError:
-    Image, ImageDraw, ImageFont = None, None, None # type: ignore
+    Image, ImageDraw, ImageFont = None, None, None
     logger.error("Pillow library not installed. Image composition disabled.")
-
 
 class PostprocessorNode:
     """
     생성된 이미지와 텍스트를 최종 만화 형식으로 후처리합니다.
-    - 이미지 다운로드, 텍스트 선택, 이미지 합성(Pillow), 저장/업로드(StorageClient), ALT 텍스트 생성.
-    - 설정은 `state.config` 우선, 없으면 `settings` 기본값 사용.
+    [... existing docstring ...]
     """
-    inputs: List[str] = ["image_urls", "scenarios", "translated_text", "comic_id", "chosen_idea", "trace_id", "config", "processing_stats"]
-    outputs: List[str] = ["final_comic", "processing_stats", "error_message"]
+    inputs: List[str] = [ # MODIFIED: Added comic_id, trace_id
+        "image_urls", "scenarios", "translated_text", "comic_id", "chosen_idea",
+        "trace_id", "config"
+    ]
+    outputs: List[str] = ["final_comic", "node19_processing_stats", "error_message"]
 
     def __init__(self, storage_client: Optional[StorageClient] = None):
         self.storage_client = storage_client
@@ -45,7 +44,9 @@ class PostprocessorNode:
         logger.info(f"PostprocessorNode initialized {'with' if storage_client else 'without'} StorageClient.")
         if not PILLOW_AVAILABLE: logger.error("Image composition disabled.")
 
-    def _load_runtime_config(self, config: Dict[str, Any]):
+    # --- MODIFIED: Added extra_log_data argument ---
+    def _load_runtime_config(self, config: Dict[str, Any], extra_log_data: Dict):
+        """실행 시 필요한 설정을 config 또는 settings에서 로드"""
         self.final_width = int(config.get("final_image_width", settings.DEFAULT_FINAL_IMAGE_WIDTH))
         self.font_path = config.get("default_font_path", settings.DEFAULT_FONT_PATH)
         self.font_size_ratio = int(config.get("text_overlay_font_size_ratio", settings.DEFAULT_FONT_SIZE_RATIO))
@@ -56,22 +57,26 @@ class PostprocessorNode:
         self.output_quality = int(config.get("final_image_quality", settings.DEFAULT_IMAGE_QUALITY))
         self.http_timeout = config.get('http_timeout', settings.DEFAULT_HTTP_TIMEOUT)
         self.max_alt_text_len = int(config.get("max_alt_text_len", settings.DEFAULT_MAX_ALT_TEXT_LEN))
-        logger.debug("Postprocessor runtime config loaded.")
+        logger.debug("Postprocessor runtime config loaded.", extra=extra_log_data) # MODIFIED
 
-    def _load_font(self, trace_id: Optional[str]) -> Optional[ImageFont.FreeTypeFont]:
-        log_prefix = f"[{trace_id}]" if trace_id else ""
+    # --- MODIFIED: Added extra_log_data argument ---
+    def _load_font(self, trace_id: Optional[str], comic_id: Optional[str]) -> Optional[ImageFont.FreeTypeFont]:
+        """폰트 로드 (캐싱 포함)"""
+        extra_log_data = {'trace_id': trace_id, 'comic_id': comic_id} # MODIFIED
         if not PILLOW_AVAILABLE or not self.font_path: return None
-        font_key = (self.font_path, self.font_size_ratio)
+        font_key = (self.font_path, self.font_size_ratio) # Key depends on path and base ratio/size
         if font_key in self.font_cache: return self.font_cache[font_key]
+
         if not os.path.exists(self.font_path):
-            logger.error(f"{log_prefix} Font not found: {self.font_path}")
+            logger.error(f"Font not found: {self.font_path}", extra=extra_log_data) # MODIFIED
             self.font_cache[font_key] = None; return None
         try:
-            font = ImageFont.truetype(self.font_path, size=20) # Load with base size
-            logger.info(f"{log_prefix} Loaded font template: {self.font_path}")
-            self.font_cache[font_key] = font; return font
+            # Load with a reasonable base size (e.g., 20) - actual size adjusted later
+            font_template = ImageFont.truetype(self.font_path, size=20)
+            logger.info(f"Loaded font template: {self.font_path}", extra=extra_log_data) # MODIFIED
+            self.font_cache[font_key] = font_template; return font_template
         except Exception as e:
-            logger.exception(f"{log_prefix} Failed to load font {self.font_path}: {e}")
+            logger.exception(f"Failed to load font {self.font_path}", extra=extra_log_data) # MODIFIED
             self.font_cache[font_key] = None; return None
 
     @tenacity.retry(
@@ -80,215 +85,371 @@ class PostprocessorNode:
         retry=tenacity.retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError)),
         reraise=True
     )
-    async def _download_image(self, url: str, session: aiohttp.ClientSession, trace_id: Optional[str]) -> Optional[bytes]:
-        if not url: return None
-        log_prefix = f"[{trace_id}]" if trace_id else ""
-        logger.debug(f"{log_prefix} Downloading image: {url[:80]}...")
+    async def _download_image(self, url: str, session: aiohttp.ClientSession, trace_id: Optional[str], comic_id: Optional[str]) -> Optional[bytes]: # MODIFIED: Added comic_id
+        """이미지 다운로드 (재시도 포함)"""
+        if not url or not isinstance(url, str): return None # Added type check
+        dl_log_data = {'trace_id': trace_id, 'comic_id': comic_id, 'url': url[:80]} # MODIFIED
+        logger.debug("Downloading image...", extra=dl_log_data) # MODIFIED
         try:
-             async with session.get(url, timeout=aiohttp.ClientTimeout(total=self.http_timeout)) as response:
-                  response.raise_for_status(); content = await response.read()
-                  logger.debug(f"{log_prefix} Downloaded {len(content)} bytes from {url[:80]}")
+             # Increased timeout slightly for downloads
+             async with session.get(url, timeout=aiohttp.ClientTimeout(total=self.http_timeout * 1.5)) as response:
+                  response.raise_for_status()
+                  content = await response.read()
+                  logger.debug(f"Downloaded {len(content)} bytes.", extra=dl_log_data) # MODIFIED
                   return content
-        except RetryError as e: logger.error(f"{log_prefix} Download failed for {url[:80]} after retries: {e}"); raise
-        except Exception as e: logger.error(f"{log_prefix} Download failed for {url[:80]}: {e}"); raise
+        except RetryError as e:
+             logger.error(f"Download failed after retries: {e}", extra=dl_log_data) # MODIFIED
+             raise # Re-raise for gather to catch
+        except Exception as e:
+             logger.error(f"Download failed: {e}", exc_info=True, extra=dl_log_data) # MODIFIED
+             raise # Re-raise for gather/retry
 
-    def _select_panel_text(self, panel_index: int, scenarios: List[Dict], translated_text: Optional[List[Dict]], trace_id: Optional[str]) -> str:
-        # Node 18 로직과 동일/유사
-        log_prefix = f"[{trace_id}]" if trace_id else ""
+    # --- MODIFIED: Added extra_log_data argument ---
+    def _select_panel_text(self, panel_index: int, scenarios: List[Dict], translated_text: Optional[List[Dict]], trace_id: Optional[str], comic_id: Optional[str]) -> str:
+        """번역된 텍스트가 있으면 사용, 없으면 원본 사용"""
+        extra_log_data = {'trace_id': trace_id, 'comic_id': comic_id, 'panel_index': panel_index + 1} # MODIFIED
+        original_dialogue = ""
         try:
-            original_dialogue = scenarios[panel_index].get('dialogue', '')
-            scene_num = panel_index + 1
-            if translated_text:
+            if scenarios and isinstance(scenarios, list) and panel_index < len(scenarios) and isinstance(scenarios[panel_index], dict):
+                original_dialogue = scenarios[panel_index].get('dialogue', '') or "" # Default to empty string
+            else:
+                 logger.warning("Invalid scenarios data or index.", extra=extra_log_data) # MODIFIED
+                 return "" # Return empty if scenario data invalid
+
+            # Check translated_text only if it's a list
+            if translated_text and isinstance(translated_text, list):
+                scene_num_to_find = panel_index + 1
                 for item in translated_text:
-                    if isinstance(item, dict) and item.get('scene') == scene_num:
-                        return item.get('translated_dialogue') if item.get('translated_dialogue') is not None else original_dialogue
-                logger.warning(f"{log_prefix} Translation not found for panel {scene_num}, using original.")
-            return original_dialogue
-        except IndexError: logger.error(f"{log_prefix} Error accessing scenario panel {panel_index}."); return ""
+                    # Check item structure and scene number
+                    if isinstance(item, dict) and item.get('scene') == scene_num_to_find:
+                        # Use translated text if it's a non-empty string
+                        trans_dialogue = item.get('translated_dialogue')
+                        if isinstance(trans_dialogue, str) and trans_dialogue.strip():
+                            # logger.debug("Using translated dialogue.", extra=extra_log_data) # MODIFIED
+                            return trans_dialogue
+                        elif trans_dialogue == "": # Explicitly empty translation
+                             # logger.debug("Using empty translated dialogue.", extra=extra_log_data) # MODIFIED
+                             return ""
+                        else: # Translation failed (None) or missing
+                             logger.warning("Translation failed or missing for panel, using original.", extra=extra_log_data) # MODIFIED
+                             return original_dialogue # Fallback to original
+                # Loop finished without finding matching scene
+                # logger.debug("Translation not found for panel, using original.", extra=extra_log_data) # MODIFIED
+                return original_dialogue
+            else: # No translation data provided
+                 # logger.debug("No translation data, using original dialogue.", extra=extra_log_data) # MODIFIED
+                 return original_dialogue
+        except Exception as e: # Catch unexpected errors during access
+             logger.exception("Error selecting panel text.", extra=extra_log_data) # MODIFIED use exception
+             return "" # Return empty on error
 
-    def _compose_comic(self, panel_images_bytes: List[Optional[bytes]], panel_texts: List[str], trace_id: Optional[str]) -> Optional[Image.Image]:
-        log_prefix = f"[{trace_id}]" if trace_id else ""
-        if not PILLOW_AVAILABLE: logger.error(f"{log_prefix} Pillow unavailable."); return None
+    # --- MODIFIED: Added extra_log_data argument ---
+    def _compose_comic(self, panel_images_bytes: List[Optional[bytes]], panel_texts: List[str], trace_id: Optional[str], comic_id: Optional[str]) -> Optional[Image.Image]:
+        """4컷 만화 이미지 합성"""
+        extra_log_data = {'trace_id': trace_id, 'comic_id': comic_id} # MODIFIED
+        if not PILLOW_AVAILABLE: logger.error("Pillow unavailable.", extra=extra_log_data); return None # MODIFIED
+
         panel_images_pil = []
+        # Validate input bytes and load images
         for i, img_bytes in enumerate(panel_images_bytes):
-            if img_bytes:
-                try: panel_images_pil.append(Image.open(BytesIO(img_bytes)))
-                except Exception as img_err: logger.error(f"{log_prefix} Load failed panel {i+1}: {img_err}"); return None
-            else: logger.error(f"{log_prefix} Missing data panel {i+1}."); return None
-        if len(panel_images_pil) != 4: logger.error(f"{log_prefix} Need 4 images, got {len(panel_images_pil)}."); return None
+            if isinstance(img_bytes, bytes):
+                try:
+                    img = Image.open(BytesIO(img_bytes))
+                    # Ensure image is in RGB for consistent processing
+                    panel_images_pil.append(img.convert("RGB") if img.mode != 'RGB' else img)
+                except Exception as img_err:
+                    logger.error(f"Failed to load image bytes for panel {i+1}: {img_err}", extra=extra_log_data) # MODIFIED
+                    return None # Cannot proceed if any image fails to load
+            else:
+                logger.error(f"Missing image data for panel {i+1}.", extra=extra_log_data) # MODIFIED
+                return None # Cannot proceed
 
-        logger.info(f"{log_prefix} Composing 2x2 comic...")
+        if len(panel_images_pil) != 4:
+            logger.error(f"Incorrect number of valid images loaded ({len(panel_images_pil)}), need 4.", extra=extra_log_data) # MODIFIED
+            return None
+
+        logger.info("Composing 2x2 comic...", extra=extra_log_data) # MODIFIED
         try:
+            # Assume all panels have same original dimensions after generation (or use first panel's)
+            orig_width, orig_height = panel_images_pil[0].size
+            if orig_width <= 0 or orig_height <= 0: raise ValueError("Invalid panel dimensions")
+
             panel_width = self.final_width // 2
-            aspect_ratio = panel_images_pil[0].height / panel_images_pil[0].width if panel_images_pil[0].width > 0 else 1.0
+            aspect_ratio = orig_height / orig_width
             panel_height = int(panel_width * aspect_ratio)
             final_height = panel_height * 2
+
             resized_panels = [img.resize((panel_width, panel_height), Image.Resampling.LANCZOS) for img in panel_images_pil]
             final_image = Image.new('RGB', (self.final_width, final_height), color='white')
-            final_image.paste(resized_panels[0], (0, 0)); final_image.paste(resized_panels[1], (panel_width, 0))
-            final_image.paste(resized_panels[2], (0, panel_height)); final_image.paste(resized_panels[3], (panel_width, panel_height))
 
-            font_template = self._load_font(trace_id)
+            # Paste panels
+            final_image.paste(resized_panels[0], (0, 0))
+            final_image.paste(resized_panels[1], (panel_width, 0))
+            final_image.paste(resized_panels[2], (0, panel_height))
+            final_image.paste(resized_panels[3], (panel_width, panel_height))
+
+            # Add text overlay
+            # Pass IDs
+            font_template = self._load_font(trace_id, comic_id)
             if font_template:
-                 font_size = max(15, panel_height // self.font_size_ratio)
-                 try: font = font_template.font_variant(size=font_size)
-                 except AttributeError: font = ImageFont.truetype(font_template.path, size=font_size)
-                 draw = ImageDraw.Draw(final_image)
-                 positions = [(0, panel_height), (panel_width, panel_height), (0, final_height), (panel_width, final_height)]
-                 padding = font_size // 2
-                 for i, text in enumerate(panel_texts):
-                      if text:
-                           # TODO: Implement text wrapping for long dialogues
-                           px, py_bottom = positions[i]
-                           try:
-                                bbox = draw.textbbox((0, 0), text, font=font)
-                                tx = px + max(0, (panel_width - (bbox[2] - bbox[0])) // 2)
-                                ty = py_bottom - (bbox[3] - bbox[1]) - padding
-                                draw.text((tx, ty), text, fill=self.font_color, font=font)
-                           except Exception as txt_err: logger.error(f"{log_prefix} Draw text err panel {i+1}: {txt_err}")
-            else: logger.warning(f"{log_prefix} Font not loaded, skipping text overlay.")
-            logger.info(f"{log_prefix} Comic composition complete.")
-            return final_image
-        except Exception as e: logger.exception(f"{log_prefix} Composition error: {e}"); return None
+                 # Dynamic font size based on panel height
+                 font_size = max(10, panel_height // self.font_size_ratio) # Ensure minimum size
+                 try:
+                     # Use font_variant if available, otherwise reload with size
+                     try: font = font_template.font_variant(size=font_size)
+                     except AttributeError: font = ImageFont.truetype(font_template.path, size=font_size)
 
+                     draw = ImageDraw.Draw(final_image)
+                     positions = [(0, 0), (panel_width, 0), (0, panel_height), (panel_width, panel_height)] # Top-left corners
+                     padding = font_size // 4 # Smaller padding
+
+                     for i, text in enumerate(panel_texts):
+                          if text and isinstance(text, str): # Check text validity
+                               px, py_top = positions[i]
+                               # Simplified text positioning: bottom-center within panel
+                               try:
+                                    bbox = draw.textbbox((0, 0), text, font=font) # Estimate size
+                                    text_width = bbox[2] - bbox[0]
+                                    text_height = bbox[3] - bbox[1]
+                                    # Center horizontally, place near bottom vertically
+                                    tx = px + max(padding, (panel_width - text_width) // 2)
+                                    ty = py_top + panel_height - text_height - padding
+                                    draw.text((tx, ty), text, fill=self.font_color, font=font)
+                               except Exception as txt_err:
+                                    logger.error(f"Draw text error panel {i+1}: {txt_err}", extra=extra_log_data) # MODIFIED
+                 except Exception as font_err:
+                     logger.error(f"Failed to set font size {font_size}: {font_err}", extra=extra_log_data) # MODIFIED
+            else: logger.warning("Font not loaded, skipping text overlay.", extra=extra_log_data) # MODIFIED
+
+            logger.info("Comic composition complete.", extra=extra_log_data) # MODIFIED
+            return final_image
+        except Exception as e:
+            logger.exception("Error during comic composition.", extra=extra_log_data) # MODIFIED use exception
+            return None
+
+    # --- MODIFIED: Added extra_log_data argument ---
     async def _save_or_upload_image(self, image: Image.Image, comic_id: str, trace_id: Optional[str]) -> Optional[str]:
-        log_prefix = f"[{trace_id}]" if trace_id else ""
+        """최종 이미지 저장 또는 업로드"""
+        extra_log_data = {'trace_id': trace_id, 'comic_id': comic_id} # MODIFIED
         if image is None: return None
         filename = f"{comic_id}.{self.output_format.lower()}"
         content_type = f"image/{self.output_format.lower()}"
-        logger.info(f"{log_prefix} Saving/Uploading final comic: {filename}...")
+        logger.info(f"Saving/Uploading final comic: {filename}...", extra=extra_log_data) # MODIFIED
         img_byte_arr = BytesIO()
         try:
-            image.save(img_byte_arr, format=self.output_format, quality=self.output_quality)
+            # Ensure format is supported by Pillow and valid
+            save_format = self.output_format if self.output_format in Image.SAVE else 'PNG'
+            image.save(img_byte_arr, format=save_format, quality=self.output_quality)
             image_bytes = img_byte_arr.getvalue()
-        except Exception as e: logger.exception(f"{log_prefix} Save to buffer failed: {e}"); return None
+            if not image_bytes: raise ValueError("Image save resulted in empty bytes.")
+        except Exception as e:
+            logger.exception(f"Failed to save image to buffer: {e}", extra=extra_log_data) # MODIFIED use exception
+            return None
 
+        output_location: Optional[str] = None
+        # Try S3 upload first if enabled and client available
         if self.upload_to_s3 and self.storage_client:
-            s3_key = f"comics/{filename}"
+            s3_key = f"comics/{filename}" # Example path
             try:
-                # WARNING: Assumes storage_client has upload_bytes method.
-                # If not, use the temporary file workaround commented below.
-                logger.debug(f"{log_prefix} Uploading {len(image_bytes)} bytes to S3 key: {s3_key}")
-                upload_result = await self.storage_client.upload_bytes(file_bytes=image_bytes, object_key=s3_key, content_type=content_type)
-                # # --- Temp file workaround ---
-                # temp_dir = self.save_dir or "."
-                # temp_path = os.path.join(temp_dir, f"temp_{filename}")
-                # os.makedirs(os.path.dirname(temp_path), exist_ok=True)
-                # with open(temp_path, "wb") as f: f.write(image_bytes)
-                # logger.debug(f"{log_prefix} Using temp file {temp_path} for S3 upload.")
-                # upload_result = await self.storage_client.upload_file(file_path=temp_path, object_key=s3_key, content_type=content_type)
-                # try: os.remove(temp_path)
-                # except OSError as rm_err: logger.warning(f"Could not remove temp file {temp_path}: {rm_err}")
-                # # --- End temp file workaround ---
+                logger.debug(f"Attempting S3 upload: {s3_key} ({len(image_bytes)} bytes)", extra=extra_log_data) # MODIFIED
+                # Pass trace_id/comic_id if client supports them
+                upload_result = await self.storage_client.upload_bytes(
+                    file_bytes=image_bytes, object_key=s3_key, content_type=content_type #, trace_id=trace_id
+                )
+                if upload_result and isinstance(upload_result, dict) and not upload_result.get("error"):
+                    s3_url = upload_result.get("s3_url") # Assuming client returns URL
+                    if s3_url:
+                         logger.info(f"Successfully uploaded to S3: {s3_url}", extra=extra_log_data) # MODIFIED
+                         output_location = s3_url
+                    else:
+                         logger.warning("S3 upload successful but no URL returned.", extra=extra_log_data) # MODIFIED
+                         # Could fallback to local save here if needed
+                else:
+                     err = upload_result.get("error", "Unknown S3 error") if isinstance(upload_result, dict) else "Invalid upload result"
+                     logger.error(f"S3 upload failed: {err}", extra=extra_log_data) # MODIFIED
+            except AttributeError:
+                 logger.error("StorageClient missing 'upload_bytes' method. S3 upload skipped.", extra=extra_log_data) # MODIFIED
+            except Exception as e:
+                 logger.exception("S3 upload encountered an error.", extra=extra_log_data) # MODIFIED use exception
 
-                if "error" in upload_result: logger.error(f"{log_prefix} S3 upload failed: {upload_result['error']}"); return None
-                s3_url = upload_result.get("s3_url") # Or generate URL based on client response
-                if s3_url: logger.info(f"{log_prefix} Uploaded to S3: {s3_url}"); return s3_url
-                else: logger.error(f"{log_prefix} S3 upload OK but no URL returned."); return None
-            except AttributeError: logger.error(f"{log_prefix} StorageClient lacks upload_bytes. S3 upload failed."); return None # Or implement temp file
-            except Exception as e: logger.exception(f"{log_prefix} S3 upload error: {e}"); return None
-        elif self.save_dir:
+        # Fallback to local save if S3 failed or disabled, and local dir is set
+        if not output_location and self.save_dir and isinstance(self.save_dir, str):
             try:
-                os.makedirs(self.save_dir, exist_ok=True); filepath = os.path.join(self.save_dir, filename)
+                os.makedirs(self.save_dir, exist_ok=True)
+                filepath = os.path.join(self.save_dir, filename)
                 with open(filepath, "wb") as f: f.write(image_bytes)
-                logger.info(f"{log_prefix} Saved locally: {filepath}"); return filepath
-            except Exception as e: logger.exception(f"{log_prefix} Local save failed: {e}"); return None
-        else: logger.error(f"{log_prefix} Cannot save: S3 disabled/failed and no local dir."); return None
+                logger.info(f"Successfully saved locally: {filepath}", extra=extra_log_data) # MODIFIED
+                output_location = filepath # Return local path
+            except Exception as e:
+                logger.exception(f"Local save failed: {e}", extra=extra_log_data) # MODIFIED use exception
 
-    def _generate_alt_text(self, scenarios: List[Dict], chosen_idea: Optional[Dict], trace_id: Optional[str]) -> str:
-        log_prefix = f"[{trace_id}]" if trace_id else ""
-        logger.debug(f"{log_prefix} Generating ALT text...")
+        if not output_location:
+             logger.error("Failed to save or upload final comic image.", extra=extra_log_data) # MODIFIED
+
+        return output_location
+
+    # --- MODIFIED: Added extra_log_data argument ---
+    def _generate_alt_text(self, scenarios: List[Dict], chosen_idea: Optional[Dict], trace_id: Optional[str], comic_id: Optional[str]) -> str:
+        """ALT 텍스트 생성"""
+        extra_log_data = {'trace_id': trace_id, 'comic_id': comic_id} # MODIFIED
+        logger.debug("Generating ALT text...", extra=extra_log_data) # MODIFIED
+        default_alt = "A 4-panel comic strip."
         try:
-            title = chosen_idea.get('idea_title', '4-panel comic') if chosen_idea else '4-panel comic'
-            alt_parts = [f"{title}."]
-            if scenarios and len(scenarios) == 4:
+            # Ensure chosen_idea is a dict before accessing
+            title = chosen_idea.get('idea_title', default_alt) if isinstance(chosen_idea, dict) else default_alt
+            alt_parts = [title.rstrip('.') + "."] # Start with title
+
+            # Ensure scenarios is a list of 4 dicts
+            if scenarios and isinstance(scenarios, list) and len(scenarios) == 4 and all(isinstance(p, dict) for p in scenarios):
                 for i, panel in enumerate(scenarios):
                     desc = panel.get('panel_description', '').strip()
                     dialogue = panel.get('dialogue', '').strip()
-                    panel_alt = f"Panel {i+1}: {desc}" if desc else f"Panel {i+1} description."
+                    panel_alt = f"Panel {i+1}: {desc}" if desc else f"Panel {i+1}." # Default description if missing
                     if dialogue: panel_alt += f" Dialogue: '{dialogue}'"
-                    alt_parts.append(panel_alt.rstrip('.') + ".")
-            alt_text = " ".join(alt_parts)
-            final_alt = self._truncate_text(alt_text, self.max_alt_text_len)
-            logger.info(f"{log_prefix} Generated ALT text: '{final_alt[:100]}...'")
-            return final_alt
-        except Exception as e: logger.exception(f"{log_prefix} ALT text generation failed: {e}"); return "A 4-panel comic strip."
+                    alt_parts.append(panel_alt.rstrip('.') + ".") # Ensure period separation
+            else:
+                 logger.warning("Invalid scenarios data for ALT text generation.", extra=extra_log_data) # MODIFIED
 
-    def _truncate_text(self, text: Optional[str], max_length: int) -> str: # Helper duplication ok for clarity
-        if not text: return ""
-        return text[:max_length - 3] + "..." if len(text) > max_length else text
+            alt_text = " ".join(alt_parts)
+            # Truncate using helper
+            final_alt = self._truncate_text(alt_text, self.max_alt_text_len)
+            logger.info(f"Generated ALT text: '{final_alt[:100]}...'", extra=extra_log_data) # MODIFIED
+            return final_alt if final_alt else default_alt
+        except Exception as e:
+            logger.exception("ALT text generation failed.", extra=extra_log_data) # MODIFIED use exception
+            return default_alt
 
     async def run(self, state: ComicState) -> Dict[str, Any]:
+        """이미지 다운로드, 합성, 저장/업로드 및 ALT 텍스트 생성 실행"""
         start_time = datetime.now(timezone.utc)
-        trace_id = state.trace_id
-        comic_id = state.comic_id
-        log_prefix = f"[{trace_id}]"
-        logger.info(f"{log_prefix} Executing PostprocessorNode...")
+        # --- MODIFIED: Get trace_id and comic_id safely ---
+        comic_id = getattr(state, 'comic_id', 'unknown_comic')
+        trace_id = getattr(state, 'trace_id', comic_id)
+        extra_log_data = {'trace_id': trace_id, 'comic_id': comic_id}
+        # -------------------------------------------------
 
-        image_urls = state.image_urls or []
-        scenarios = state.scenarios or []
-        translated_text = state.translated_text
-        chosen_idea = state.chosen_idea
-        config = state.config or {}
-        processing_stats = state.processing_stats or {}
+        node_class_name = self.__class__.__name__
+        # --- ADDED: Start Logging ---
+        logger.info(f"--- Executing {node_class_name} ---", extra=extra_log_data)
+        logger.debug(f"Entering state:\n{summarize_for_logging(state, is_state_object=True)}", extra=extra_log_data)
+        # --------------------------
 
-        self._load_runtime_config(config)
+        image_urls = getattr(state, 'image_urls', []) or []
+        scenarios = getattr(state, 'scenarios', []) or []
+        # Allow translated_text to be None
+        translated_text = getattr(state, 'translated_text', None)
+        chosen_idea = getattr(state, 'chosen_idea', None)
+        config = getattr(state, 'config', {}) or {}
+
+        # --- MODIFIED: Pass log data ---
+        self._load_runtime_config(config, extra_log_data)
+        # --------------------------
+
         final_comic_output = {"url": None, "alt_text": None}
         error_message: Optional[str] = None
         final_image_pil: Optional[Image.Image] = None
+        task_errors: List[str] = [] # Collect errors from steps
 
-        if not PILLOW_AVAILABLE: error_message = "Pillow library unavailable."
-        elif len(image_urls) != 4: error_message = f"Requires 4 images, got {len(image_urls)}."
-        elif len(scenarios) != 4: error_message = "Requires 4 scenarios."
+        # --- Input Validation and Dependency Check ---
+        if not PILLOW_AVAILABLE:
+            error_message = "Pillow library unavailable, cannot compose image."
+            logger.error(error_message, extra=extra_log_data)
+        elif not image_urls or not isinstance(image_urls, list) or len(image_urls) != 4 or not all(isinstance(url, str) for url in image_urls):
+            error_message = f"Requires 4 valid image URLs, found {len(image_urls)}."
+            logger.error(error_message, extra=extra_log_data)
+        elif not scenarios or not isinstance(scenarios, list) or len(scenarios) != 4 or not all(isinstance(p, dict) for p in scenarios):
+            error_message = "Requires 4 valid scenario panel dictionaries."
+            logger.error(error_message, extra=extra_log_data)
+        # ---------------------------------------------
 
         if not error_message:
-            # --- 1. Download Images ---
-            logger.info(f"{log_prefix} Downloading panel images...")
-            panel_images_bytes: List[Optional[bytes]] = [None] * 4
-            download_errors = 0
             try:
-                timeout = aiohttp.ClientTimeout(total=self.http_timeout * 2)
+                # --- 1. Download Images ---
+                logger.info("Downloading panel images...", extra=extra_log_data)
+                panel_images_bytes: List[Optional[bytes]] = [None] * 4
+                download_errors = 0
+                timeout = aiohttp.ClientTimeout(total=self.http_timeout * 1.5) # Slightly longer timeout for downloads
                 async with aiohttp.ClientSession(timeout=timeout) as session:
-                    tasks = [self._download_image(url, session, trace_id) for url in image_urls]
+                    tasks = [self._download_image(url, session, trace_id, comic_id) for url in image_urls] # Pass IDs
                     results = await asyncio.gather(*tasks, return_exceptions=True)
                     for i, res in enumerate(results):
-                        if isinstance(res, bytes): panel_images_bytes[i] = res
-                        else: download_errors += 1; logger.error(f"{log_prefix} DL fail panel {i+1}: {res}")
-            except Exception as gather_err: error_message = f"Image download error: {gather_err}"
+                        if isinstance(res, bytes):
+                            panel_images_bytes[i] = res
+                        else:
+                            download_errors += 1
+                            err_msg = f"Download failed for panel {i+1}: {res}"
+                            logger.error(err_msg, exc_info=isinstance(res, Exception) and res, extra=extra_log_data)
+                            task_errors.append(f"Image DL Panel {i+1} Error: {res}")
 
-            if download_errors > 0 and not error_message: error_message = f"Failed to download {download_errors} images."
+                if download_errors > 0:
+                    # Proceed if some images downloaded, but log errors
+                    logger.warning(f"Failed to download {download_errors} panel images.", extra=extra_log_data)
+                    if download_errors == 4: # If all failed, cannot continue
+                         raise ValueError("All image downloads failed.")
 
-            # --- 2. Compose Image ---
-            if not error_message:
-                logger.info(f"{log_prefix} Composing final image...")
-                panel_texts = [self._select_panel_text(i, scenarios, translated_text, trace_id) for i in range(4)]
-                loop = asyncio.get_running_loop()
-                try:
-                    final_image_pil = await loop.run_in_executor(None, self._compose_comic, panel_images_bytes, panel_texts, trace_id)
-                    if final_image_pil is None: error_message = "Comic composition failed."
-                except Exception as compose_err: error_message = f"Composition error: {compose_err}"
+                # --- 2. Compose Image ---
+                # Proceed only if we have exactly 4 byte arrays (even if some are None initially, but filtered later)
+                if len(panel_images_bytes) == 4:
+                    logger.info("Composing final image...", extra=extra_log_data)
+                    # Select text *before* potentially slow composition
+                    panel_texts = [self._select_panel_text(i, scenarios, translated_text, trace_id, comic_id) for i in range(4)] # Pass IDs
+                    loop = asyncio.get_running_loop()
+                    # Pass IDs
+                    final_image_pil = await loop.run_in_executor(None, self._compose_comic, panel_images_bytes, panel_texts, trace_id, comic_id)
+                    if final_image_pil is None:
+                        task_errors.append("Comic composition failed.")
+                        logger.error("Comic composition failed.", extra=extra_log_data)
+                else:
+                    task_errors.append("Incorrect number of images available for composition.")
+                    logger.error("Incorrect number of images available for composition after download attempt.", extra=extra_log_data)
 
-            # --- 3. Save/Upload Image ---
-            if not error_message and final_image_pil:
-                logger.info(f"{log_prefix} Saving/Uploading final image...")
-                output_url = await self._save_or_upload_image(final_image_pil, comic_id, trace_id)
-                if output_url: final_comic_output['url'] = output_url
-                else: error_message = "Failed to save or upload final comic."
 
-            # --- 4. Generate ALT Text ---
-            if not error_message and final_comic_output.get('url'):
-                 final_comic_output['alt_text'] = self._generate_alt_text(scenarios, chosen_idea, trace_id)
+                # --- 3. Save/Upload Image ---
+                if final_image_pil: # Check if composition succeeded
+                    logger.info("Saving/Uploading final image...", extra=extra_log_data)
+                    # Pass IDs
+                    output_url = await self._save_or_upload_image(final_image_pil, comic_id, trace_id)
+                    if output_url:
+                        final_comic_output['url'] = output_url
+                    else:
+                        task_errors.append("Failed to save or upload final comic.")
+                        logger.error("Failed to save or upload final comic image.", extra=extra_log_data)
+                elif "Comic composition failed." not in task_errors: # Avoid duplicate error if composition already failed
+                     task_errors.append("Skipping save/upload due to composition failure.")
 
-        if error_message: logger.error(f"{log_prefix} Postprocessing failed: {error_message}")
+
+                # --- 4. Generate ALT Text ---
+                # Generate ALT text even if image failed, might still be useful info
+                # Pass IDs
+                final_comic_output['alt_text'] = self._generate_alt_text(scenarios, chosen_idea, trace_id, comic_id)
+
+            except Exception as e:
+                # Catch unexpected errors during the process
+                logger.exception("Unexpected error during postprocessing.", extra=extra_log_data) # Use exception
+                error_message = f"Unexpected postprocessing error: {e}"
+
+        # Aggregate final error message
+        if task_errors and not error_message: error_message = "; ".join(task_errors)
+        elif task_errors and error_message: error_message = f"{error_message}; {'; '.join(task_errors)}"
+
+        if error_message:
+             logger.error(f"Postprocessing finished with errors: {error_message}", extra=extra_log_data)
 
         end_time = datetime.now(timezone.utc)
-        processing_stats['postprocessor_node_time'] = (end_time - start_time).total_seconds() # 키 형식 통일
-        logger.info(f"{log_prefix} PostprocessorNode finished in {processing_stats['postprocessor_node_time']:.2f} seconds.")
+        node19_processing_stats = (end_time - start_time).total_seconds()
 
         update_data: Dict[str, Any] = {
-            "final_comic": final_comic_output,
-            "processing_stats": processing_stats,
+            "final_comic": final_comic_output, # Return dict even if values are None
+            "node19_processing_stats": node19_processing_stats,
             "error_message": error_message
         }
+
+        # --- ADDED: End Logging ---
+        log_level = logger.warning if error_message else logger.info
+        log_level(f"Postprocessing result: Output URL {'Generated' if final_comic_output['url'] else 'Failed'}. Errors: {error_message is not None}", extra=extra_log_data)
+        logger.debug(f"Returning updates:\n{summarize_for_logging(update_data, is_state_object=False)}", extra=extra_log_data)
+        logger.info(f"--- Finished {node_class_name} --- (Elapsed: {node19_processing_stats:.2f}s)", extra=extra_log_data)
+        # -------------------------
+
         valid_keys = set(ComicState.model_fields.keys())
         return {k: v for k, v in update_data.items() if k in valid_keys}
