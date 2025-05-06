@@ -1,33 +1,40 @@
-# app/workflows/state.py
+# ai/app/workflows/state.py (수정)
+from typing import TypedDict, List, Optional, Dict, Any
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any # Dict, Any 추가
 
-class ComicState(BaseModel):
-    """
-    워크플로우 실행 중 전달되는 상태 정보 정의
-    """
-    comic_id: Optional[str] = Field(default=None, description="만화 생성 작업 고유 ID")
-    initial_query: Optional[str] = Field(default=None, description="사용자의 초기 입력 쿼리")
-    search_results: Optional[List[Dict[str, str]]] = Field(default=None, description="검색 엔진 결과")
-    news_urls: Optional[List[str]] = Field(default_factory=list, description="선별된 뉴스 URL 목록")
-    selected_url: Optional[str] = Field(default=None, description="대표 URL (사용 여부 재검토 필요)")
-    articles: Optional[List[str]] = Field(default_factory=list, description="스크랩된 기사 본문 리스트")
-    summaries: Optional[List[str]] = Field(default_factory=list, description="개별 기사 요약문 리스트") # <--- 개별 요약 저장
-    final_summary: Optional[str] = Field(default=None, description="개별 요약들을 종합한 최종 요약문") # <--- 최종 요약 저장 필드 추가
-    additional_context: Optional[Dict[str, Any]] = Field(default=None, description="YouTube 영상 및 댓글에서 추출한 추가 컨텍스트 정보")
-    public_sentiment: Optional[Dict[str, Dict[str, float]]] = Field(default=None, description="감정 분석 결과")
-    humor_texts: Optional[List[str]] = Field(default_factory=list, description="유머 포인트 목록")
-    scenarios: Optional[List[Dict[str, Any]]] = Field(default_factory=list, description="4컷 만화 시나리오")
-    lora_style: Optional[str] = Field(default=None, description="Flux 프롬프트에 적용할 LoRA 스타일 문장 (예: 'in Pixar style')")
-    image_urls: Optional[List[str]] = Field(default_factory=list, description="생성된 이미지 URL 목록")
-    final_comic_url: Optional[str] = Field(default=None, description="최종 조합된 만화 URL")
-    translated_texts: Optional[List[str]] = Field(default_factory=list, description="번역된 텍스트(대사 등)")
-    error_message: Optional[str] = Field(default=None, description="에러 발생 시 메시지")
-    processing_stats: Optional[Dict[str, Any]] = Field(default_factory=dict, description="처리 시간 등 성능 통계")
+class WorkflowState(BaseModel):
+    """(업그레이드됨) 워크플로우 상태 정의 (N06 필드 추가)"""
 
-    # Pydantic 모델 설정
+    # --- 메타데이터 (기존과 동일) ---
+    trace_id: Optional[str] = Field(None, description="실행 추적 ID")
+    comic_id: Optional[str] = Field(None, description="콘텐츠 고유 ID")
+    timestamp: Optional[str] = Field(None, description="워크플로우 시작 시간 (ISO)")
+    current_stage: Optional[str] = Field(None, description="현재 실행 중인 노드 이름")
+    retry_count: int = Field(0, description="현재 노드 재시도 횟수")
+    error_log: List[Dict[str, Any]] = Field(default_factory=list, description="오류 발생 기록")
+    config: Dict[str, Any] = Field(default_factory=dict, description="워크플로우 설정")
+    original_query: Optional[str] = Field(None, description="사용자의 원본 입력 쿼리")
+    error_message: Optional[str] = Field(None, description="최상위 워크플로우 오류 메시지") # 오류 처리용 필드
+
+    # --- Node 2 (Analyze Query) (기존과 동일) ---
+    query_context: Dict[str, Any] = Field(default_factory=dict, description="쿼리 분석 결과")
+    initial_context_results: List[Dict[str, Any]] = Field(default_factory=list, description="초기 컨텍스트 검색 결과")
+
+    # --- Node 3 (Understand & Plan) (기존과 동일) ---
+    search_strategy: Optional[Dict[str, Any]] = Field(None, description="수립된 최종 검색 전략")
+
+    # --- Node 4 (Execute Search) (기존과 동일) ---
+    raw_search_results: Optional[List[Dict[str, Any]]] = Field(None, description="실제 검색 실행 결과 (원시)")
+
+    # --- Node 5 (Report Generation) (기존과 동일) ---
+    report_content: Optional[str] = Field(None, description="생성된 보고서 내용 (HTML)")
+
+    # --- Node 6 (Save Report) 추가 ---
+    saved_report_path: Optional[str] = Field(None, description="로컬 파일 시스템에 저장된 보고서 파일 경로")
+
+    # --- 기타 필드 (필요시 추가) ---
+    # analyzed_data: Optional[Any] = Field(None, description="검색 결과 분석/종합 데이터")
+    # evaluation_metrics: Optional[Dict[str, float]] = Field(None, description="중간 결과 평가 지표")
+
     class Config:
-        extra = 'allow'  # 모델에 정의되지 않은 필드도 허용
-        json_encoders = {
-            # 필요시 커스텀 인코더 추가
-        }
+        arbitrary_types_allowed = True

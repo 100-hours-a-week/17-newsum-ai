@@ -1,133 +1,145 @@
-# app/api/v1/endpoints.py
-import logging
+# ai/app/api/v1/endpoints.py
+
 import json
-import asyncio
-from fastapi import APIRouter, HTTPException, Body, Request, BackgroundTasks, Path # Path 추가
-from fastapi.responses import StreamingResponse
-# from sse_starlette.sse import EventSourceResponse # SSE 라이브러리 사용 고려
+from fastapi import APIRouter, HTTPException, Body, BackgroundTasks, Path, Depends
+from typing import Annotated, Dict, Any, Optional  # 필요한 타입 임포트
 
-# 워크플로우 관련 (background_tasks에서 호출되므로 직접 import 필요 없을 수 있음)
-# from app.workflows.state import ComicState
-# from app.workflows.main_workflow import compiled_workflow
-
-# API 스키마 및 백그라운드 작업 함수 import
-from .schemas import AsyncComicRequest, AsyncComicResponse, StreamStatusUpdate
+from app.utils.logger import get_logger
+# 스키마 파일에서 모델 임포트 (경로는 실제 프로젝트 구조에 맞게 조정 필요)
+from .schemas import AsyncComicRequest, AsyncComicResponse, ComicStatusResponse
 from .background_tasks import trigger_workflow_task
-# DB 클라이언트 (스트리밍 시 상태 조회용)
-from app.services.database_client import DatabaseClient
+# 의존성 주입 관련 임포트
+from app.dependencies import CompiledWorkflowDep, DatabaseClientDep
 
-logger = logging.getLogger(__name__)
-db_client = DatabaseClient() # DB 클라이언트 인스턴스화 (위치 고려 필요)
+logger = get_logger(__name__)
 
-router = APIRouter(
-    prefix="/v1",
-    tags=["Comics V1"]
-)
+router = APIRouter(tags=["Comics V1"])  # API 라우터 설정
+
 
 @router.post(
     "/comics",
-    response_model=AsyncComicResponse, # 수정된 응답 모델
-    summary="Request Comic Generation (Async)",
-    description="Accepts a query, starts the comic generation workflow in the background, and returns a comic ID.",
-    status_code=202 # 202 Accepted 상태 코드 사용 권장
+    response_model=AsyncComicResponse,
+    summary="비동기 만화 생성 요청",
+    description="쿼리와 선택적 작가 ID, 사이트 설정을 포함하는 구조로 요청합니다.",
+    status_code=202  # Accepted 상태 코드 반환
 )
 async def request_comic_generation(
-    request: AsyncComicRequest = Body(...),
-    background_tasks: BackgroundTasks = BackgroundTasks() # BackgroundTasks 주입
+        # FastAPI의 의존성 주입 시스템 사용 예시 (또는 _shared_state 직접 사용)
+        compiled_app: CompiledWorkflowDep,
+        db_client: DatabaseClientDep,
+        # 요청 본문은 AsyncComicRequest 스키마로 유효성 검사 및 파싱
+        request_data: AsyncComicRequest = Body(...),
+        # 백그라운드 작업 실행을 위한 FastAPI 객체
+        background_tasks: BackgroundTasks = BackgroundTasks(),
 ):
     """
-    만화 생성 워크플로우를 백그라운드에서 시작하고 즉시 comic_id를 반환합니다.
+    만화 생성을 비동기적으로 요청하는 API 엔드포인트입니다.
+    사용자 쿼리, 작가 ID, 선호 검색 사이트 정보를 받아 워크플로우를 시작합니다.
     """
-    logger.info(f"[/v1/comics] 비동기 생성 요청 수신: query='{request.query}'")
-    try:
-        # 백그라운드 작업 트리거 함수 호출
-        comic_id = await trigger_workflow_task(request.query, background_tasks)
-        logger.info(f"Workflow task started in background with comic_id: {comic_id}")
+    # 요청 데이터에서 필요한 정보 추출
+    user_query = request_data.data.query
+    user_writer_id = request_data.writer_id
+    user_site_preferences_model = request_data.data.site  # Pydantic 모델 형태
 
+    log_extra = {'writer_id': user_writer_id or 'default'}  # 로그용 컨텍스트
+    logger.info(
+        f"POST /comics 요청 수신: query='{user_query}', "
+        f"writer_id='{user_writer_id or 'default'}', "
+        f"site_preferences_provided={user_site_preferences_model is not None}",
+        extra=log_extra
+    )
+
+    # --- 워크플로우 시작 시 전달할 config 딕셔너리 구성 ---
+    config_for_workflow: Dict[str, Any] = {
+        "writer_id": user_writer_id
+        # 필요 시 request_data에서 다른 설정값 추출하여 config에 추가 가능
+        # 예: "target_audience": request_data.data.target_audience
+    }
+    # 사용자 지정 사이트 정보가 있으면 config에 추가
+    if user_site_preferences_model:
+        # Pydantic 모델을 dict로 변환하여 저장 (None 값 제외)
+        config_for_workflow["user_site_preferences"] = user_site_preferences_model.model_dump(exclude_none=True)
+    # ---------------------------------------------------
+
+    try:
+        # 백그라운드 작업 트리거 (config 딕셔너리 전체 전달)
+        comic_id = await trigger_workflow_task(
+            query=user_query,
+            config=config_for_workflow,  # config 딕셔너리 전달
+            background_tasks=background_tasks,
+            compiled_app=compiled_app,
+            db_client=db_client
+        )
+        logger.info(f"백그라운드 작업 시작됨. comic_id: {comic_id}", extra=log_extra)
+
+        # 클라이언트에 작업 수락 응답 반환
         return AsyncComicResponse(
             comic_id=comic_id,
-            status="PENDING", # 초기 상태 PENDING 또는 STARTED
-            message="Comic generation task accepted and started in the background."
+            status="PENDING",  # 초기 상태
+            message="만화 생성 작업이 수락되어 백그라운드에서 시작되었습니다."
         )
+    except HTTPException as http_exc:
+        # trigger_workflow_task 등에서 발생시킨 HTTP 예외 처리
+        logger.error(f"HTTP 예외 발생: {http_exc.status_code} - {http_exc.detail}", extra=log_extra)
+        raise http_exc  # FastAPI로 예외 다시 전달
     except Exception as e:
-        logger.exception(f"[/v1/comics] 요청 처리 중 예외 발생: {e}")
-        # 오류 발생 시 응답 형식 준수
-        return AsyncComicResponse(
-             comic_id=None, # ID 생성 전 실패 시 None
-             status="ERROR",
-             message=f"Failed to start workflow: {str(e)}"
-         ) # 500 대신 오류 응답 객체 반환 고려
+        # 기타 예상치 못한 서버 오류 처리
+        logger.exception(f"POST /comics 요청 처리 중 예기치 않은 예외 발생: {e}", extra=log_extra)
+        raise HTTPException(status_code=500, detail=f"워크플로우 시작 중 내부 서버 오류 발생.")
 
 
-@router.post( # API 명세는 POST 지만, GET이 더 적합할 수 있음
-    "/comics/{comic_id}/stream",
-    summary="Subscribe to Comic Generation Status Updates",
-    description="Subscribes to Server-Sent Events (SSE) for status updates of an existing comic generation task."
+@router.get(
+    "/comics/status/{comic_id}",
+    response_model=ComicStatusResponse,
+    summary="만화 생성 상태 조회",
+    description="제공된 comic_id에 해당하는 작업의 현재 상태와 결과를 조회합니다."
 )
-async def stream_comic_status(
-    comic_id: str = Path(..., description="The ID of the comic generation task to track."),
-    # request_body: Dict = Body(None) # 명세상 body가 있지만, 여기서는 사용 안 함
+async def get_comic_status(
+        db_client: DatabaseClientDep,  # DB 클라이언트 의존성 주입
+        comic_id: str = Path(..., description="조회할 작업의 고유 ID", example="9d8be988-833e-4500-8e38-8d45ca150449")
+        # 경로 파라미터
 ):
     """
-    지정된 comic_id 작업의 상태를 SSE로 스트리밍합니다.
-    (주의: 이 예시는 DB 폴링 방식이며, 실제 환경에서는 Pub/Sub 등 사용 권장)
+    특정 만화 생성 작업의 상태와 요약된 결과를 DB에서 조회하는 엔드포인트입니다.
     """
-    logger.info(f"[/v1/comics/{comic_id}/stream] 상태 스트리밍 구독 요청")
+    logger.info(f"GET /comics/status/{comic_id} 요청 수신")
+    extra_log_data = {'comic_id': comic_id}
+    try:
+        # DB에서 해당 comic_id의 데이터 조회
+        status_data_raw = await db_client.get(comic_id)
 
-    async def status_event_generator(task_id: str):
-        last_status = None
-        error_count = 0
-        max_errors = 3 # DB 조회 실패 시 최대 재시도 횟수
+        if status_data_raw:
+            # DB 데이터 파싱 (JSON 문자열 또는 이미 dict 형태일 수 있음)
+            parsed_data = {}
+            if isinstance(status_data_raw, str):
+                try:
+                    parsed_data = json.loads(status_data_raw)
+                except json.JSONDecodeError:
+                    logger.warning(f"DB 상태 데이터 파싱 실패 (JSON 형식 오류).", extra=extra_log_data)
+                    raise HTTPException(status_code=500, detail="저장된 상태 데이터 형식 오류")
+            elif isinstance(status_data_raw, dict):
+                parsed_data = status_data_raw
+            else:
+                logger.warning(f"DB 상태 데이터 타입 미지원: type={type(status_data_raw)}", extra=extra_log_data)
+                raise HTTPException(status_code=500, detail="저장된 상태 데이터 형식 오류")
 
-        while True:
+            # Pydantic 모델을 사용하여 응답 데이터 검증 및 반환
+            # DB에 저장된 키와 ComicStatusResponse 모델 필드가 일치해야 함
             try:
-                # DB에서 현재 상태 조회
-                current_data = await db_client.get(task_id) # DB get 메서드 구현 필요
-                error_count = 0 # 성공 시 에러 카운트 초기화
+                return ComicStatusResponse(**parsed_data)
+            except Exception as pydantic_err:  # Pydantic 유효성 검사 오류 등
+                logger.error(f"DB 데이터를 응답 모델로 변환 실패: {pydantic_err}", extra=extra_log_data)
+                raise HTTPException(status_code=500, detail="상태 데이터 처리 중 오류 발생")
 
-                if not current_data:
-                    logger.warning(f"Stream: Task ID {task_id} not found in DB.")
-                    status_update = StreamStatusUpdate(
-                        comic_id=task_id, status="NOT_FOUND", message="Task ID not found."
-                    )
-                    yield f"data: {status_update.model_dump_json()}\n\n"
-                    break # 작업 없음 종료
+        else:
+            # 해당 ID의 상태 정보가 없을 경우 404 오류 반환
+            logger.warning(f"요청한 comic_id의 상태 정보 없음.", extra=extra_log_data)
+            raise HTTPException(status_code=404, detail="해당 Comic ID의 작업 상태를 찾을 수 없습니다.")
 
-                current_status = current_data.get("status", "UNKNOWN")
-                current_message = current_data.get("message")
-
-                # 상태가 변경되었을 때만 클라이언트에 전송 (선택 사항)
-                if current_status != last_status:
-                    logger.info(f"Stream: Task {task_id} status update: {current_status}")
-                    status_update = StreamStatusUpdate(
-                        comic_id=task_id,
-                        status=current_status,
-                        message=current_message
-                        # 필요한 다른 데이터 추가 (예: current_data.get('result'))
-                    )
-                    yield f"data: {status_update.model_dump_json()}\n\n"
-                    last_status = current_status
-
-                # 종료 상태(DONE, FAILED, NOT_FOUND 등)이면 스트림 종료
-                if current_status in ["DONE", "FAILED", "NOT_FOUND", "ERROR"]:
-                    logger.info(f"Stream: Task {task_id} reached terminal state: {current_status}. Closing stream.")
-                    break
-
-            except Exception as e:
-                error_count += 1
-                logger.exception(f"Stream: Error polling status for task {task_id}: {e} (Attempt {error_count})")
-                if error_count >= max_errors:
-                    status_update = StreamStatusUpdate(
-                        comic_id=task_id, status="ERROR", message=f"Failed to poll status after multiple attempts: {str(e)}"
-                    )
-                    yield f"data: {status_update.model_dump_json()}\n\n"
-                    break # 폴링 실패 시 종료
-                await asyncio.sleep(2) # 오류 발생 시 잠시 대기 후 재시도
-                continue # 다음 폴링 시도
-
-            # 폴링 간격 (예: 1초)
-            await asyncio.sleep(1)
-
-    # EventSourceResponse 사용 권장
-    # return EventSourceResponse(status_event_generator(comic_id))
-    return StreamingResponse(status_event_generator(comic_id), media_type="text/event-stream")
+    except HTTPException as http_exc:
+        # 이미 처리된 HTTP 예외는 그대로 전달
+        raise http_exc
+    except Exception as e:
+        # 기타 예상치 못한 오류 (DB 연결 오류 등)
+        logger.exception(f"GET /comics/status/{comic_id} 요청 처리 중 예기치 않은 예외 발생: {e}", extra=extra_log_data)
+        raise HTTPException(status_code=500, detail=f"상태 조회 중 내부 서버 오류 발생.")

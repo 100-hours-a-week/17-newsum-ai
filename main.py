@@ -1,32 +1,49 @@
-# main.py 예시
+# ai/main.py
+
+import uvicorn
 from fastapi import FastAPI
-# api 폴더 및 v1 폴더 내의 endpoints 모듈에서 router 객체를 가져옵니다.
-from app.api.v1.endpoints import router as v1_router
-# 필요시 다른 설정이나 미들웨어 추가
-# from app.config.settings import settings # 예시
 
-# FastAPI 앱 인스턴스 생성
-app = FastAPI(title="Comic Generation API", version="0.1.0")
+# --- 추후 구현될 애플리케이션 구성 요소 임포트 (예상 경로) ---
+# 설정 값 (host, port, app 이름 등)
+# from app.config.settings import settings
 
-# --- 중요: V1 라우터 포함 ---
-# endpoints.py 에서 정의한 router 객체(v1_router)를
-# FastAPI 앱(app)에 포함시킵니다.
-# prefix="/v1" 은 해당 라우터의 모든 경로 앞에 /v1 을 붙여줍니다.
-# 이 prefix는 endpoints.py 파일 내 router 생성 시 정의된 prefix와 중첩되지 않도록 주의합니다.
-# 만약 endpoints.py 에서 APIRouter(prefix="/v1") 로 정의했다면, 여기서는 prefix를 생략해야 합니다.
-# 여기서는 endpoints.py 에 prefix가 있다고 가정하고 아래처럼 포함합니다.
-app.include_router(v1_router) # endpoints.py에 prefix="/v1" 가 있다면 이것으로 충분
+# API 라우트 정의
+from app.api.v1 import endpoints as v1_endpoints
 
-# 만약 endpoints.py에 prefix가 없다면 아래처럼 포함 시 prefix 지정
-# app.include_router(v1_router, prefix="/v1")
+# 애플리케이션 시작/종료 시 실행될 로직 (예: 모델 로딩, 워크플로우 컴파일)
+from app.lifespan import lifespan
 
+# 로깅 설정 함수 (lifespan 등에서 호출될 수 있음)
+# from app.utils.logging_config import setup_logging, get_logger
 
-@app.get("/", tags=["Root"])
-async def read_root():
-    return {"message": "Welcome to the Comic Generation API!"}
+# --- 로깅 설정 (실제 설정은 lifespan 또는 별도 config에서 진행) ---
+# setup_logging() # 예시: 로깅 설정 함수 호출
+# logger = get_logger(__name__) # 예시: 로거 가져오기
 
-# uvicorn 실행을 위한 부분 (선택 사항, 터미널에서 직접 실행 가능)
+# --- FastAPI 애플리케이션 인스턴스 생성 ---
+# title, description, version 등은 추후 settings에서 로드
+# lifespan 매개변수를 통해 앱 시작 시 워크플로우 컴파일 등을 수행
+app = FastAPI(
+    title="NewSum AI Service", # 임시 값, 추후 settings.APP_NAME 등으로 대체
+    description="뉴스/의견 기반 만화 생성을 위한 LangGraph 워크플로우 API", # 임시 값
+    version="0.1.0", # 임시 값, 추후 settings.APP_VERSION 등으로 대체
+    lifespan=lifespan  # 애플리케이션 수명 주기 이벤트 처리기 등록
+)
+
+# --- API 라우터 등록 ---
+# '/api/v1' 경로로 들어오는 요청을 v1_endpoints.router 가 처리하도록 설정
+app.include_router(v1_endpoints.router, prefix="/api/v1")
+# logger.info("'/api/v1' 라우터 등록 완료.") # 예시: 로깅
+
+# --- Uvicorn 서버 실행 (로컬 개발 환경용) ---
+# 이 스크립트가 직접 실행될 때만 동작
 if __name__ == "__main__":
-    import uvicorn
-    # host, port, reload 등 설정은 uvicorn 명령어 옵션으로 주는 것이 일반적
-    uvicorn.run("main:app", host="0.0.0.0", port=8080, reload=True)
+    # logger.info("로컬 개발 서버 (Uvicorn) 시작...") # 예시: 로깅
+    # host, port, log_level, reload 등은 추후 settings 객체에서 읽어오도록 수정
+    uvicorn.run(
+        "main:app",       # 실행할 FastAPI 앱 (main.py 파일의 app 객체)
+        host="0.0.0.0",   # 외부 접속 허용 (예: settings.APP_HOST)
+        port=8090,        # 사용할 포트 (예: settings.APP_PORT)
+        log_level="info", # 로그 레벨 (예: settings.LOG_LEVEL)
+        reload=True       # 코드 변경 시 자동 재시작 (개발 시 유용, 예: settings.APP_RELOAD)
+    )
