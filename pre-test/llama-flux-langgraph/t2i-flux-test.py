@@ -14,7 +14,7 @@ TEXT_TO_IMAGE_ENDPOINT = f"{IMAGE_SERVER_URL}/generate/text-to-image"
 
 # 요청 데이터 (텍스트-이미지 생성용)
 payload = {
-    "prompt": "A burning Earth model in the center of a modern conference room, surrounded by politicians in suits, wide angle composition, warm cinematic lighting, surreal and dramatic atmosphere, Studio Ghibli style",
+    "prompt": "A mischievous young boy with bright orange hair rides a fluffy white bear through a bustling village. The villagers watch in surprise as the bear gracefully traverses cobblestone streets under a clear sky. The camera is at eye level, focusing on the joyful pair.",
     "negative_prompt": "(worst quality, low quality, normal quality:1.2), deformed, blurry, text, signature",
     "num_inference_steps": 30,
     "guidance_scale": 3.5,
