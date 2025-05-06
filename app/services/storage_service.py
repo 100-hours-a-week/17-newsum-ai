@@ -1,282 +1,288 @@
-# app/services/storage_service.py
-import json
-import os
-import logging
-from datetime import datetime
-from pathlib import Path
-from typing import Dict, Any, Optional, Union
-from app.config.settings import settings
+# ai/app/services/storage_service.py
 
-logger = logging.getLogger(__name__)
+import os
+import uuid
+import mimetypes
+import asyncio # run_in_executor 사용 위해 추가
+from typing import Dict, Any, Optional
+from functools import partial # run_in_executor 에 인자 전달 위해 추가
+
+from app.config.settings import Settings
+from app.utils.logger import get_logger
+
+settings = Settings()
+# boto3 및 관련 예외 import
+try:
+    import boto3
+    from botocore.exceptions import ClientError, BotoCoreError
+    BOTO3_AVAILABLE = True
+except ImportError:
+    BOTO3_AVAILABLE = False
+    logger_temp = get_logger("StorageClient_Init")
+    logger_temp.warning("boto3 라이브러리가 설치되지 않았습니다. StorageClient 기능이 비활성화됩니다.")
+    # Define dummy classes if not available
+    class ClientError(Exception): pass
+    class BotoCoreError(Exception): pass
+
+# aiofiles는 이제 upload_file에서는 직접 사용하지 않지만,
+# 다른 곳에서 비동기 파일 처리를 위해 남겨둘 수 있음.
+# 만약 다른 곳에서도 사용하지 않는다면 제거 가능.
+try:
+    import aiofiles
+    AIOFILES_AVAILABLE = True
+except ImportError:
+    AIOFILES_AVAILABLE = False
+
+
+logger = get_logger("StorageClientV2_Boto3") # 로거 이름 변경
 
 class StorageService:
     """
-    에이전트 결과를 JSON 파일로 저장하고 관리하는 서비스
+    동기 boto3를 사용하여 비동기 환경에서 AWS S3 스토리지와 상호작용하는 클라이언트.
+    파일 업로드 및 Presigned URL 생성을 지원합니다. run_in_executor 사용.
+    AWS 자격 증명은 표준 검색 경로(환경 변수, IAM 역할 등)를 통해 자동으로 로드됩니다.
     """
-    
-    def __init__(self, base_dir: Optional[str] = None):
-        """
-        StorageService 초기화
-        
-        Args:
-            base_dir: 결과 파일 저장 기본 디렉토리. 기본값은 settings.RESULTS_DIR
-        """
-        # 기본 저장 경로는 settings에서 가져옴
-        self.base_dir = base_dir or settings.RESULTS_DIR
-        os.makedirs(self.base_dir, exist_ok=True)
-        
-        # 저장 설정
-        self.save_results = settings.SAVE_AGENT_RESULTS
-        self.save_inputs = settings.SAVE_AGENT_INPUTS
-        self.save_debug = settings.SAVE_DEBUG_INFO
-        
-        logger.info(f"StorageService 초기화 완료. 저장 경로: {self.base_dir}, 저장 활성화: {self.save_results}")
-        
-    def save_agent_result(self, 
-                         comic_id: str, 
-                         agent_name: str, 
-                         data: Dict[str, Any], 
-                         step: Optional[int] = None,
-                         subfolder: Optional[str] = None) -> str:
-        """
-        에이전트 처리 결과를 JSON 파일로 저장
-        
-        Args:
-            comic_id: 만화 생성 작업 ID
-            agent_name: 에이전트 이름 (예: collector, scraper, summarizer 등)
-            data: 저장할 데이터 (dict 형태)
-            step: 처리 단계 (옵션)
-            subfolder: 추가 하위 폴더 (옵션)
-            
-        Returns:
-            저장된 파일 경로
-        """
-        # 저장 기능이 비활성화되어 있으면 바로 리턴
-        if not self.save_results:
-            return ""
-            
-        # 'inputs' 저장이 비활성화되어 있고, subfolder가 'inputs'인 경우 저장 안 함
-        if subfolder == 'inputs' and not self.save_inputs:
-            return ""
-            
-        # 'errors'나 'debug' 저장이 비활성화되어 있는 경우
-        if not self.save_debug and subfolder in ['errors', 'debug']:
-            return ""
-        
-        # 1. 저장 디렉토리 구성 (comic_id/[subfolder])
-        save_dir = os.path.join(self.base_dir, comic_id)
-        if subfolder:
-            save_dir = os.path.join(save_dir, subfolder)
-        os.makedirs(save_dir, exist_ok=True)
-        
-        # 2. 파일명 구성 (agent_name_timestamp.json 또는 agent_name_step.json)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        if step is not None:
-            filename = f"{agent_name}_{step:03d}.json"
-        else:
-            filename = f"{agent_name}_{timestamp}.json"
-        
-        file_path = os.path.join(save_dir, filename)
-        
-        # 3. 결과 메타데이터 추가
-        result_data = data.copy()  # 원본 데이터 복사
-        result_data.update({
-            "agent": agent_name,
-            "comic_id": comic_id,
-            "timestamp": datetime.now().isoformat(),
-            "step": step
-        })
-        
-        # 4. JSON 파일로 저장
-        try:
-            with open(file_path, 'w', encoding='utf-8') as f:
-                json.dump(result_data, f, ensure_ascii=False, indent=2)
-            logger.info(f"에이전트 결과 저장 완료: {file_path}")
-            return file_path
-        except Exception as e:
-            logger.error(f"결과 저장 중 오류 발생: {e}")
-            raise
-    
-    def get_agent_result(self, 
-                        comic_id: str, 
-                        agent_name: str, 
-                        step: Optional[int] = None, 
-                        latest: bool = True,
-                        subfolder: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """
-        저장된 에이전트 결과 파일 로드
-        
-        Args:
-            comic_id: 만화 생성 작업 ID
-            agent_name: 에이전트 이름
-            step: 특정 단계 결과 조회 (옵션)
-            latest: 가장 최근 결과 반환 여부 (기본값: True)
-            subfolder: 하위 폴더 (옵션)
-            
-        Returns:
-            에이전트 결과 데이터 또는 None (파일 없을 경우)
-        """
-        # 1. 조회 디렉토리 구성
-        search_dir = os.path.join(self.base_dir, comic_id)
-        if subfolder:
-            search_dir = os.path.join(search_dir, subfolder)
-        
-        if not os.path.exists(search_dir):
-            logger.warning(f"결과 디렉토리 없음: {search_dir}")
-            return None
-        
-        # 2. 파일 검색 패턴 구성
-        if step is not None:
-            pattern = f"{agent_name}_{step:03d}.json"
-            file_path = os.path.join(search_dir, pattern)
-            if os.path.exists(file_path):
-                logger.debug(f"에이전트 결과 파일 발견: {file_path}")
-            else:
-                logger.warning(f"결과 파일 없음: {file_path}")
-                return None
-        else:
-            # 이름이 일치하는 모든 파일 찾기
-            files = [f for f in os.listdir(search_dir) if f.startswith(f"{agent_name}_") and f.endswith(".json")]
-            if not files:
-                logger.warning(f"에이전트 '{agent_name}' 결과 파일 없음: {search_dir}")
-                return None
-            
-            if latest:
-                # 최신 파일 선택 (수정 시간 기준)
-                file_path = os.path.join(search_dir, 
-                                         max(files, key=lambda f: os.path.getmtime(os.path.join(search_dir, f))))
-            else:
-                # 첫 번째 파일 선택
-                file_path = os.path.join(search_dir, files[0])
-        
-        # 3. 파일 로드
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            logger.info(f"에이전트 결과 로드 완료: {file_path}")
-            return data
-        except Exception as e:
-            logger.error(f"결과 로드 중 오류 발생: {e}")
-            return None
-            
-    def list_results(self, comic_id: Optional[str] = None, agent_name: Optional[str] = None) -> Dict[str, Any]:
-        """
-        저장된 결과 파일 목록 조회
-        
-        Args:
-            comic_id: 특정 comic_id 결과만 조회 (옵션)
-            agent_name: 특정 에이전트 결과만 조회 (옵션)
-            
-        Returns:
-            결과 파일 정보 딕셔너리 (comic_id -> agent_name -> files)
-        """
-        results = {}
-        
-        # 1. 기본 디렉토리 또는 comic_id 디렉토리 탐색
-        base_path = self.base_dir
-        if comic_id:
-            base_path = os.path.join(base_path, comic_id)
-            if not os.path.exists(base_path):
-                return results
-            comic_ids = [comic_id]
-        else:
-            if not os.path.exists(base_path):
-                return results
-            comic_ids = [d for d in os.listdir(base_path) 
-                        if os.path.isdir(os.path.join(base_path, d))]
-        
-        # 2. 각 comic_id 디렉토리 탐색
-        for cid in comic_ids:
-            results[cid] = {}
-            comic_path = os.path.join(self.base_dir, cid)
-            
-            # JSON 파일만 필터링
-            files = [f for f in os.listdir(comic_path) 
-                    if f.endswith('.json') and os.path.isfile(os.path.join(comic_path, f))]
-            
-            # 에이전트 이름별로 분류
-            for file in files:
-                # 파일명에서 에이전트 이름 추출
-                agent = file.split('_')[0] if '_' in file else 'unknown'
-                
-                if agent_name and agent != agent_name:
-                    continue
-                    
-                if agent not in results[cid]:
-                    results[cid][agent] = []
-                
-                file_info = {
-                    'filename': file,
-                    'path': os.path.join(comic_path, file),
-                    'modified': datetime.fromtimestamp(
-                        os.path.getmtime(os.path.join(comic_path, file))
-                    ).isoformat()
-                }
-                results[cid][agent].append(file_info)
-            
-            # 하위 디렉토리 검사 (inputs, errors, debug 등)
-            subdirs = [d for d in os.listdir(comic_path) 
-                      if os.path.isdir(os.path.join(comic_path, d))]
-            
-            for subdir in subdirs:
-                subdir_path = os.path.join(comic_path, subdir)
-                subdir_files = [f for f in os.listdir(subdir_path) 
-                               if f.endswith('.json') and os.path.isfile(os.path.join(subdir_path, f))]
-                
-                for file in subdir_files:
-                    # 파일명에서 에이전트 이름 추출
-                    agent = file.split('_')[0] if '_' in file else 'unknown'
-                    
-                    if agent_name and agent != agent_name:
-                        continue
-                    
-                    agent_key = f"{agent}_{subdir}"  # 하위 폴더 구분을 위해
-                    if agent_key not in results[cid]:
-                        results[cid][agent_key] = []
-                    
-                    file_info = {
-                        'filename': file,
-                        'path': os.path.join(subdir_path, file),
-                        'subfolder': subdir,
-                        'modified': datetime.fromtimestamp(
-                            os.path.getmtime(os.path.join(subdir_path, file))
-                        ).isoformat()
-                    }
-                    results[cid][agent_key].append(file_info)
-        
-        return results
+    def __init__(
+        self,
+        bucket_name: Optional[str] = None,
+        region_name: Optional[str] = None,
+        logger_name: str = "StorageClientV2_Boto3" # 로거 이름 업데이트
+    ):
+        self.logger = get_logger(logger_name)
+        self.s3_client = None
+        self.use_local_fallback = False # 로컬 폴백 사용 여부 플래그
+        self.local_storage_path = settings.LOCAL_STORAGE_PATH # 설정에서 로컬 경로 읽기
 
-    def clear_results(self, comic_id: Optional[str] = None) -> bool:
-        """
-        결과 파일 삭제
-        
-        Args:
-            comic_id: 특정 작업 결과만 삭제 (옵션, None이면 모든 결과 삭제)
-            
-        Returns:
-            성공 여부
-        """
+        if not BOTO3_AVAILABLE:
+            self.logger.error("필수 라이브러리(boto3)가 없어 StorageClient를 초기화할 수 없습니다.")
+            raise ImportError("boto3 must be installed to use StorageClient.")
+
+        # 설정 값 로드
+        self.bucket_name = bucket_name or settings.S3_BUCKET_NAME
+        self.region_name = region_name or settings.AWS_REGION
+
+        # S3 클라이언트 생성 시도 (boto3 사용)
         try:
-            if comic_id:
-                target_dir = os.path.join(self.base_dir, comic_id)
-                if os.path.exists(target_dir):
-                    import shutil
-                    shutil.rmtree(target_dir)
-                    logger.info(f"comic_id '{comic_id}' 결과 삭제 완료")
-                return True
-            else:
-                # 모든 결과 디렉토리 삭제
-                if os.path.exists(self.base_dir):
-                    import shutil
-                    # results 디렉토리 내부 파일만 삭제하고 디렉토리는 유지
-                    for item in os.listdir(self.base_dir):
-                        item_path = os.path.join(self.base_dir, item)
-                        if os.path.isdir(item_path):
-                            shutil.rmtree(item_path)
-                        else:
-                            os.remove(item_path)
-                    logger.info("모든 결과 삭제 완료")
-                return True
+            if not self.bucket_name:
+                 raise ValueError("S3 bucket name must be provided for S3 mode.")
+
+            # 동기 boto3 클라이언트 생성
+            self.s3_client = boto3.client(
+                's3',
+                region_name=self.region_name
+                # 필요 시 추가 설정 전달 가능: config=Config(...)
+            )
+            # 간단한 테스트 호출 (선택 사항) - 초기화 시 자격 증명 확인 등
+            # self.s3_client.list_buckets() # 예시: 버킷 리스트 요청 (권한 필요)
+            self.logger.info(f"StorageClient (boto3) S3 모드로 초기화 완료. Bucket: {self.bucket_name}, Region: {self.region_name or 'default'}")
+
+        except (ClientError, BotoCoreError) as e:
+            self.logger.warning(f"boto3 S3 클라이언트 생성 실패 (AWS 오류): {e}. 로컬 스토리지 폴백 모드로 전환합니다 (경로: {self.local_storage_path}).", exc_info=True)
+            self.s3_client = None
+            self.use_local_fallback = True
+            if not self.local_storage_path:
+                self.logger.error("S3 초기화 실패 및 로컬 스토리지 경로(LOCAL_STORAGE_PATH)가 설정되지 않아 StorageClient 사용 불가.")
+                raise ValueError("S3 initialization failed and LOCAL_STORAGE_PATH is not configured.")
         except Exception as e:
-            logger.error(f"결과 삭제 중 오류 발생: {e}")
-            return False
+             self.logger.warning(f"boto3 S3 클라이언트 생성 중 예상치 못한 오류: {e}. 로컬 스토리지 폴백 모드로 전환합니다 (경로: {self.local_storage_path}).", exc_info=True)
+             self.s3_client = None
+             self.use_local_fallback = True
+             if not self.local_storage_path:
+                 self.logger.error("S3 초기화 실패 및 로컬 스토리지 경로(LOCAL_STORAGE_PATH)가 설정되지 않아 StorageClient 사용 불가.")
+                 raise ValueError("S3 initialization failed and LOCAL_STORAGE_PATH is not configured.")
+
+    async def upload_file(
+        self,
+        file_path: str,
+        object_key: Optional[str] = None,
+        prefix: str = "uploads/", # 기본 업로드 경로 접두사
+        content_type: Optional[str] = None,
+        acl: Optional[str] = None # ACL 설정 추가 (선택 사항)
+    ) -> Dict[str, Any]:
+        """
+        로컬 파일을 S3 버킷에 비동기적으로 업로드합니다 (run_in_executor 사용).
+
+        Args:
+            file_path (str): 업로드할 로컬 파일 경로.
+            object_key (Optional[str]): S3에 저장될 객체 키 (전체 경로). 지정하지 않으면 자동 생성됩니다.
+            prefix (str): object_key 자동 생성 시 사용될 접두사. 기본값: "uploads/".
+            content_type (Optional[str]): 파일의 MIME 타입. 지정하지 않으면 추측합니다.
+            acl (Optional[str]): 적용할 객체 ACL (예: 'public-read'). 기본값은 버킷 설정 따름.
+
+        Returns:
+            Dict[str, Any]: 성공 시 {"s3_uri": str, "object_key": str}, 실패 시 {"error": str}
+        """
+        # 로컬 폴백 모드 처리 (선택적 구현)
+        if self.use_local_fallback:
+             return await self._upload_file_local(file_path, object_key, prefix)
+
+        # S3 클라이언트 확인
+        if not self.s3_client:
+            self.logger.error("StorageClient(S3)가 초기화되지 않아 upload_file 작업을 수행할 수 없습니다.")
+            return {"error": "StorageClient S3 client is not initialized."}
+
+        if not os.path.exists(file_path):
+            self.logger.error(f"업로드할 파일을 찾을 수 없습니다: {file_path}")
+            return {"error": f"File not found at path: {file_path}"}
+
+        # 객체 키 생성 (지정되지 않은 경우)
+        if not object_key:
+            filename = os.path.basename(file_path)
+            name, ext = os.path.splitext(filename)
+            unique_id = uuid.uuid4().hex
+            object_key = f"{prefix.strip('/')}/{name}_{unique_id}{ext}"
+
+        # ContentType 추측 (지정되지 않은 경우)
+        if not content_type:
+            content_type, _ = mimetypes.guess_type(file_path)
+            if not content_type:
+                content_type = 'application/octet-stream' # 기본값
+
+        try:
+            self.logger.info(f"S3 업로드 시작 (boto3/executor): '{file_path}' -> 's3://{self.bucket_name}/{object_key}' (ContentType: {content_type})")
+            loop = asyncio.get_running_loop()
+
+            # upload_file 메서드에 전달할 추가 인자 구성
+            extra_args = {'ContentType': content_type}
+            if acl:
+                extra_args['ACL'] = acl
+
+            # functools.partial 사용하여 upload_file 함수와 인자 준비
+            # upload_file(Filename, Bucket, Key, ExtraArgs=None, Callback=None, Config=None)
+            upload_func = partial(
+                self.s3_client.upload_file,
+                Filename=file_path,
+                Bucket=self.bucket_name,
+                Key=object_key,
+                ExtraArgs=extra_args
+            )
+
+            # 동기 함수인 upload_file을 executor에서 실행
+            await loop.run_in_executor(None, upload_func)
+
+            s3_uri = f"s3://{self.bucket_name}/{object_key}"
+            # 퍼블릭 URL 생성 (ACL='public-read' 설정 시 또는 버킷 정책에 따라)
+            # object_url = f"https://{self.bucket_name}.s3.{self.s3_client.meta.region_name}.amazonaws.com/{object_key}"
+            self.logger.info(f"S3 업로드 성공: {s3_uri}")
+            return {
+                "s3_uri": s3_uri,
+                "object_key": object_key,
+                "content_type": content_type
+                # "public_url": object_url # 필요시 반환
+            }
+
+        except FileNotFoundError:
+            self.logger.error(f"업로드 중 파일을 찾을 수 없음: {file_path}", exc_info=True)
+            return {"error": f"File not found during upload: {file_path}"}
+        except (ClientError, BotoCoreError) as e:
+            self.logger.error(f"S3 업로드 중 AWS 오류 발생: {e}", exc_info=True)
+            return {"error": f"AWS S3 Error: {e}"}
+        except Exception as e:
+            self.logger.error(f"S3 업로드 중 예상치 못한 오류 발생: {e}", exc_info=True)
+            return {"error": f"Unexpected error during S3 upload: {e}"}
+
+    async def generate_presigned_url(
+        self,
+        object_key: str,
+        expiration: int = 3600, # URL 유효 시간(초), 기본값 1시간
+        http_method: str = 'GET' # Presigned URL 용도 (GET, PUT 등)
+    ) -> Dict[str, Any]:
+        """
+        S3 객체에 접근하기 위한 Presigned URL을 생성합니다 (run_in_executor 사용).
+
+        Args:
+            object_key (str): URL을 생성할 S3 객체 키.
+            expiration (int): URL의 유효 시간(초). 기본값: 3600.
+            http_method (str): URL로 허용할 HTTP 메소드 ('GET', 'PUT' 등). 기본값 'GET'.
+
+        Returns:
+            Dict[str, Any]: 성공 시 {"presigned_url": str}, 실패 시 {"error": str}
+        """
+        if self.use_local_fallback:
+             # 로컬 모드에서는 Presigned URL 의미 없음
+             self.logger.warning("로컬 폴백 모드에서는 Presigned URL을 생성할 수 없습니다.")
+             return {"error": "Cannot generate presigned URL in local fallback mode."}
+
+        if not self.s3_client:
+            self.logger.error("StorageClient(S3)가 초기화되지 않아 Presigned URL 생성을 수행할 수 없습니다.")
+            return {"error": "StorageClient S3 client is not initialized."}
+
+        try:
+            self.logger.debug(f"Presigned URL 생성 요청 (boto3/executor): bucket='{self.bucket_name}', key='{object_key}', expiration={expiration}s, method='{http_method}'")
+            loop = asyncio.get_running_loop()
+
+            # generate_presigned_url 함수와 인자 준비
+            # generate_presigned_url(ClientMethod, Params=None, ExpiresIn=3600, HttpMethod=None)
+            client_method = 'get_object' if http_method.upper() == 'GET' else \
+                            'put_object' if http_method.upper() == 'PUT' else None # 다른 메소드 지원 추가 가능
+            if not client_method:
+                return {"error": f"Unsupported HTTP method for presigned URL: {http_method}"}
+
+            params = {'Bucket': self.bucket_name, 'Key': object_key}
+            # PUT 요청 시 추가 파라미터 필요할 수 있음 (예: ContentType)
+
+            presign_func = partial(
+                self.s3_client.generate_presigned_url,
+                ClientMethod=client_method,
+                Params=params,
+                ExpiresIn=expiration,
+                HttpMethod=http_method.upper()
+            )
+
+            # 동기 함수인 generate_presigned_url을 executor에서 실행
+            url = await loop.run_in_executor(None, presign_func)
+
+            self.logger.info(f"Presigned URL 생성 성공: key='{object_key}' ({http_method})")
+            return {"presigned_url": url}
+
+        except (ClientError, BotoCoreError) as e:
+            self.logger.error(f"Presigned URL 생성 중 AWS 오류 발생: key='{object_key}', error={e}", exc_info=True)
+            return {"error": f"AWS S3 Presigned URL Generation Error: {e}"}
+        except Exception as e:
+            self.logger.error(f"Presigned URL 생성 중 예상치 못한 오류 발생: key='{object_key}', error={e}", exc_info=True)
+            return {"error": f"Unexpected error during Presigned URL generation: {e}"}
+
+    # --- 로컬 폴백 메서드 (선택적 구현) ---
+    async def _upload_file_local(self, file_path: str, object_key: Optional[str], prefix: str) -> Dict[str, Any]:
+         """로컬 파일 시스템에 파일을 저장하는 폴백 메서드"""
+         if not self.local_storage_path:
+              return {"error": "Local storage path is not configured."}
+
+         try:
+              if not object_key:
+                   filename = os.path.basename(file_path)
+                   name, ext = os.path.splitext(filename)
+                   unique_id = uuid.uuid4().hex
+                   # 로컬 경로는 OS에 맞게 처리
+                   local_key = os.path.join(prefix.strip('/'), f"{name}_{unique_id}{ext}")
+              else:
+                   local_key = object_key
+
+              # 대상 디렉토리 생성
+              target_dir = os.path.join(self.local_storage_path, os.path.dirname(local_key))
+              os.makedirs(target_dir, exist_ok=True)
+              target_path = os.path.join(self.local_storage_path, local_key)
+
+              # aiofiles로 비동기 복사
+              async with aiofiles.open(file_path, mode='rb') as src:
+                   async with aiofiles.open(target_path, mode='wb') as dest:
+                        while True:
+                             chunk = await src.read(1024 * 1024) # 1MB씩 읽기
+                             if not chunk: break
+                             await dest.write(chunk)
+
+              self.logger.info(f"로컬 폴백: 파일 저장 성공 '{file_path}' -> '{target_path}'")
+              # 로컬 파일 URI 반환 (file:// 스키마)
+              local_uri = f"file://{os.path.abspath(target_path)}"
+              return {
+                   "s3_uri": local_uri, # 로컬 파일 URI
+                   "object_key": local_key, # 로컬 경로 기준 키
+                   "content_type": mimetypes.guess_type(file_path)[0] or 'application/octet-stream'
+              }
+         except Exception as e:
+              self.logger.error(f"로컬 파일 저장 실패: {e}", exc_info=True)
+              return {"error": f"Local file saving failed: {e}"}
+
+    # boto3 클라이언트는 명시적인 close 불필요
+    # async def close(self):
+    #     pass
