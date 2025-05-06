@@ -8,6 +8,9 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 from app.config.settings import Settings
 from app.utils.logger import get_logger, summarize_for_logging
 
+from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound, NotTranslatable, TranslationLanguageNotAvailable
+import asyncio # 비동기 실행을 위해
+
 settings = Settings()
 logger = get_logger("GoogleSearchTool")
 
@@ -257,6 +260,82 @@ class GoogleSearchTool:
         logger.info(f"YouTube 검색: '{keyword}' (옵션: {kwargs})에 대해 {len(results)}개의 비디오 찾음.",
                     extra={'trace_id': trace_id})
         return results
+
+    async def get_youtube_transcript(self, video_id: str, languages: List[str] = ['en'],
+                                         translate_to_language: Optional[str] = None, trace_id: Optional[str] = None) -> Optional[Dict[str, str]]:  # 타입 힌트는 최종 결과 기준
+        """
+        YouTube 비디오 ID에 대해 지정된 언어의 자막을 가져옵니다.
+        필요시 다른 언어로 번역을 시도합니다.
+        비동기로 실행되도록 수정합니다.
+        """
+        extra_log_data = {'trace_id': trace_id, 'video_id': video_id, 'languages': languages,
+                          'translate_to': translate_to_language}
+        logger.debug(f"YouTube 자막 가져오기 시도...", extra=extra_log_data)
+
+        async def fetch_transcript():
+            try:
+                transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+
+                # 1. 요청된 우선순위 언어 (예: 'en') 시도
+                for lang_code in languages:
+                    try:
+                        transcript = transcript_list.find_transcript([lang_code])
+                        if translate_to_language and transcript.is_translatable:
+                            try:
+                                translated_transcript_data = transcript.translate(translate_to_language).fetch()
+                                logger.info(
+                                    f"'{video_id}' 비디오 자막을 '{lang_code}'에서 '{translate_to_language}'(으)로 번역 성공.",
+                                    extra=extra_log_data)
+                                return {"language": translate_to_language,
+                                        "text": " ".join([t['text'] for t in translated_transcript_data])}
+                            except TranslationLanguageNotAvailable:
+                                logger.warning(
+                                    f"'{video_id}' 비디오 자막을 '{translate_to_language}'(으)로 번역 불가 (번역 언어 미지원). 원본 '{lang_code}' 사용.",
+                                    extra=extra_log_data)
+                                # 번역 실패 시 원본 반환
+                                original_transcript_data = transcript.fetch()
+                                return {"language": lang_code,
+                                        "text": " ".join([t['text'] for t in original_transcript_data])}
+
+                        else:  # 번역 필요 없거나 불가능 시 원본 반환
+                            original_transcript_data = transcript.fetch()
+                            logger.info(f"'{video_id}' 비디오에 대한 '{lang_code}' 자막 찾음.", extra=extra_log_data)
+                            return {"language": lang_code,
+                                    "text": " ".join([t['text'] for t in original_transcript_data])}
+                    except NoTranscriptFound:
+                        logger.debug(f"'{video_id}' 비디오에 대한 '{lang_code}' 자막 없음. 다음 언어 시도.", extra=extra_log_data)
+                        continue
+
+                # 2. 요청된 언어가 없고, 번역 대상 언어가 있다면, 어떤 언어든 찾아서 번역 시도
+                if translate_to_language:
+                    for available_transcript in transcript_list:
+                        if available_transcript.is_translatable:
+                            try:
+                                translated_transcript_data = available_transcript.translate(
+                                    translate_to_language).fetch()
+                                logger.info(
+                                    f"'{video_id}' 비디오 자막을 '{available_transcript.language}'에서 '{translate_to_language}'(으)로 번역 성공 (fallback).",
+                                    extra=extra_log_data)
+                                return {"language": translate_to_language,
+                                        "text": " ".join([t['text'] for t in translated_transcript_data])}
+                            except Exception as e_trans_fallback:
+                                logger.debug(
+                                    f"'{video_id}' 비디오의 '{available_transcript.language}' 자막을 '{translate_to_language}'로 번역 실패(fallback): {e_trans_fallback}",
+                                    extra=extra_log_data)
+                                continue
+
+                logger.warning(f"'{video_id}' 비디오에 대해 요청/번역 가능한 자막을 찾을 수 없습니다.", extra=extra_log_data)
+                return None
+
+            except TranscriptsDisabled:
+                logger.warning(f"'{video_id}' 비디오에 대한 자막이 비활성화되어 있습니다.", extra=extra_log_data)
+                return None
+            except Exception as e:
+                logger.error(f"'{video_id}' 비디오 자막 가져오기 중 오류 발생: {e}", exc_info=False, extra=extra_log_data)
+                return None
+
+        # asyncio.to_thread를 사용하여 동기 라이브러리 호출을 비동기적으로 실행
+        return await asyncio.to_thread(fetch_transcript)
 
     async def search_blogs_via_cse(
             self, keyword: str, max_results: int, trace_id: str, **kwargs: Any  # **kwargs 추가

@@ -1,17 +1,21 @@
 # ai/app/lifespan.py
+import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from typing import AsyncGenerator
+from pathlib import Path
+import aiohttp # 외부 API 호출용 세션 생성 위해 추가
 
 # --- 로깅 및 설정 임포트 ---
-from app.utils.logger import setup_logging, get_logger # setup_logging 임포트
+from app.utils.logger import setup_logging, get_logger
 from app.config.settings import Settings
 
+# --- 워크플로우 및 공유 상태 ---
 from app.workflows.main_workflow import compile_workflow
-from app.dependencies import _shared_state
+from app.dependencies import _shared_state # 공유 상태 딕셔너리
 
 # --- 서비스 및 도구 클래스 임포트 ---
-from app.services.database_client import DatabaseClient
+from app.services.database_client import DatabaseClient # <<< DatabaseClient 임포트
 from app.services.llm_service import LLMService
 from app.services.image_service import ImageService
 from app.services.translation_service import TranslationService
@@ -20,137 +24,170 @@ from app.services.storage_service import StorageService
 from app.services.langsmith_service import LangSmithService
 from app.tools.search.Google_Search_tool import GoogleSearchTool
 
-# lifespan 시작 전에 get_logger 호출 시 기본 설정만 적용될 수 있으므로 주의
-# logger = get_logger("AppLifespan") # 여기서 호출하면 setup_logging 전일 수 있음
+logger = get_logger("AppLifespan") # 로깅 설정 후 로거 가져오기
 
-_service_instances = []
+_service_instances = [] # 종료 시 정리할 인스턴스 목록
 settings = Settings()
 
 async def startup_event():
     """애플리케이션 시작 시 실행될 작업들"""
     # --- 로깅 설정 적용 (가장 먼저 수행) ---
     try:
-        # settings.LOG_CONFIG_PATH가 None일 경우 기본 경로 사용
-        log_config_path = settings.LOG_CONFIG_PATH or 'logging_config.yaml'
-        # Path 객체로 변환하여 setup_logging에 전달
-        from pathlib import Path
-        config_path_obj = Path(log_config_path)
-        # setup_logging 함수는 절대 경로 또는 상대 경로를 처리할 수 있어야 함
-        # 여기서는 logger.py의 기본 경로 설정을 신뢰
+        log_config_path_str = settings.LOG_CONFIG_PATH or 'logging_config.yaml'
+        config_path_obj = Path(log_config_path_str)
         setup_logging(config_path=config_path_obj)
-        # setup_logging 호출 후 로거 가져오기
-        global logger # 전역 변수 사용 대신 함수 내에서 로거 가져오기
+        global logger
         logger = get_logger("AppLifespan")
-        logger.info(f"로깅 설정 완료됨.") # 설정 완료 후 첫 로그
-
+        logger.info(f"Logging setup complete using config: {config_path_obj.resolve()}")
     except Exception as e:
-        # 로깅 설정 실패 시에도 기본 로깅으로 메시지 출력 시도
         import logging
-        logging.basicConfig()
-        logging.critical(f"!!! 로깅 설정 중 치명적 오류 발생: {e}", exc_info=True)
-        # 로깅이 안될 수 있으므로 print도 사용
+        logging.basicConfig(level=logging.INFO)
+        logger = logging.getLogger("AppLifespanFallback")
+        logger.critical(f"!!! FATAL ERROR during logging setup: {e}", exc_info=True)
         print(f"!!! FATAL ERROR during logging setup: {e}")
-        # 로깅 설정 실패 시 앱 시작을 중단할 수 있음
         raise RuntimeError(f"Logging setup failed: {e}") from e
 
-    logger.info("애플리케이션 시작 프로세스 개시...")
+    logger.info("Application startup process initiated...")
 
     # --- 서비스 및 도구 초기화 ---
     global _service_instances
-    _service_instances = [] # 초기화
+    _service_instances = []
+
+    # --- 외부 API 호출 및 번역용 공유 aiohttp 세션 (선택적) ---
+    shared_aiohttp_session = None # 기본값 None
+    try:
+        timeout = aiohttp.ClientTimeout(total=settings.EXTERNAL_API_TIMEOUT_SECONDS or 30)
+        shared_aiohttp_session = aiohttp.ClientSession(timeout=timeout)
+        logger.info("Shared aiohttp session created for external/translation calls.")
+        _service_instances.append(shared_aiohttp_session) # 종료 시 닫기 위해 추가
+    except Exception as e:
+        logger.error(f"Failed to create shared aiohttp session: {e}", exc_info=True)
+        # 공유 세션 생성 실패 시에도 일단 진행 (개별 서비스/노드가 자체 관리하도록)
+
 
     try:
         # DatabaseClient
-        db_client = DatabaseClient()
+        db_client = DatabaseClient() # 설정은 내부적으로 settings 사용 가정
+        # <<< 수정: DatabaseClient에 connect 메서드가 없으므로 호출 제거 >>>
+        # await db_client.connect() # connect 메서드가 없으므로 제거 또는 실제 초기화 메서드로 변경
+        # Redis 클라이언트는 __init__에서 이미 연결 시도/생성됨
         _shared_state['db_client'] = db_client
-        _service_instances.append(db_client)
-        logger.info("DatabaseClient 초기화 완료.")
+        _service_instances.append(db_client) # disconnect/close 메서드가 있다고 가정
+        logger.info("DatabaseClient initialized.") # 메시지 수정
 
-        # LLMService
+        # LLMService (close 메서드 유무 확인 필요)
         llm_service = LLMService()
         _shared_state['llm_service'] = llm_service
-        _service_instances.append(llm_service)
-        logger.info("LLMService 초기화 완료.")
+        if hasattr(llm_service, 'close') and callable(getattr(llm_service, 'close')):
+             _service_instances.append(llm_service)
+        logger.info("LLMService initialized.")
 
-        # ImageService
+        # ImageService (close 메서드 있음 - httpx client)
         image_service = ImageService()
         _shared_state['image_service'] = image_service
         _service_instances.append(image_service)
-        logger.info("ImageService 초기화 완료.")
+        logger.info("ImageService initialized.")
 
-        # TranslationService
+        # TranslationService (close 메서드 없음, 외부 세션 필요 가능성)
         translation_service = TranslationService()
+        # 필요 시 생성자 또는 별도 메서드로 공유 세션 주입 가능
+        # translation_service.set_session(shared_aiohttp_session)
         _shared_state['translation_service'] = translation_service
-        # _service_instances.append(translation_service) # close 메서드 없으면 추가 불필요
-        logger.info("TranslationService 초기화 완료.")
+        logger.info("TranslationService initialized.")
 
-        # SpamService
+        # SpamService (close 메서드 없다고 가정)
         spam_service = SpamService()
         _shared_state['spam_service'] = spam_service
-        # _service_instances.append(spam_service) # close 메서드 없으면 추가 불필요
-        logger.info("SpamService 초기화 완료.")
+        logger.info("SpamService initialized.")
 
-        # StorageService
+        # StorageService (boto3 사용, 명시적 close 불필요)
         storage_service = StorageService()
         _shared_state['storage_service'] = storage_service
-        # _service_instances.append(storage_service) # close 메서드 없으면 추가 불필요
-        logger.info("StorageService 초기화 완료.")
+        logger.info("StorageService initialized.")
 
-        # LangSmithService
+        # LangSmithService (close 메서드 있다고 가정)
         langsmith_service = LangSmithService()
         _shared_state['langsmith_service'] = langsmith_service
-        _service_instances.append(langsmith_service) # close 메서드 있음
-        logger.info("LangSmithService 초기화 완료.")
+        _service_instances.append(langsmith_service)
+        logger.info("LangSmithService initialized.")
 
-        # GoogleSearchTool
-        google_search_tool = GoogleSearchTool()
-        _shared_state['Google_Search_tool'] = google_search_tool
-        _service_instances.append(google_search_tool) # close 메서드 있음
-        logger.info("GoogleSearchTool 초기화 완료.")
+        # GoogleSearchTool (close 메서드 있음 - aiohttp session)
+        # Google_Search_tool = GoogleSearchTool(session=shared_aiohttp_session) # 공유 세션 사용 시
+        Google_Search_tool = GoogleSearchTool() # 내부 세션 사용 시
+        _shared_state['Google_Search_tool'] = Google_Search_tool # 키 이름 일관성 유지
+        _service_instances.append(Google_Search_tool)
+        logger.info("GoogleSearchTool initialized.")
+
 
         # --- 워크플로우 컴파일 ---
-        logger.info("LangGraph 워크플로우 컴파일 시작...")
+        logger.info("Compiling LangGraph workflow...")
         compiled_app_instance = await compile_workflow(
-            llm_service=llm_service,  # <<< llm_service 인스턴스 전달
-            Google_Search_tool = google_search_tool  # <<< Google Search_tool 인스턴스 전달
+            llm_service=llm_service,
+            Google_Search_tool=Google_Search_tool,
+            image_generation_service=image_service,
+            storage_service=storage_service,
+            translation_service=translation_service,
+            # N10에 공유 세션 전달 시 필요
+            # external_api_session=shared_aiohttp_session
         )
         _shared_state['compiled_app'] = compiled_app_instance
-        logger.info("LangGraph 워크플로우 컴파일 완료.")
+        logger.info("LangGraph workflow compiled successfully.")
 
     except Exception as e:
-        logger.error(f"서비스/워크플로우 초기화 중 오류 발생: {e}", exc_info=True)
+        logger.error(f"Error during service/workflow initialization: {e}", exc_info=True)
+        await shutdown_event(graceful=False)
         raise RuntimeError(f"Application startup failed during service initialization: {e}") from e
 
-    logger.info("애플리케이션 시작 준비 완료.")
+    logger.info("Application startup complete. Ready to accept requests.")
 
-async def shutdown_event():
+async def shutdown_event(graceful: bool = True):
     """애플리케이션 종료 시 실행될 작업들"""
-    logger = get_logger("AppLifespan") # 종료 시에도 로거 가져오기
-    logger.info("애플리케이션 종료 프로세스 개시...")
+    try:
+        logger = get_logger("AppLifespan")
+    except Exception:
+        import logging
+        logger = logging.getLogger("AppLifespanFallback")
+
+    if graceful:
+        logger.info("Application shutdown process initiated...")
+    else:
+        logger.warning("Attempting partial cleanup after startup failure...")
 
     global _service_instances
     for instance in reversed(_service_instances):
         instance_name = type(instance).__name__
-        if hasattr(instance, 'close') and callable(instance.close):
+        # close 또는 disconnect 메서드 찾기
+        # aiohttp.ClientSession도 close() 메서드를 가짐
+        close_method = getattr(instance, 'close', None) or getattr(instance, 'disconnect', None)
+
+        if close_method and callable(close_method):
             try:
-                # 비동기 close 메서드 확인
                 import inspect
-                if inspect.iscoroutinefunction(instance.close):
-                    await instance.close()
+                if inspect.iscoroutinefunction(close_method):
+                    logger.debug(f"Closing {instance_name} (async)...")
+                    await close_method()
                 else:
-                    instance.close() # 동기 메서드일 경우
-                logger.info(f"{instance_name} 종료 완료.")
+                    logger.debug(f"Closing {instance_name} (sync)...")
+                    # 동기 메서드는 이벤트 루프에서 직접 호출 시 블로킹될 수 있으므로 주의
+                    await asyncio.to_thread(close_method) # 비동기로 실행 시도
+                logger.info(f"{instance_name} closed/disconnected successfully.")
             except Exception as e:
-                logger.error(f"{instance_name} 종료 중 오류 발생: {e}", exc_info=True)
+                logger.error(f"Error during {instance_name} shutdown: {e}", exc_info=True)
 
     # 공유 상태 정리
-    _shared_state.clear()
-    logger.info("공유 상태 정리 완료.")
-    logger.info("애플리케이션 종료 완료.")
+    if graceful:
+        _shared_state.clear()
+        logger.info("Shared state cleared.")
+        logger.info("Application shutdown complete.")
+    else:
+        logger.warning("Partial cleanup finished.")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """FastAPI lifespan 컨텍스트 관리자"""
     await startup_event()
-    yield
-    await shutdown_event()
+    try:
+        yield
+    finally:
+        await shutdown_event()

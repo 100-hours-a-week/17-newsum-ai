@@ -74,7 +74,7 @@ class N06SaveReportNode:
             with open(report_file_path, "w", encoding="utf-8") as f:
                 f.write(report_content)
 
-            saved_path_str = str(report_file_path.resolve())  # 절대 경로 문자열로 저장
+            saved_path_str = "sum_"+str(report_file_path.resolve())  # 절대 경로 문자열로 저장
             logger.info(f"Report successfully saved to: {saved_path_str}", extra=extra_log_data)
 
             update_dict = {

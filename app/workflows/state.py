@@ -32,9 +32,21 @@ class WorkflowState(BaseModel):
     # --- Node 6 (Save Report) 추가 ---
     saved_report_path: Optional[str] = Field(None, description="로컬 파일 시스템에 저장된 보고서 파일 경로")
 
-    # --- 기타 필드 (필요시 추가) ---
-    # analyzed_data: Optional[Any] = Field(None, description="검색 결과 분석/종합 데이터")
-    # evaluation_metrics: Optional[Dict[str, float]] = Field(None, description="중간 결과 평가 지표")
+    # --- Node 7 (Ideation) 추가 ---
+    comic_ideas: Optional[List[Dict[str, Any]]] = Field(default_factory=list, description="생성된 만화 아이디어 목록")
+
+    # --- Node 8 (Scenario Generation) 추가 ---
+    comic_scenarios: Optional[List[Dict[str, Any]]] = Field(default_factory=list, description="생성된 만화 시나리오 목록 (선택된 아이디어 기반)")
+    selected_comic_idea_for_scenario: Optional[Dict[str, Any]] = Field(None, description="시나리오 작성을 위해 선택된 만화 아이디어")  # 선택적: 만약 하나의 아이디어만 시나리오로 만든다면
+
+    # --- Node 9 (Image Generation) 추가 ---
+    generated_comic_images: Optional[List[Dict[str, Any]]] = Field(default_factory=list, description="생성된 만화 장면 이미지 정보 목록 (경로/URL 등)")
+
+    # --- Node 10 (Finalize & Notify) 추가 ---
+    uploaded_image_urls: Optional[List[Dict[str, Optional[str]]]] = Field(default_factory=list, description="S3에 업로드된 이미지 URL 또는 URI 목록")  # 예: [{"scene_identifier": "Scene 1", "s3_url": "...", "error": null}]
+    translated_report_content: Optional[str] = Field(None, description="번역된 보고서 내용 (HTML)")
+    referenced_urls: Optional[List[str]] = Field(default_factory=list, description="보고서 생성 시 참조된 외부 URL 목록")
+    external_api_response: Optional[Dict[str, Any]] = Field(None, description="외부 API 호출 결과")  # 성공/실패 정보 등
 
     class Config:
         arbitrary_types_allowed = True

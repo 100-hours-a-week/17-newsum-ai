@@ -80,6 +80,12 @@ class Settings(BaseSettings):
     LANGCHAIN_API_KEY: Optional[str] = Field(None) # <<< validation_alias 제거
     LANGCHAIN_PROJECT: Optional[str] = Field("NewSum-Project") # <<< validation_alias 제거
 
+    SCENARIO_TARGET_SCENES_COUNT: int = 4
+    IMAGE_MAX_PARALLEL_TASKS: int = 1
+    S3_MAX_PARALLEL_UPLOADS: int = 5
+
+    EXTERNAL_API_TIMEOUT_SECONDS: int = 60
+
 # 설정 객체 인스턴스 생성
 settings = Settings()
 
