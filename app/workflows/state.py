@@ -49,5 +49,9 @@ class WorkflowState(BaseModel):
     referenced_urls: Optional[List[str]] = Field(default_factory=list, description="보고서 생성 시 참조된 외부 URL 목록")
     external_api_response: Optional[Dict[str, Any]] = Field(None, description="외부 API 호출 결과")  # 성공/실패 정보 등
 
+    # --- Node 10 (Finalize & Notify) ---
+    source_news_payload_for_api: Optional[List[Dict[str, str]]] = Field(default_factory=list, description="Source news data structured for the external API")
+    uploaded_report_s3_uri: Optional[str] = Field(None, description="S3 URI of the uploaded HTML report")
+
     class Config:
         arbitrary_types_allowed = True

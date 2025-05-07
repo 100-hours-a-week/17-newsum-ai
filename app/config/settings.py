@@ -93,6 +93,7 @@ class Settings(BaseSettings):
     S3_MAX_PARALLEL_UPLOADS: int = 5
 
     EXTERNAL_API_TIMEOUT_SECONDS: int = 60
+    IMAGE_DEFAULT_STYLE_PROMPT: str = "vibrant webtoon art style, dynamic camera angle"
 
 # 설정 객체 인스턴스 생성
 settings = Settings()
