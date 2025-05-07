@@ -1,11 +1,12 @@
-# app/services/langsmith_service_v2.py
+# ai/app/services/langsmith_service.py
 
 import os
 from typing import Dict, Any, Optional, Union
-from app.config.settings import settings # 변경: 중앙 설정 객체 임포트
+from app.config.settings import Settings # 변경: 중앙 설정 객체 임포트
 from app.utils.logger import get_logger
 
 
+settings = Settings()
 # LangSmith 라이브러리 동적 로딩 시도
 try:
     from langsmith import Client
@@ -68,21 +69,21 @@ class LangSmithService:
             return # 서비스 비활성화
 
         try:
-            # LangSmith 클라이언트 초기화
+            # LangSmith 클라이언트 초기화 인자 구성
             client_args = {"api_key": self.api_key}
+            # <<< 수정: AnyHttpUrl 객체일 경우 문자열로 변환하여 전달 >>>
             if self.api_endpoint:
-                client_args["api_url"] = self.api_endpoint
+                # Pydantic URL 타입은 str()로 변환 가능
+                client_args["api_url"] = str(self.api_endpoint)
 
-            self.client = Client(**client_args) # type: ignore
+            # LangSmith 클라이언트 초기화
+            self.client = Client(**client_args)
 
-            # LangChain 트레이서 생성 (자동 추적을 위해 필요 시 사용)
-            # LangChain/LangGraph가 환경 변수를 통해 자동으로 설정하는 경우가 많으므로,
-            # 이 tracer 객체를 반드시 LangChain/LangGraph 실행 컨텍스트에 전달해야만 의미가 있음.
+            # LangChain 트레이서 생성
             self.tracer = LangChainTracer(
                 project_name=self.project_name,
                 client=self.client
-            ) # type: ignore
-
+            )
             self.logger.info(f"LangSmith 서비스 초기화 완료. 프로젝트: '{self.project_name}'")
             # 환경 변수 LANGCHAIN_TRACING_V2=true 설정 여부도 안내하면 좋음
             if os.getenv("LANGCHAIN_TRACING_V2", "false").lower() == "true":

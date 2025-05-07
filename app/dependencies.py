@@ -1,75 +1,73 @@
-# app/dependencies.py
+# ai/app/dependencies.py
+from typing import Annotated, Any, Dict
+from fastapi import Depends, HTTPException, Request
+from langgraph.graph import StateGraph # 또는 CompiledGraph
 
-from fastapi import Request, HTTPException, status
-from typing import Annotated # Python 3.9+ 권장
-from fastapi import Depends # Depends 는 함수 인자 타입 힌트에 사용
+# --- 서비스 및 도구 클래스 임포트 ---
+from app.services.database_client import DatabaseClient
+from app.services.llm_service import LLMService
+from app.services.image_service import ImageService
+from app.services.translation_service import TranslationService
+from app.services.spam_service import SpamService
+from app.services.storage_service import StorageService
+from app.services.langsmith_service import LangSmithService
+from app.tools.search.Google_Search_tool import GoogleSearchTool
+# TODO: Naver, Reddit 등 다른 검색 도구 추가 시 임포트
 
-# 필요한 클래스 임포트 (경로 주의)
-from app.services.database_con_client_v2 import DatabaseClientV2
-from langgraph.graph import StateGraph # StateGraph 타입 힌트용
-from app.utils.logger import get_logger
+_shared_state: Dict[str, Any] = {} # lifespan에서 관리할 공유 객체 저장소
 
-logger = get_logger(__name__)
+def _get_shared_object(key: str) -> Any:
+    """공유 상태에서 객체를 가져오는 내부 함수"""
+    obj = _shared_state.get(key)
+    if obj is None:
+        raise RuntimeError(f"Shared object '{key}' not found. Check lifespan setup.")
+    return obj
 
-# --- 컴파일된 워크플로우 앱 의존성 ---
+# --- 의존성 주입 함수 정의 ---
 
-def get_compiled_workflow_app(request: Request) -> StateGraph:
-    """
-    FastAPI 앱 상태(`app.state`)에서 미리 컴파일된 LangGraph 앱 인스턴스를 가져옵니다.
-    앱 시작 시 `lifespan` 컨텍스트 매니저를 통해 초기화되어야 합니다.
+def get_compiled_workflow_app() -> StateGraph:
+    """컴파일된 LangGraph 워크플로우 인스턴스 반환"""
+    return _get_shared_object('compiled_app')
 
-    Args:
-        request (Request): FastAPI 요청 객체 (app.state 접근용).
+def get_db_client() -> DatabaseClient: # <<< 실제 타입 사용
+    """데이터베이스 클라이언트 인스턴스 반환"""
+    return _get_shared_object('db_client')
 
-    Returns:
-        StateGraph: 컴파일된 LangGraph 애플리케이션.
+def get_llm_service() -> LLMService:
+    """LLM 서비스 인스턴스 반환"""
+    return _get_shared_object('llm_service')
 
-    Raises:
-        HTTPException: 앱 상태에 워크플로우 앱이 설정되지 않은 경우 503 오류 발생.
-    """
-    if not hasattr(request.app.state, 'compiled_workflow_app') or request.app.state.compiled_workflow_app is None:
-        logger.critical("컴파일된 워크플로우 앱(compiled_workflow_app)이 app.state에 설정되지 않았습니다! 앱 시작 시 초기화 오류 가능성.")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="워크플로우 서비스를 현재 사용할 수 없습니다. 잠시 후 다시 시도해주세요."
-        )
-    return request.app.state.compiled_workflow_app
+def get_image_service() -> ImageService:
+    """이미지 생성 서비스 인스턴스 반환"""
+    return _get_shared_object('image_service')
 
-# FastAPI 라우터에서 타입 힌트와 함께 사용하기 위한 Annotated 버전 (선택 사항)
-# CompiledAppDep = Annotated[StateGraph, Depends(get_compiled_workflow_app)]
+def get_translation_service() -> TranslationService:
+    """번역 서비스 인스턴스 반환"""
+    return _get_shared_object('translation_service')
 
+def get_spam_service() -> SpamService:
+    """스팸 탐지 서비스 인스턴스 반환"""
+    return _get_shared_object('spam_service')
 
-# --- 데이터베이스 클라이언트 의존성 ---
+def get_storage_service() -> StorageService:
+    """스토리지 서비스 인스턴스 반환"""
+    return _get_shared_object('storage_service')
 
-def get_db_client(request: Request) -> DatabaseClientV2:
-    """
-    FastAPI 앱 상태(`app.state`)에서 초기화된 데이터베이스 클라이언트 인스턴스를 가져옵니다.
-    앱 시작 시 `lifespan` 컨텍스트 매니저를 통해 초기화되어야 합니다.
+def get_langsmith_service() -> LangSmithService:
+    """LangSmith 서비스 인스턴스 반환"""
+    return _get_shared_object('langsmith_service')
 
-    Args:
-        request (Request): FastAPI 요청 객체 (app.state 접근용).
+def get_google_search_tool() -> GoogleSearchTool:
+    """Google 검색 도구 인스턴스 반환"""
+    return _get_shared_object('Google Search_tool')
 
-    Returns:
-        DatabaseClientV2: 초기화된 데이터베이스 클라이언트 인스턴스.
-
-    Raises:
-        HTTPException: 앱 상태에 DB 클라이언트가 설정되지 않은 경우 503 오류 발생.
-    """
-    if not hasattr(request.app.state, 'db_client') or request.app.state.db_client is None:
-        logger.critical("데이터베이스 클라이언트(db_client)가 app.state에 설정되지 않았습니다! 앱 시작 시 초기화 오류 가능성.")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="데이터베이스 서비스를 현재 사용할 수 없습니다. 잠시 후 다시 시도해주세요."
-        )
-    return request.app.state.db_client
-
-# FastAPI 라우터에서 타입 힌트와 함께 사용하기 위한 Annotated 버전 (선택 사항)
-# DBClientDep = Annotated[DatabaseClientV2, Depends(get_db_client)]
-
-# --- (선택 사항) 기타 공유 서비스/도구 의존성 ---
-# 만약 LLMService, ArticleScraperTool 등 다른 객체들도 앱 전체에서 공유하고 싶다면,
-# 위와 유사한 방식으로 lifespan에서 초기화하고 의존성 주입 함수를 만들 수 있습니다.
-# 예시:
-# def get_llm_service(request: Request) -> LLMService:
-#     # ... app.state.llm_service 확인 및 반환 ...
-# LLMServiceDep = Annotated[LLMService, Depends(get_llm_service)]
+# --- 타입 어노테이션 기반 의존성 ---
+CompiledWorkflowDep = Annotated[StateGraph, Depends(get_compiled_workflow_app)]
+DatabaseClientDep = Annotated[DatabaseClient, Depends(get_db_client)]
+LLMServiceDep = Annotated[LLMService, Depends(get_llm_service)]
+ImageServiceDep = Annotated[ImageService, Depends(get_image_service)]
+TranslationServiceDep = Annotated[TranslationService, Depends(get_translation_service)]
+SpamServiceDep = Annotated[SpamService, Depends(get_spam_service)]
+StorageServiceDep = Annotated[StorageService, Depends(get_storage_service)]
+LangSmithServiceDep = Annotated[LangSmithService, Depends(get_langsmith_service)]
+GoogleSearchToolDep = Annotated[GoogleSearchTool, Depends(get_google_search_tool)]

@@ -1,107 +1,131 @@
-# app/nodes/01_initialize_node.py (Improved Version)
-
+# ai/app/nodes/n01_initialize_node.py
 import uuid
-import re
+import traceback
 from datetime import datetime, timezone
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 
-# 프로젝트 구성 요소 임포트
-from app.config.settings import settings # 기본값 참조 또는 설정 확인용
-from app.utils.logger import get_logger
-from app.workflows.state import ComicState # 워크플로우 상태 모델
+from app.workflows.state import WorkflowState
+from app.utils.logger import get_logger, summarize_for_logging
 
-# 로거 설정
-logger = get_logger(__name__) # __name__ 사용 권장
+logger = get_logger(__name__)
 
-class InitializeNode:
-    """
-    워크플로우 실행을 초기화하고 초기 상태의 핵심 필드를 설정합니다.
+# N01 설정값 예시 (실제로는 외부 설정 파일 등에서 관리 가능)
+MIN_QUERY_LENGTH = 3
+MAX_QUERY_LENGTH = 512
 
-    주요 역할:
-    - 고유 ID (trace_id, comic_id) 및 타임스탬프 생성/설정.
-    - 입력된 초기 쿼리(initial_query) 정규화.
-    - 처리 시간 통계(processing_stats) 초기화 및 기록.
 
-    참고:
-    - 대부분의 애플리케이션 설정 값(LLM 모델, 온도, 타임아웃 등)은 상태 객체(state.config)에
-      복사하지 않습니다. 대신, 각 노드나 도구가 필요할 때마다 중앙 설정 객체
-      (`app.config.settings` 또는 주입된 설정 객체)를 직접 참조합니다.
-    - 워크플로우 인스턴스별로 달라질 수 있는 설정(예: 사용자 지정 온도)은
-      그래프 실행 시점에 외부에서 `state.config`에 주입되어야 합니다.
-      이 노드는 `state.config`를 *설정하지 않으며*, 후속 노드는 필요한 설정이
-      `state.config`에 존재한다고 가정하거나 `settings`의 기본값을 사용해야 합니다.
-    """
+class N01InitializeNode:
+    """(업그레이드됨) 워크플로우 시작 시 상태를 초기화하고 입력 유효성을 검사하는 노드."""
 
-    # 상태 입력/출력 정의 (참고용)
-    inputs: List[str] = ["initial_query", "trace_id", "config"] # config도 받을 수 있음 (하지만 여기서 설정 안 함)
-    outputs: List[str] = [
-        "comic_id", "trace_id", "timestamp", "initial_query",
-        "processing_stats", "used_links", "error_message",
-        # config는 여기서 업데이트하지 않음
-    ]
+    async def run(self, state: WorkflowState) -> Dict[str, Any]: # 입력으로 WorkflowState 객체 전체를 받음
+        node_name = self.__class__.__name__
 
-    def __init__(self):
-        """노드 초기화"""
-        logger.info("InitializeNode initialized.")
+        # API 요청에서 전달된 original_query와 config를 사용
+        original_query = state.original_query or ""
+        initial_config = state.config or {}
 
-    def _normalize_query(self, query: Optional[str]) -> str:
-        """쿼리 문자열 정규화: 앞뒤 공백 제거 및 연속 공백 단일화"""
-        if not query:
-            return ""
-        # 정규 표현식을 사용하여 하나 이상의 공백 문자를 단일 공백으로 치환
-        normalized = re.sub(r'\s+', ' ', query).strip()
-        return normalized
 
-    async def run(self, state: ComicState) -> Dict[str, Any]:
-        """
-        워크플로우 초기 상태의 핵심 필드를 계산하고 설정합니다.
+        # --- ID 일관성 확보 ---
+        # background_tasks에서 comic_id와 trace_id를 전달했다면 해당 값을 사용
+        # state 객체를 통해 이 값들이 이미 설정되어 있을 것임.
+        # LangGraph는 노드 실행 전 상태 객체(state)를 해당 노드의 입력으로 전달함.
+        # 따라서, background_tasks.py에서 initial_workflow_input에 comic_id와 trace_id를 넣었다면,
+        # N01InitializeNode의 state 인자를 통해 이 값들에 접근 가능해야 함.
 
-        Args:
-            state: 입력 ComicState. `initial_query`, `trace_id`, `config`가 포함될 수 있습니다.
-                   `config`는 이 노드에서 읽거나 쓰지 않지만, 후속 노드를 위해 전달될 수 있습니다.
+        # 만약 state.comic_id나 state.trace_id가 None이나 빈 문자열로 들어온다면,
+        # 이는 background_tasks.py에서 initial_workflow_input에 해당 키를 포함시키지 않았거나,
+        # LangGraph의 상태 전달 방식에 대한 이해가 더 필요함을 의미.
+        # 여기서는 state 객체에 이미 올바른 ID가 설정되어 있다고 가정하고 진행.
+        # 또는, 명시적으로 initial_input에서 직접 ID를 가져와서 사용하는 방식도 고려 가능.
 
-        Returns:
-            ComicState 업데이트를 위한 딕셔너리. 이 노드에서 설정/계산된 필드만 포함합니다.
-        """
-        start_time = datetime.now(timezone.utc)
-        # 상태에 trace_id가 있으면 사용, 없으면 새로 생성하여 일관성 유지
-        # `getattr` 사용으로 state에 trace_id가 없는 초기 상태에서도 안전하게 처리
-        trace_id = getattr(state, 'trace_id', None) or str(uuid.uuid4())
-        log_prefix = f"[{trace_id}]" # 로그 추적을 위한 접두사
-        logger.info(f"{log_prefix} Executing InitializeNode...")
+        # WorkflowState 모델에 따라 state.comic_id와 state.trace_id가 존재.
+        # 이 값들은 LangGraph가 이전 단계(여기서는 background_task의 ainvoke 호출 시 입력)로부터 전달.
+        comic_id_to_use = state.comic_id
+        trace_id_to_use = state.trace_id
+        # 만약 전달된 ID가 없다면 (예: 워크플로우가 다른 방식으로 시작된 경우) 새로 생성 (Fallback)
+        if not comic_id_to_use:
+            comic_id_to_use = str(uuid.uuid4())
+            logger.warning(f"N01: comic_id was not provided, generating a new one: {comic_id_to_use}")
+        if not trace_id_to_use:
+            # trace_id는 comic_id와 동일하게 사용하거나, 별도로 관리할 수 있음
+            # 여기서는 comic_id와 동일하게 설정
+            trace_id_to_use = comic_id_to_use
+            if comic_id_to_use != state.comic_id:  # comic_id는 있었는데 trace_id만 없었던 경우
+                logger.warning(f"N01: trace_id was not provided, using comic_id as trace_id: {trace_id_to_use}")
 
-        # --- 고유 ID 및 타임스탬프 생성 ---
-        comic_id = str(uuid.uuid4())
-        timestamp = start_time.isoformat()
+        timestamp = datetime.now(timezone.utc).isoformat()
+        writer_id = initial_config.get('writer_id', 'default_writer')
 
-        # --- 입력 쿼리 정규화 ---
-        # `getattr` 사용으로 state에 initial_query가 없는 초기 상태에서도 안전하게 처리
-        initial_query = getattr(state, 'initial_query', None)
-        normalized_query = self._normalize_query(initial_query)
-        logger.info(f"{log_prefix} Original query: '{initial_query}', Normalized query: '{normalized_query}'")
-
-        # --- 처리 통계 업데이트 ---
-        # 이전 상태의 processing_stats를 안전하게 가져와 업데이트
-        processing_stats: Dict[str, float] = getattr(state, 'processing_stats', None) or {}
-        end_time = datetime.now(timezone.utc)
-        processing_stats['initialize_node_time'] = (end_time - start_time).total_seconds() # 키 형식 통일
-
-        logger.info(f"{log_prefix} Initialization complete: comic_id={comic_id}")
-
-        # --- ComicState 업데이트를 위한 결과 반환 ---
-        # 이 노드에서 계산하거나 명시적으로 초기화해야 하는 값만 반환합니다.
-        # 'config' 필드는 여기서 수정하지 않습니다.
-        # Pydantic 모델의 기본값으로 초기화될 필드(예: 빈 리스트/딕셔너리)는 명시적으로 반환할 필요 없음
-        update_data: Dict[str, Any] = {
-            "comic_id": comic_id,
-            "trace_id": trace_id,          # 생성 또는 전달받은 trace_id 설정
-            "timestamp": timestamp,        # 워크플로우 시작 타임스탬프
-            "initial_query": normalized_query, # 정규화된 쿼리 전달
-            "processing_stats": processing_stats, # 업데이트된 처리 시간 통계
-            "used_links": [],              # 사용된 링크 목록 초기화 (명시적 초기화)
-            "error_message": None,         # 이전 에러 메시지 초기화
+        extra_log_data = {
+            'trace_id': trace_id_to_use,  # 일관된 ID 사용
+            'comic_id': comic_id_to_use,  # 일관된 ID 사용
+            'writer_id': writer_id,
+            'node_name': node_name,
+            'retry_count': 0  # 초기화 시 재시도 횟수는 0
         }
 
-        # 안전장치: 반환하기 전에 ComicState 모델에 정의된 필드만 포함하는지 확인
-        valid_keys = set(ComicState.model_fields.keys())
-        return {k: v for k, v in update_data.items() if k in valid_keys}
+        logger.info(
+            f"Entering node. Initial Query: '{original_query}', "
+            f"Config Summary: {summarize_for_logging(initial_config, max_len=200)}",
+            extra=extra_log_data
+        )
+
+        # --- 입력 쿼리 유효성 검사 ---
+        error_messages = []
+        if not original_query:
+            error_messages.append("Initial query is empty or missing.")
+        elif len(original_query) < MIN_QUERY_LENGTH:
+            error_messages.append(
+                f"Initial query is too short (min {MIN_QUERY_LENGTH} chars). Query: '{original_query}'")
+        elif len(original_query) > MAX_QUERY_LENGTH:
+            error_messages.append(
+                f"Initial query is too long (max {MAX_QUERY_LENGTH} chars). Query length: {len(original_query)}")
+
+        if error_messages:
+            full_error_msg = " ".join(error_messages)
+            logger.error(f"Input validation failed: {full_error_msg}", extra=extra_log_data)
+            return {
+                "trace_id": trace_id_to_use,
+                "comic_id": comic_id_to_use,
+                "timestamp": timestamp,
+                "config": initial_config,  # 원본 config 유지
+                "original_query": original_query,  # 원본 query 유지 (오류났어도)
+                "current_stage": "ERROR",  # 명확한 에러 스테이지
+                "error_message": f"N01 Validation Error: {full_error_msg}",  # 최상위 에러 메시지
+                "error_log": [{"stage": node_name, "error": full_error_msg, "timestamp": timestamp}]
+            }
+
+        # 상태 업데이트 준비
+        try:
+            update_dict = {
+                "trace_id": trace_id_to_use,  # 명시적으로 다시 설정하여 확인
+                "comic_id": comic_id_to_use,  # 명시적으로 다시 설정하여 확인
+                "timestamp": timestamp,  # N01에서 생성하는 타임스탬프
+                "query_context": {},  # 초기화
+                "initial_context_results": [],  # 초기화
+                "search_strategy": None,  # 초기화
+                "raw_search_results": None,  # 초기화 (state.py 정의에 따름)
+                "report_content": None,  # 초기화 (state.py 정의에 따름)
+                "saved_report_path": None,  # 초기화 (state.py 정의에 따름)
+                "retry_count": 0,  # 초기화
+                "error_log": [],  # 초기화
+                "error_message": None,  # 초기화
+                "current_stage": node_name  # 현재 노드 이름 설정
+                # original_query와 config는 변경하지 않으므로 update_dict에 포함 X (state에 이미 존재)
+            }
+            logger.info(f"Exiting node. State Initialized. Summary: {summarize_for_logging(update_dict)}",
+                        extra=extra_log_data)
+            return update_dict
+
+        except Exception as e:
+            error_msg = f"Error during state initialization: {e}"
+            logger.exception(error_msg, extra=extra_log_data)
+            return {
+                "trace_id": trace_id_to_use, # 명시적으로 다시 설정하여 확인
+                "comic_id": comic_id_to_use, # 명시적으로 다시 설정하여 확인
+                "timestamp": timestamp,
+                "current_stage": "ERROR",
+                "error_message": f"N01 Initialization Exception: {error_msg}",
+                "error_log": [{"stage": node_name, "error": error_msg, "detail": traceback.format_exc(),
+                               "timestamp": datetime.now(timezone.utc).isoformat()}]
+            }

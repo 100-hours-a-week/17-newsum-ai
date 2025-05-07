@@ -1,158 +1,175 @@
-# app/api/v1/background_tasks.py
-import logging
+# ai/app/api/v1/background_tasks.py (Trace ID 일관성 및 최종 상태 처리 수정)
 import uuid
-import traceback # 상세 오류 로깅용
-from typing import Dict, Any, Optional # 타입 힌트용
-from fastapi import BackgroundTasks, Depends, HTTPException # Depends, HTTPException 추가
+import traceback
+from typing import Dict, Any, Optional
+from fastapi import BackgroundTasks, HTTPException
 from datetime import datetime, timezone
 
-# --- 필요한 클래스 및 설정 임포트 ---
-# (경로는 실제 프로젝트 구조에 맞게 조정)
-from app.workflows.state import ComicState
-from app.services.database_con_client_v2 import DatabaseClientV2
-from app.config.settings import settings
-from app.utils.logger import get_logger
-# --- FastAPI 앱 컨텍스트에서 생성/관리된 객체를 가져오기 위한 의존성 주입 함수 (예시) ---
-from app.dependencies import get_compiled_workflow_app, get_db_client # 실제 구현 필요
-from langgraph.graph import StateGraph # StateGraph 타입 힌트용
+# --- 유틸리티 및 애플리케이션 구성 요소 임포트 ---
+from app.utils.logger import get_logger, summarize_for_logging
+from app.dependencies import CompiledWorkflowDep, DatabaseClientDep
 
-logger = get_logger("BackgroundTasks") # 로거 이름 변경
+logger = get_logger(__name__)
 
-# --- 백그라운드 작업 트리거 함수 ---
+
 async def trigger_workflow_task(
-    query: str,
-    background_tasks: BackgroundTasks,
-    # --- 의존성 주입 사용 ---
-    compiled_app: StateGraph = Depends(get_compiled_workflow_app), # 미리 컴파일된 앱 주입
-    db_client: DatabaseClientV2 = Depends(get_db_client)       # DB 클라이언트 주입
+        query: str,
+        config: Dict[str, Any],
+        background_tasks: BackgroundTasks,
+        # 주석: FastAPI의 Depends를 직접 사용하거나, main.py/lifespan.py에서 생성된 객체를 전달받습니다.
+        # 여기서는 의존성 타입 힌트만 사용하고, 실제 객체는 app.state 또는 Depends를 통해 가져온다고 가정합니다.
+        compiled_app: CompiledWorkflowDep, # = Depends(get_compiled_app) 등으로 주입 가능
+        db_client: DatabaseClientDep      # = Depends(get_db_client) 등으로 주입 가능
 ) -> str:
     """
-    (수정됨) 백그라운드로 LangGraph 워크플로우 실행을 트리거하고 DB 상태를 업데이트합니다.
-    FastAPI 의존성 주입을 통해 미리 컴파일된 LangGraph 앱과 DB 클라이언트를 받습니다.
-
-    Args:
-        query (str): 사용자의 초기 쿼리.
-        background_tasks (BackgroundTasks): FastAPI의 백그라운드 태스크 객체.
-        compiled_app (StateGraph): 미리 컴파일된 LangGraph 애플리케이션 (주입됨).
-        db_client (DatabaseClientV2): 데이터베이스 클라이언트 인스턴스 (주입됨).
-
-    Returns:
-        str: 생성된 코믹 작업의 고유 ID (comic_id).
-
-    Raises:
-        HTTPException: 초기 DB 상태 설정 실패 시.
+    백그라운드로 LangGraph 워크플로우 실행을 트리거하고 초기 상태를 DB에 기록합니다.
+    (업그레이드됨: ID 일관성 확보, N09 결과 처리 추가)
     """
-    comic_id = str(uuid.uuid4()) # 고유 ID 생성
-    trace_id = comic_id # trace_id로 comic_id 사용
-    extra_log_data = {'trace_id': trace_id, 'comic_id': comic_id}
+    master_comic_id = str(uuid.uuid4())
+    master_trace_id = master_comic_id
+    langgraph_thread_id = master_comic_id
 
-    logger.info(f"백그라운드 워크플로우 트리거: query='{query}'", extra=extra_log_data)
+    writer_id_for_log = config.get('writer_id', 'default')
+    extra_log_data = {'trace_id': master_trace_id, 'comic_id': master_comic_id, 'writer_id': writer_id_for_log}
 
-    # --- 워크플로우 실행을 위한 내부 비동기 함수 ---
-    async def workflow_runner(comic_id: str, initial_query: str, trace_id: str):
-        """(수정됨) 실제 워크플로우를 실행하고 상태를 업데이트하는 내부 함수."""
-        runner_extra_log = {'trace_id': trace_id, 'comic_id': comic_id}
-        start_run_time = datetime.now(timezone.utc) # 실행 시작 시간
-
-        try:
-            # 1. 상태 업데이트: 시작됨 (STARTED)
-            # DB 클라이언트가 주입되므로 직접 사용 가능
-            await db_client.set(comic_id, {
-                "status": "STARTED",
-                "message": "워크플로우 실행 시작.",
-                "query": initial_query,
-                "timestamp_start": start_run_time.isoformat()
-            })
-            logger.info("워크플로우 실행 시작됨.", extra=runner_extra_log)
-
-            # 2. 초기 입력 준비
-            initial_input = {"initial_query": initial_query}
-
-            # 3. 워크플로우 실행 (ainvoke - 블로킹 가능성 있음!)
-            # compiled_app은 외부에서 주입받아 사용
-            config = {"configurable": {"thread_id": comic_id}} # 체크포인터용 설정
-            logger.debug("LangGraph ainvoke 시작...", extra=runner_extra_log)
-
-            final_output = await compiled_app.ainvoke(initial_input, config=config)
-
-            logger.debug("LangGraph ainvoke 완료.", extra=runner_extra_log)
-            end_run_time = datetime.now(timezone.utc) # 종료 시간
-            run_duration = (end_run_time - start_run_time).total_seconds() # 소요 시간
-
-            # 4. 최종 상태 추출 및 DB 업데이트
-            final_state_data: Dict[str, Any] = {} # 최종 상태 저장용
-            error_message: Optional[str] = None
-
-            # ainvoke 결과에서 상태 추출 시도 (이전과 동일한 로직)
-            if isinstance(final_output, ComicState):
-                final_state_data = final_output.model_dump()
-                error_message = final_state_data.get("error_message")
-            elif isinstance(final_output, dict):
-                 possible_state = next((v for v in final_output.values() if isinstance(v, ComicState)), None)
-                 if possible_state:
-                      final_state_data = possible_state.model_dump()
-                      error_message = final_state_data.get("error_message")
-                 else:
-                      logger.warning("ainvoke 결과에서 ComicState 객체를 찾지 못함. 반환된 dict 사용 시도.", extra=runner_extra_log)
-                      final_state_data = final_output
-                      error_message = final_state_data.get("error_message") # 오류 메시지 키 확인
-            else:
-                 logger.error(f"예상치 못한 ainvoke 결과 타입: {type(final_output)}", extra=runner_extra_log)
-                 error_message = f"예상치 못한 최종 상태 타입: {type(final_output)}"
-
-            final_status = "DONE" if not error_message else "FAILED"
-            final_message = error_message or "워크플로우 성공적으로 완료됨."
-            # 최종 결과에서 필요한 데이터 추출 (예: final_comic 필드)
-            result_data = {"final_comic": final_state_data.get("final_comic", {})}
-
-            # 최종 상태 DB 업데이트
-            await db_client.set(comic_id, {
-                "status": final_status,
-                "message": final_message,
-                "result": result_data,
-                "timestamp_end": end_run_time.isoformat(),
-                "duration_seconds": round(run_duration, 2), # 소요 시간 추가
-                # "processing_stats": final_state_data.get("processing_stats", {}), # 처리 통계 추가 (선택 사항)
-            })
-            logger.info(f"워크플로우 완료. 상태: {final_status}, 소요시간: {run_duration:.2f}초", extra=runner_extra_log)
-
-        except Exception as e:
-            # 워크플로우 실행 중 예외 처리
-            end_run_time = datetime.now(timezone.utc)
-            run_duration = (end_run_time - start_run_time).total_seconds()
-            error_msg = f"워크플로우 실행 오류: {str(e)}"
-            logger.exception(error_msg, extra=runner_extra_log)
-            detailed_error = traceback.format_exc() # 상세 오류 스택
-            logger.error(f"Traceback:\n{detailed_error}", extra=runner_extra_log)
-            # 오류 상태 DB 기록
-            try:
-                await db_client.set(comic_id, {
-                    "status": "FAILED",
-                    "message": error_msg,
-                    "error_details": detailed_error,
-                    "timestamp_end": end_run_time.isoformat(),
-                    "duration_seconds": round(run_duration, 2)
-                })
-            except Exception as db_err:
-                 logger.error(f"오류 상태 DB 업데이트 실패: {db_err}", extra=runner_extra_log)
+    logger.info(f"백그라운드 워크플로우 트리거 시작: query='{query}', config='{summarize_for_logging(config)}'", extra=extra_log_data)
 
     # 1. 초기 DB 상태 설정: PENDING
     try:
-        await db_client.set(comic_id, {
-            "status": "PENDING",
-            "message": "워크플로우 작업 수락됨.",
-            "query": query,
-            "timestamp_accepted": datetime.now(timezone.utc).isoformat()
-        })
-        logger.info("DB 상태 'PENDING'으로 설정됨.", extra=extra_log_data)
+        initial_status_data = {
+            "comic_id": master_comic_id, "status": "PENDING", "message": "워크플로우 작업 수락됨.",
+            "query": query, "writer_id": config.get("writer_id"),
+            "user_site_preferences_provided": "user_site_preferences" in config,
+            "timestamp_accepted": datetime.now(timezone.utc).isoformat(),
+            "timestamp_start": None, "timestamp_end": None, "duration_seconds": None,
+            "result": None, "error_details": None,
+        }
+        await db_client.set(master_comic_id, initial_status_data)
+        logger.info("DB 상태 'PENDING'으로 설정 완료.", extra=extra_log_data)
     except Exception as db_err:
-        # 초기 DB 설정 실패 시, 500 오류 반환하여 클라이언트에게 알림
         logger.error(f"초기 DB 상태(PENDING) 설정 실패: {db_err}", exc_info=True, extra=extra_log_data)
-        raise HTTPException(status_code=500, detail="워크플로우 상태 초기화 실패") from db_err
+        raise HTTPException(status_code=500, detail=f"워크플로우 상태 초기화 실패: {db_err}") from db_err
 
-    # 2. 백그라운드 작업 스케줄링
-    # workflow_runner에 필요한 인자(comic_id, query, trace_id) 전달
-    background_tasks.add_task(workflow_runner, comic_id, query, trace_id)
-    logger.info("백그라운드 작업 스케줄됨.", extra=extra_log_data)
+    # 2. 백그라운드에서 실행될 워크플로우 함수 정의
+    async def workflow_runner(job_id: str, input_query: str, initial_api_config: Dict[str, Any], job_trace_id: str):
+        runner_writer_id = initial_api_config.get('writer_id', 'default')
+        runner_extra_log = {'trace_id': job_trace_id, 'comic_id': job_id, 'writer_id': runner_writer_id}
+        start_run_time = datetime.now(timezone.utc)
+        current_state_for_update = initial_status_data.copy()
 
-    return comic_id # 생성된 코믹 ID 반환
+        try:
+            # 상태 업데이트: STARTED
+            current_state_for_update.update({
+                "status": "STARTED", "message": "워크플로우 실행 시작.",
+                "timestamp_start": start_run_time.isoformat()
+            })
+            await db_client.set(job_id, current_state_for_update)
+            logger.info("워크플로우 실행 시작됨 (DB 업데이트).", extra=runner_extra_log)
+
+            # N01InitializeNode로 전달될 초기 상태값 구성
+            initial_workflow_input = {
+                "original_query": input_query,
+                "config": initial_api_config,
+                "comic_id": job_id,       # 생성된 ID 전달
+                "trace_id": job_trace_id,   # 생성된 ID 전달
+                # 주석: N01에서 다른 필드들은 기본값으로 초기화될 것이므로 여기서 설정 불필요
+            }
+
+            # LangGraph 실행 설정
+            langgraph_execution_config = {"configurable": {"thread_id": langgraph_thread_id}}
+
+            logger.debug(f"LangGraph ainvoke 시작... Input: {summarize_for_logging(initial_workflow_input)}",
+                         extra=runner_extra_log)
+
+            # 워크플로우 실행
+            final_output: Optional[Dict] = await compiled_app.ainvoke(initial_workflow_input, config=langgraph_execution_config)
+
+            logger.debug(f"LangGraph ainvoke 완료. Output type: {type(final_output)}", extra=runner_extra_log)
+            end_run_time = datetime.now(timezone.utc)
+            run_duration = (end_run_time - start_run_time).total_seconds()
+
+            # 최종 결과 및 상태 처리
+            final_status = "UNKNOWN"
+            final_message = "워크플로우 완료 (상태 불명확)."
+            db_result_data: Optional[Dict[str, Any]] = None
+            error_details: Optional[str] = None
+
+            if isinstance(final_output, dict):
+                error_message = final_output.get("error_message")
+                current_stage = final_output.get("current_stage") # 최종 스테이지 확인
+
+                # 주석: current_stage가 END가 아닐 경우에도 오류로 간주 가능
+                is_successful = not error_message and current_stage not in ["ERROR", None] # None도 오류로 간주
+
+                final_status = "DONE" if is_successful else "FAILED"
+                final_message = error_message if not is_successful else "워크플로우 성공적으로 완료됨."
+                error_details = error_message if not is_successful else None
+
+                # DB 'result' 필드 요약 정보 구성 (N09 결과 포함)
+                db_result_data = {
+                    "trace_id": final_output.get("trace_id"),
+                    "comic_id": final_output.get("comic_id"),
+                    "final_stage": current_stage,
+                    "error_log_summary": summarize_for_logging(final_output.get("error_log", [])),
+                    "config_summary": summarize_for_logging(final_output.get("config", {}), max_len=100),
+                    "original_query": final_output.get("original_query"),
+                    # --- 보고서 관련 ---
+                    "report_content_length": len(final_output.get("report_content", "")),
+                    "saved_report_path": final_output.get("saved_report_path"),
+                    # --- 아이디어 관련 ---
+                    "comic_ideas_count": len(final_output.get("comic_ideas", [])),
+                    "comic_ideas_titles": [idea.get('title') for idea in final_output.get("comic_ideas", [])],
+                    # --- 시나리오 관련 ---
+                    "selected_comic_idea_title": final_output.get("selected_comic_idea_for_scenario", {}).get('title'),
+                    "comic_scenarios_count": len(final_output.get("comic_scenarios", [])),
+                    "scenario_scenes_approx": final_output.get("comic_scenarios", [{}])[0].get("generated_scenes_approx") if final_output.get("comic_scenarios") else None,
+                    # --- 이미지 관련 ---
+                    "generated_comic_images_count": len(final_output.get("generated_comic_images", [])),
+                    "generated_images_summary": [ # 이미지 경로/URL 또는 오류 요약
+                         f"{img_info.get('scene_identifier', 'Unknown')}: {img_info.get('image_path') or img_info.get('image_url') or img_info.get('error', 'Status Unknown')}"
+                         for img_info in final_output.get("generated_comic_images", [])
+                    ]
+                }
+            else:
+                final_status = "FAILED"
+                final_message = f"워크플로우가 예상치 못한 결과 타입({type(final_output)})을 반환했습니다."
+                error_details = final_message
+                logger.error(final_message, extra=runner_extra_log)
+
+            # 최종 상태 DB 업데이트
+            current_state_for_update.update({
+                "status": final_status,
+                "message": final_message,
+                "result": db_result_data,
+                "timestamp_end": end_run_time.isoformat(),
+                "duration_seconds": round(run_duration, 2),
+                "error_details": error_details
+            })
+            await db_client.set(job_id, current_state_for_update)
+            logger.info(f"워크플로우 완료. 상태: {final_status}, 소요시간: {run_duration:.2f}초", extra=runner_extra_log)
+
+        except Exception as e:
+            end_run_time = datetime.now(timezone.utc)
+            run_duration = (end_run_time - start_run_time).total_seconds() if start_run_time else 0
+            error_msg = f"워크플로우 실행 중 심각한 오류 발생: {str(e)}"
+            logger.exception(error_msg, extra=runner_extra_log)
+            detailed_error_trace = traceback.format_exc()
+
+            try:
+                if 'current_state_for_update' not in locals():
+                    current_state_for_update = initial_status_data.copy()
+                    current_state_for_update["timestamp_start"] = start_run_time.isoformat() if start_run_time else None
+
+                current_state_for_update.update({
+                    "status": "FAILED", "message": error_msg, "error_details": detailed_error_trace,
+                    "timestamp_end": end_run_time.isoformat(), "duration_seconds": round(run_duration, 2)
+                })
+                await db_client.set(job_id, current_state_for_update)
+            except Exception as db_err:
+                logger.error(f"오류 상태 DB 업데이트 실패: {db_err}", extra=runner_extra_log)
+
+    # 3. 백그라운드 작업 추가
+    background_tasks.add_task(workflow_runner, master_comic_id, query, config, master_trace_id)
+    logger.info("백그라운드 작업 스케줄 완료.", extra=extra_log_data)
+
+    return master_comic_id

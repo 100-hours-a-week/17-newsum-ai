@@ -1,0 +1,64 @@
+version: 1
+disable_existing_loggers: False # 다른 라이브러리의 로거 설정을 유지
+
+formatters:
+  default:
+    # 기본 포매터: 콘솔 출력용. trace_id, node_name, retry_count 포함 (기본값 제공)
+    format: "[%(asctime)s] [%(levelname)s] [%(name)s] [%(trace_id)s] [%(node_name)s] [Retry:%(retry_count)s] - %(message)s"
+    datefmt: "%Y-%m-%d %H:%M:%S"
+    # LogRecord에 해당 속성이 없을 경우 사용될 기본값
+    defaults:
+      trace_id: "N/A"
+      node_name: "N/A"
+      retry_count: 0
+  detailed:
+    # 상세 포매터: 파일 로깅용. 추가 정보(lineno, threadName) 포함
+    format: "[%(asctime)s] [%(levelname)s] [%(name)s:%(lineno)d] [%(threadName)s] [%(trace_id)s] [%(node_name)s] [Retry:%(retry_count)s] - %(message)s"
+    datefmt: '%Y-%m-%d %H:%M:%S'
+    defaults:
+      trace_id: "N/A"
+      node_name: "N/A"
+      retry_count: 0
+  # 필요시 간단 포매터 정의 가능
+  # simple:
+  #   format: "%(levelname)s - %(name)s - [%(trace_id)s] [%(node_name)s] [Retry:%(retry_count)s] - %(message)s"
+  #   defaults:
+  #     trace_id: "N/A"
+  #     node_name: "N/A"
+  #     retry_count: 0
+
+handlers:
+  console:
+    class: logging.StreamHandler
+    level: INFO  # 콘솔에는 INFO 레벨 이상만 출력
+    formatter: default # 기본 포매터 사용
+    stream: ext://sys.stdout # 표준 출력으로 스트림
+
+  file_handler:
+    class: logging.handlers.RotatingFileHandler # 로그 파일 순환
+    level: DEBUG  # 파일에는 DEBUG 레벨 이상 모두 기록
+    formatter: detailed # 상세 포매터 사용
+    filename: app/log/app_workflow.log # 로그 파일 경로 (app/log/ 디렉토리 필요)
+    maxBytes: 10485760 # 로그 파일 최대 크기 (예: 10MB)
+    backupCount: 5     # 유지할 백업 파일 개수 (예: 5개)
+    encoding: utf8     # 파일 인코딩
+
+loggers:
+  # 특정 라이브러리의 로그 레벨 조정 (너무 상세한 로그 방지)
+  httpx:
+    level: WARNING # httpx 관련 로그는 WARNING 레벨 이상만 처리
+    handlers: [console, file_handler] # 콘솔과 파일 모두 사용
+    propagate: no # 루트 로거로 전파 방지
+  aiohttp:
+    level: WARNING # aiohttp 관련 로그도 WARNING 레벨 이상만
+    handlers: [console, file_handler]
+    propagate: no
+  # 다른 라이브러리 (예: boto3, redis 등)의 로그 레벨도 필요시 조정 가능
+  # boto3:
+  #   level: INFO
+  #   handlers: [console, file_handler]
+  #   propagate: no
+
+root: # 루트 로거: 애플리케이션의 모든 로거가 상속하는 기본 설정
+  level: DEBUG # 기본 로그 레벨은 DEBUG (파일 핸들러가 처리할 수 있도록)
+  handlers: [console, file_handler] # 콘솔과 파일 핸들러 모두 적용

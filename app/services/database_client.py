@@ -1,16 +1,17 @@
-# app/services/database_client_v2.py
+# ai/app/services/database_client.py
 
 import redis.asyncio as redis
 import json
 import asyncio
-from app.config.settings import settings # 변경: 중앙 설정 객체 임포트
+from app.config.settings import Settings # 변경: 중앙 설정 객체 임포트
 from typing import Optional, Any, Dict, Union, Callable, Coroutine
 from app.utils.logger import get_logger
 
 # 로거 설정
 logger = get_logger(__name__)
+settings = Settings()
 
-class DatabaseClientV2:
+class DatabaseClient:
     """
     비동기 Redis 데이터베이스 클라이언트 (V2)
     기본적인 Get/Set 및 Pub/Sub 기능을 포함하며 JSON 직렬화를 사용합니다.

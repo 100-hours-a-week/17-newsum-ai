@@ -4,6 +4,7 @@ from typing import List, Dict, Optional, Any
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from app.config.settings import settings # 설정 임포트
 from app.utils.logger import get_logger # 로거 임포트
+from datetime import datetime, timezone
 
 # praw 동적 임포트 시도
 try:

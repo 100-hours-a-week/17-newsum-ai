@@ -1,14 +1,17 @@
-# app/services/papago_translation_service.py
+# ai/app/services/translation_service.py
+
 import aiohttp
 import asyncio
 from typing import Optional
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-from app.config.settings import settings
+from app.config.settings import Settings
 from app.utils.logger import get_logger
 
 logger = get_logger("PapagoTranslationService")
 
-class PapagoTranslationService:
+settings = Settings()
+
+class TranslationService:
     """Papago NMT API와 상호작용하는 서비스 (내부 재시도 포함)"""
     def __init__(self):
         # 설정에서 Naver Client ID/Secret 로드 (Papago용)

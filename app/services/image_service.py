@@ -1,15 +1,17 @@
-# app/services/image_server_client_v2.py
+# ai/app/services/image_service.py
 
 import os
 import httpx
 import time
 import json # JSON 응답 처리 시 필요할 수 있음
 from typing import Dict, Any, Optional
-from app.config.settings import settings
+from app.config.settings import Settings
 from app.utils.logger import get_logger
 
 
-class ImageGenerationClient: # 클래스 이름은 파일명과 유사하게 유지하거나 ImageGenerationService로 변경 가능
+settings = Settings()
+
+class ImageService: # 클래스 이름은 파일명과 유사하게 유지하거나 ImageGenerationService로 변경 가능
     """
     이미지 생성 API와 상호작용하는 서비스 (ImageGenerationService 스타일)
     환경 변수 또는 인자를 통한 설정, 유연한 파라미터 및 응답 처리, 오류 반환 방식을 지원합니다.

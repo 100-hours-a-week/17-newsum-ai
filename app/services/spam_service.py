@@ -1,13 +1,14 @@
-# app/services/spam_detector.py
+# ai/app/services/spam_service.py
 import re
 from typing import Optional
 
-from app.config.settings import settings
+from app.config.settings import Settings
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+settings = Settings()
 
-class SpamDetectionService:
+class SpamService:
     """
     텍스트가 스팸인지 여부를 판별하는 서비스입니다.
     (현재는 Placeholder 규칙 기반 로직 사용. 향후 ML 모델 로딩 및 예측으로 대체 필요)

@@ -1,7 +1,11 @@
-# app/tools/social/twitter.py
+# app/tools/social/twitter.py (수정된 최종 버전)
+
 import asyncio
-from typing import List, Dict, Optional
+import time  # 시간 추적을 위해 임포트
+import re    # 쿼리 생성을 위해 임포트
+from typing import List, Dict, Optional, Any
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
 from app.config.settings import settings # 설정 임포트
 from app.utils.logger import get_logger # 로거 임포트
 
@@ -16,12 +20,21 @@ except ImportError:
 logger = get_logger(__name__) # 로거 초기화
 
 class TwitterTool:
-    """Tweepy를 사용하여 트위터 API v2와 상호작용하는 도구입니다."""
+    """
+    Tweepy를 사용하여 트위터 API v2와 상호작용하는 도구입니다.
+    Rate Limit 발생 시 긴 대기를 피하고 오류를 반환하도록 수정되었습니다.
+    """
 
     def __init__(self):
         """TwitterTool 초기화"""
         self.client: Optional[tweepy.Client] = None # 클라이언트 변수 초기화
         self.bearer_token = settings.TWITTER_BEARER_TOKEN # 설정에서 Bearer 토큰 로드
+
+        # Rate Limit 관리를 위한 변수 추가
+        self.last_api_call_time: float = 0.0
+        # 설정에서 최소 요청 간격 로드 (기본값 1초, 현재 5.0초로 설정됨)
+        self.min_request_interval: float = 5.0 #getattr(settings, 'TWITTER_MIN_REQUEST_INTERVAL_SEC', 5.0)
+        self.rate_limit_lock = asyncio.Lock() # 동시 접근 제어를 위한 Lock
 
         # 라이브러리 또는 토큰 부재 시 경고 로깅 및 초기화 중단
         if not TWEEPY_AVAILABLE:
@@ -33,125 +46,173 @@ class TwitterTool:
 
         try:
             logger.info("Twitter 클라이언트 초기화 중...")
-            # tweepy 클라이언트 생성, Rate Limit 시 자동 대기 활성화
+            # --- *** 중요 변경: wait_on_rate_limit=False 설정 *** ---
+            # Tweepy가 자동으로 긴 시간 대기하는 것을 방지하고 대신 예외를 발생시키도록 함
             self.client = tweepy.Client(
                 bearer_token=self.bearer_token,
-                wait_on_rate_limit=True
+                wait_on_rate_limit=False # <<<--- 여기를 False로 변경!
             )
-            logger.info("Twitter 클라이언트 초기화 완료.")
+            logger.info(f"Twitter 클라이언트 초기화 완료. wait_on_rate_limit=False, 최소 요청 간격: {self.min_request_interval}초")
         except Exception as e:
             logger.error(f"Twitter 클라이언트 초기화 실패: {e}", exc_info=True)
             self.client = None # 실패 시 클라이언트 None 설정
 
+    async def _wait_if_needed(self, trace_id: Optional[str] = None):
+        """
+        API 호출 속도를 조절하기 위해 필요한 경우 대기합니다. (자체 Throttling)
+        """
+        async with self.rate_limit_lock:
+            current_time = time.monotonic()
+            time_since_last_call = current_time - self.last_api_call_time
+            extra_log_data = {'trace_id': trace_id}
+
+            if time_since_last_call < self.min_request_interval:
+                wait_time = self.min_request_interval - time_since_last_call
+                logger.debug(f"Throttling Twitter API call. Waiting for {wait_time:.3f} seconds.", extra=extra_log_data)
+                await asyncio.sleep(wait_time)
+                self.last_api_call_time = time.monotonic()
+            else:
+                self.last_api_call_time = current_time
+
     @retry(
-        stop=stop_after_attempt(settings.TOOL_RETRY_ATTEMPTS), # 설정된 재시도 횟수 사용
-        wait=wait_exponential(multiplier=1, min=settings.TOOL_RETRY_WAIT_MIN, max=settings.TOOL_RETRY_WAIT_MAX), # 지수적 대기 시간 적용
-        retry=retry_if_exception_type(Exception), # 모든 예외 발생 시 재시도
-        reraise=True # 모든 재시도 실패 시 예외 다시 발생
+        stop=stop_after_attempt(settings.TOOL_RETRY_ATTEMPTS),
+        # --- MODIFIED: max 대기 시간 조정 (예: 60초) ---
+        wait=wait_exponential(multiplier=1, min=settings.TOOL_RETRY_WAIT_MIN, max=60),
+        retry=retry_if_exception_type(Exception),
+        reraise=True
     )
-    async def search_recent_tweets(self, keyword: str, max_results: int, trace_id: str) -> List[Dict[str, str]]:
+    async def search_recent_tweets(self, keyword: str, max_results: int, trace_id: str) -> List[Dict[str, Any]]:
         """
-        주어진 키워드로 최근 트윗을 검색합니다.
-
-        Args:
-            keyword (str): 검색어.
-            max_results (int): 반환할 최대 트윗 수 (API 호출당 최대 100개).
-            trace_id (str): 로깅을 위한 추적 ID.
-
-        Returns:
-            List[Dict[str, str]]: 트윗 정보(url, text, tweet_id 등)를 담은 사전 목록.
+        주어진 키워드로 최근 트윗을 검색합니다. Rate Limit 시 예외를 발생시킵니다.
         """
-        # 클라이언트 사용 불가 시 빈 리스트 반환
         if not self.client:
             logger.warning("Twitter 클라이언트를 사용할 수 없어 검색을 건너<0xEB><0x9C><0x95>니다.", extra={'trace_id': trace_id})
             return []
 
-        extra_log_data = {'trace_id': trace_id, 'keyword': keyword} # 로깅용 추가 데이터
-        logger.info(f"'{keyword}'에 대한 최근 트윗 검색 중 (최대: {max_results})", extra=extra_log_data)
+        extra_log_data = {'trace_id': trace_id, 'keyword': keyword}
 
-        # API 제한(최소 10, 최대 100)에 맞게 max_results 조정
+        # 쿼리 생성 (기존과 동일)
+        safe_keyword = keyword.strip().replace('"', '')
+        if not safe_keyword:
+            logger.warning("키워드가 비어 있어 Twitter 검색을 건너<0xEB><0x9C><0x95>니다.", extra=extra_log_data)
+            return []
+        quoted_keyword = f'"{safe_keyword}"' if ' ' in safe_keyword else safe_keyword
+        language_filter = "(lang:en)" # 또는 설정에서 가져오기
+        base_query = f"{quoted_keyword} -is:retweet {language_filter}"
+        if len(base_query) > 500:
+            logger.warning(f"Generated Twitter query is long ({len(base_query)} chars), potential issues.", extra=extra_log_data)
+        query = base_query
+
+        logger.info(f"'{keyword}'에 대한 최근 트윗 검색 중 (최대: {max_results}, Query: '{query}')", extra=extra_log_data)
         api_max_results = max(10, min(max_results, 100))
-        # 검색 쿼리: 리트윗 제외, 한국어 또는 영어 트윗 대상
-        query = f"{keyword} -is:retweet lang:ko OR lang:en"
 
         try:
-            loop = asyncio.get_running_loop() # 현재 이벤트 루프 가져오기
-            # tweepy 클라이언트 메서드는 동기적이므로 run_in_executor 사용
+            # 자체 Throttling 대기
+            await self._wait_if_needed(trace_id)
+
+            loop = asyncio.get_running_loop()
             response = await loop.run_in_executor(
-                None, # 기본 실행기 사용
+                None,
                 lambda: self.client.search_recent_tweets(
                     query=query,
                     max_results=api_max_results,
-                    tweet_fields=["created_at", "public_metrics", "conversation_id", "lang"] # 필요한 필드 지정
+                    tweet_fields=["created_at", "public_metrics", "conversation_id", "lang"]
                 )
             )
 
             results = []
-            if response.data: # 응답 데이터가 있는 경우
+            if response.data:
                 for tweet in response.data:
-                    tweet_url = f"https://twitter.com/anyuser/status/{tweet.id}" # 트윗 URL 생성
-                    # 결과 목록에 필요한 정보 추가
+                    tweet_url = f"https://twitter.com/anyuser/status/{tweet.id}"
                     results.append({
                         "url": tweet_url,
                         "text": tweet.text,
                         "tweet_id": str(tweet.id),
-                        "source": "Twitter", # 출처 명시
-                        "created_at": tweet.created_at.isoformat() if tweet.created_at else None, # 생성 시간 (ISO 형식)
-                        "lang": tweet.lang, # 언어 정보
+                        "source": "Twitter",
+                        "created_at": tweet.created_at.isoformat() if tweet.created_at else None,
+                        "lang": tweet.lang,
                     })
                 logger.info(f"{len(results)}개의 트윗을 찾았습니다.", extra=extra_log_data)
-            else: # 응답 데이터가 없는 경우
+            else:
                 logger.info("쿼리에 해당하는 최근 트윗을 찾을 수 없습니다.", extra=extra_log_data)
             return results
 
+        # --- *** 중요 변경: TooManyRequests 예외 처리 추가 *** ---
+        except tweepy.errors.TooManyRequests as e:
+            # Rate Limit (429) 발생 시 경고 로깅 후 빈 리스트 반환 (재시도는 tenacity가 담당)
+            logger.warning(f"Twitter API rate limit hit (429) during search for '{keyword}'. Returning empty list for this attempt. Details: {e}", extra=extra_log_data)
+            return [] # 현재 시도 실패, 빈 리스트 반환
+        # --------------------------------------------------------
         except tweepy.errors.TweepyException as e:
-             # 특정 tweepy 오류 처리 (예: Rate Limit, 인증 오류 등)
-             logger.error(f"검색 중 Tweepy API 오류 발생: {e}", extra=extra_log_data)
-             return [] # 현재 시도에서는 빈 리스트 반환
+             api_codes = getattr(e, 'api_codes', [])
+             api_messages = getattr(e, 'api_messages', [])
+             logger.error(f"검색 중 Tweepy API 오류 발생: {e} (Codes: {api_codes}, Messages: {api_messages})", extra=extra_log_data)
+             if isinstance(e, tweepy.errors.BadRequest):
+                  logger.error(f"BadRequest 발생 시 사용된 쿼리: '{query}'", extra=extra_log_data)
+             return [] # 다른 Tweepy 오류 시에도 빈 리스트 반환
         except Exception as e:
-            # 예상치 못한 오류 발생 시 로깅 및 예외 다시 발생 (재시도 유도)
             logger.error(f"Twitter 검색 중 예상치 못한 오류 발생: {e}", exc_info=True, extra=extra_log_data)
-            raise # tenacity 재시도를 위해 예외 발생
+            raise # tenacity 재시도를 위해 예외 다시 발생
 
-    @retry(stop=stop_after_attempt(settings.TOOL_RETRY_ATTEMPTS),  # 재시도 설정
-           wait=wait_exponential(multiplier=1, min=settings.TOOL_RETRY_WAIT_MIN, max=settings.TOOL_RETRY_WAIT_MAX),
-           retry=retry_if_exception_type(Exception), reraise=True)
-    async def get_tweet_details(self, tweet_id: str, trace_id: str) -> Optional[Dict[str, any]]:
-        """주어진 ID의 트윗 상세 정보를 가져옵니다."""
-        if not self.client: return None
+    @retry(
+        stop=stop_after_attempt(settings.TOOL_RETRY_ATTEMPTS),
+        # --- MODIFIED: max 대기 시간 조정 (예: 60초) ---
+        wait=wait_exponential(multiplier=1, min=settings.TOOL_RETRY_WAIT_MIN, max=60), # 일관성 및 효과 위해 max값 조정
+        retry=retry_if_exception_type(Exception),
+        reraise=True
+    )
+    async def get_tweet_details(self, tweet_id: str, trace_id: str) -> Optional[Dict[str, Any]]:
+        """주어진 ID의 트윗 상세 정보를 가져옵니다. Rate Limit 시 예외를 발생시킵니다."""
+        if not self.client:
+            logger.warning("Twitter 클라이언트를 사용할 수 없어 상세 정보 조회를 건너<0xEB><0x9C><0x95>니다.", extra={'trace_id': trace_id})
+            return None
+
         extra_log_data = {'trace_id': trace_id, 'tweet_id': tweet_id}
         logger.debug("API를 통해 트윗 상세 정보 가져오는 중...", extra=extra_log_data)
         try:
+            # 자체 Throttling 대기
+            await self._wait_if_needed(trace_id)
+
             loop = asyncio.get_running_loop()
-            # 필요한 필드 확장 요청 (작성자 정보 포함 등)
             response = await loop.run_in_executor(None, lambda: self.client.get_tweet(
                 tweet_id,
                 tweet_fields=["created_at", "public_metrics", "author_id", "conversation_id", "lang"],
-                expansions=["author_id"],  # 작성자 정보 포함
-                user_fields=["username", "name"]  # 작성자의 username, name 필드 요청
+                expansions=["author_id"],
+                user_fields=["username", "name"]
             ))
             if response.data:
                 tweet = response.data
-                # 포함된 사용자 정보에서 작성자 찾기
                 author = next((user for user in response.includes.get('users', []) if user.id == tweet.author_id), None)
-                author_name = author.username if author else str(tweet.author_id)  # 사용자명 없으면 ID 사용
+                author_name = author.username if author else str(tweet.author_id)
 
                 return {
                     "text": tweet.text,
                     "author": author_name,
                     "timestamp": tweet.created_at.isoformat() if tweet.created_at else None,
                     "likes": tweet.public_metrics.get('like_count', 0) if tweet.public_metrics else 0,
-                    "raw_data": tweet.data  # 원본 트윗 객체 저장
+                    "raw_data": tweet.data,
                 }
             else:
                 logger.warning("API를 통해 트윗을 찾을 수 없음", extra=extra_log_data)
                 return None
-        except tweepy.errors.NotFound:  # 404 에러 처리
+        except tweepy.errors.NotFound:
             logger.warning("API를 통해 트윗을 찾을 수 없음 (404)", extra=extra_log_data)
             return None
+        # --- *** 중요 변경: TooManyRequests 예외 처리 추가 *** ---
+        except tweepy.errors.TooManyRequests as e:
+            # Rate Limit (429) 발생 시 경고 로깅 후 None 반환 (재시도는 tenacity가 담당)
+            logger.warning(f"Twitter API rate limit hit (429) during get_tweet_details for ID '{tweet_id}'. Returning None for this attempt. Details: {e}", extra=extra_log_data)
+            return None # 현재 시도 실패, None 반환
+        # --------------------------------------------------------
+        except tweepy.errors.TweepyException as e:
+             api_codes = getattr(e, 'api_codes', [])
+             api_messages = getattr(e, 'api_messages', [])
+             logger.error(f"API 통해 트윗 가져오기 오류: {e} (Codes: {api_codes}, Messages: {api_messages})", extra=extra_log_data)
+             return None # 다른 Tweepy 오류 시에도 None 반환
         except Exception as e:
-            logger.error(f"API 통해 트윗 가져오기 오류: {e}", exc_info=True, extra=extra_log_data)
-            raise  # 재시도 위해 예외 발생
+            logger.error(f"API 통해 트윗 가져오기 중 예상치 못한 오류: {e}", exc_info=True, extra=extra_log_data)
+            raise # tenacity 재시도를 위해 예외 발생
+
     # tweepy는 보통 명시적인 close 메서드가 필요 없음
     # async def close(self):
     #     pass

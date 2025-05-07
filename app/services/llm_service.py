@@ -1,11 +1,12 @@
-# app/services/llm_service_v2.py
+# ai/app/services/llm_service.py
 
 import httpx
 import json
 from typing import Optional, Dict, Any, List
-from app.config.settings import settings # 변경: 중앙 설정 객체 임포트
+from app.config.settings import Settings # 변경: 중앙 설정 객체 임포트
 from app.utils.logger import get_logger
 
+settings = Settings()
 
 class LLMService:
     """
@@ -17,7 +18,7 @@ class LLMService:
     def __init__(
         self,
         endpoint: Optional[str] = None,
-        api_key: Optional[str] = None, # API 키 (Bearer 토큰 등에 사용)
+        #api_key: Optional[str] = None, # API 키 (Bearer 토큰 등에 사용)
         timeout: Optional[float] = None,
         logger_name: str = "LLMService" # 클래스 이름과 통일
     ):
@@ -32,7 +33,7 @@ class LLMService:
         """
         # 환경 변수 또는 인자 값 사용
         self.endpoint = endpoint or settings.LLM_API_ENDPOINT
-        self.api_key = api_key or settings.LLM_API_KEY
+        #self.api_key = api_key or settings.LLM_API_KEY
 
         # 로거 설정
         self.logger = get_logger(logger_name)
@@ -136,31 +137,31 @@ class LLMService:
 
         # 요청 페이로드 구성
         request_payload: Dict[str, Any] = {
-            "prompt": prompt,
+            "model": settings.DEFAULT_LLM_MODEL,  # 모델 이름 추가 필요 (vLLM OpenAI API는 model 파라미터 필수)
+            "messages": [{"role": "user", "content": prompt}],
             "max_tokens": max_tokens,
             "temperature": temperature,
-            **kwargs # 추가 인자 포함
+            **kwargs
         }
         if stop_sequences:
-            # API가 요구하는 파라미터 이름으로 설정 (예: 'stop', 'stop_sequences')
-            # 실제 API 문서 확인 필요
             request_payload["stop"] = stop_sequences
 
         # 요청 헤더 구성 (Bearer 토큰 기본 사용)
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}" # 표준 Bearer 토큰 사용
+        # if self.api_key:
+        #     headers["Authorization"] = f"Bearer {self.api_key}" # 표준 Bearer 토큰 사용
 
         raw_response_content = None # 오류 발생 시 원본 응답 저장용
         try:
             self.logger.debug(f"LLM API 요청: URL={self.endpoint}, Headers={list(headers.keys())}, Payload={request_payload}")
 
-            # API 호출
+            # --- 수정: httpx.post 호출 시 endpoint를 문자열로 변환 ---
             response = await self.client.post(
-                self.endpoint,
+                str(self.endpoint), # <<< AnyHttpUrl 객체를 str()로 변환
                 json=request_payload,
                 headers=headers
             )
+            # ----------------------------------------------------
             raw_response_content = response.text # 오류 발생 시 로깅/반환 위해 미리 저장
             response.raise_for_status() # HTTP 오류 시 예외 발생
 
@@ -212,8 +213,16 @@ class LLMService:
              }
         except Exception as e:
             # 예상치 못한 모든 종류의 오류 처리
-            self.logger.error(f"LLM API 호출 중 예상치 못한 오류 발생: {e}", exc_info=True)
-            return { "error": f"An unexpected error occurred: {e}", "raw_response": raw_response_content }
+            # <<< 수정: 오류 메시지에 httpx 오류 타입 명시적으로 포함 >>>
+            if isinstance(e, TypeError) and "Invalid type for url" in str(e):
+                # httpx URL 타입 오류 특화 로깅
+                self.logger.error(f"LLM API 호출 URL 타입 오류 발생: {e}. Endpoint type: {type(self.endpoint)}", exc_info=True)
+                return {"error": f"Internal configuration error: Invalid URL type provided to HTTP client.",
+                        "raw_response": None}
+            else:
+                # 기타 예상치 못한 오류
+                self.logger.error(f"LLM API 호출 중 예상치 못한 오류 발생: {e}", exc_info=True)
+                return {"error": f"An unexpected error occurred: {e}", "raw_response": raw_response_content}
 
     async def close(self):
         """
