@@ -43,7 +43,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "main:app",       # 실행할 FastAPI 앱 (main.py 파일의 app 객체)
         host="0.0.0.0",   # 외부 접속 허용 (예: settings.APP_HOST)
-        port=8090,        # 사용할 포트 (예: settings.APP_PORT)
+        port=8080,        # 사용할 포트 (예: settings.APP_PORT)
         log_level="info", # 로그 레벨 (예: settings.LOG_LEVEL)
         #reload=True       # 코드 변경 시 자동 재시작 (개발 시 유용, 예: settings.APP_RELOAD)
     )
