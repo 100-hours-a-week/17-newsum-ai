@@ -14,6 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 # 프로젝트 루트를 기준으로 .env 파일 경로 지정
 ENV_FILE_PATH = PROJECT_ROOT / '.env'
 
+
 class Settings(BaseSettings):
     """애플리케이션 설정 모델"""
     # .env 파일 로드 설정, 환경 변수 이름 대소문자 구분 안 함
@@ -56,17 +57,24 @@ class Settings(BaseSettings):
     # --- 스토리지 서비스 (S3 예시) ---
     S3_BUCKET_NAME: Optional[str] = Field(None) # <<< validation_alias 제거
     AWS_REGION: Optional[str] = Field(None) # <<< validation_alias 제거
-    LOCAL_STORAGE_PATH: str = Field("local_storage") # <<< validation_alias 제거
+    ACCESS_KEY: Optional[str] = Field(None) # <<< validation_alias 제거
+    SECRET_KEY: Optional[str] = Field(None) # <<< validation_alias 제거
+    LOCAL_STORAGE_PATH: str = Field("local_storage_path") # <<< validation_alias 제거
+    S3_STORAGE_PATH: str = Field("s3_storage_path") # <<< validation_alias 제거
 
     # --- 이미지 생성 서비스 ---
     IMAGE_SERVER_URL: Optional[AnyHttpUrl] = Field(None) # <<< validation_alias 제거
     IMAGE_SERVER_API_TOKEN: Optional[str] = Field(None) # <<< validation_alias 제거
     IMAGE_STORAGE_PATH: str = Field("generated_images") # <<< validation_alias 제거
+    LLM_MAX_TOKENS_SCENARIO: int = 2000
+    IMAGE_DEFAULT_NEGATIVE_PROMPT: str = Field("(worst quality, low quality, normal quality:1.2), deformed, blurry, text, signature")
 
     # --- 검색 도구 (Google 예시) ---
     GOOGLE_API_KEY: Optional[str] = Field(None) # <<< validation_alias 제거
     GOOGLE_CSE_ID: Optional[str] = Field(None) # <<< validation_alias 제거
     TARGET_COMMUNITY_DOMAINS: List[str] = Field(default_factory=list) # <<< validation_alias 제거
+    EXTERNAL_NOTIFICATION_API_URL: Optional[str] = Field(None) # <<< validation_alias 제거
+    EXTERNAL_API_TIMEOUT_SECONDS: int = 30
 
     # --- 도구 공통 설정 ---
     TOOL_HTTP_TIMEOUT: int = 30

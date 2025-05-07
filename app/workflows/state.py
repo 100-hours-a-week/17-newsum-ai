@@ -38,6 +38,7 @@ class WorkflowState(BaseModel):
     # --- Node 8 (Scenario Generation) 추가 ---
     comic_scenarios: Optional[List[Dict[str, Any]]] = Field(default_factory=list, description="생성된 만화 시나리오 목록 (선택된 아이디어 기반)")
     selected_comic_idea_for_scenario: Optional[Dict[str, Any]] = Field(None, description="시나리오 작성을 위해 선택된 만화 아이디어")  # 선택적: 만약 하나의 아이디어만 시나리오로 만든다면
+    thumbnail_image_prompt: Optional[str] = Field(None, description="썸네일 이미지 생성을 위한 LLM 생성 프롬프트")  # <<< 썸네일 프롬프트 필드 추가
 
     # --- Node 9 (Image Generation) 추가 ---
     generated_comic_images: Optional[List[Dict[str, Any]]] = Field(default_factory=list, description="생성된 만화 장면 이미지 정보 목록 (경로/URL 등)")
