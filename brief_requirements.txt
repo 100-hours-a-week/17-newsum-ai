@@ -6,6 +6,8 @@ bert-score==0.3.13
 boto3==1.38.8
 fastapi==0.115.12
 google-api-python-client==2.169.0
+google-cloud-translate==3.20.2
+grpcio-status==1.71.0
 langdetect==1.0.9
 langgraph-checkpoint-redis==0.0.4
 lxml_html_clean==0.4.2
