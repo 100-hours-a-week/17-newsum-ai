@@ -351,10 +351,18 @@ class N08ScenarioGenerationNode:
             )
 
             if not generated_scenarios_final:
-                error_msg = f"Failed to generate/parse any valid scenarios for idea: '{selected_idea.get('title')}'"  # type: ignore
+                error_msg = f"Failed to generate/parse any valid scenarios for idea: '{selected_idea.get('title')}'"
                 logger.error(error_msg, extra=extra)
                 current_node_error_log.append({"stage": f"{node_name}._generate_scenarios", "error": error_msg,
                                                "timestamp": datetime.now(timezone.utc).isoformat()})
+            elif len(generated_scenarios_final) < num_scenes:
+                warn_msg = f"Only {len(generated_scenarios_final)} scenarios generated (target: {num_scenes})."
+                logger.warning(warn_msg, extra=extra)
+                current_node_error_log.append({"stage": f"{node_name}._generate_scenarios", "error": warn_msg,
+                                               "timestamp": datetime.now(timezone.utc).isoformat()})
+                final_status = "N08_COMPLETED_WITH_PARTIAL_ERRORS"
+            else:
+                final_status = "N08_SCENARIO_GENERATION_COMPLETED"
 
             # _generate_thumbnail_prompt 호출 시 인자 개수 수정 (comic_scenarios 제거)
             # 이전 로그에서 TypeError 발생 지점: takes 4 positional arguments but 5 were given
@@ -370,12 +378,20 @@ class N08ScenarioGenerationNode:
 
             state.error_log.extend(current_node_error_log)  # 현재 노드의 오류들 전체 로그에 추가
 
-            final_status = "N08_SCENARIO_GENERATION_COMPLETED"
-            if not generated_scenarios_final:  # 시나리오 생성 자체가 안된 경우
-                final_status = "N08_SCENARIO_GENERATION_FAILED"
-            # 시나리오는 생성되었으나, 썸네일 프롬프트 생성 실패 등 부분적 오류가 있을 경우
-            elif current_node_error_log:
-                final_status = "N08_COMPLETED_WITH_PARTIAL_ERRORS"
+            # ====== 시나리오/프롬프트 디버그 출력 추가 ======
+            print("\n====== [selected_idea_and_scenario] idea_details ======")
+            print(f"Title: {selected_idea.get('title')}")
+            print(f"Summary: {selected_idea.get('summary')}")
+            print(f"Genre: {selected_idea.get('genre')}")
+            print(f"Characters: {selected_idea.get('characters')}")
+            print("====== [selected_idea_and_scenario] scenario_details ======")
+            for idx, sc in enumerate(generated_scenarios_final):
+                print(f"-- Scenario {idx+1} --")
+                print(f"ID: {sc.get('scene_identifier')}")
+                print(f"Desc: {sc.get('scene_description')[:60]}{'...' if sc.get('scene_description') and len(sc.get('scene_description'))>60 else ''}")
+                print(f"Prompt: {sc.get('final_image_prompt')[:60]}{'...' if sc.get('final_image_prompt') and len(sc.get('final_image_prompt'))>60 else ''}")
+            print("====== [selected_idea_and_scenario] END ======\n")
+            # ====== 디버그 출력 끝 ======
 
             update_dict = {
                 "comic_scenarios": generated_scenarios_final,
