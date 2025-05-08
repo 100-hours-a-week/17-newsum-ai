@@ -342,8 +342,8 @@ class N10FinalizeAndNotifyNode:
             source_news_final.extend(self._extract_referenced_urls(state))
 
             # 외부 API 페이로드 구성 (명세에 따라)
-            ext_api_url_final = "http://34.64.219.46:8080/api/v1/webtoons"  # 명세 URL
-            if ext_api_url_final:  # 이 URL은 고정
+            ext_api_url_final = settings.EXTERNAL_NOTIFICATION_API_URL
+            if ext_api_url_final:
                 title_for_payload = state.selected_comic_idea_for_scenario.get(
                     "title") if state.selected_comic_idea_for_scenario else \
                     (state.original_query[:50] if state.original_query else f"Comic {comic_id}")
@@ -404,7 +404,7 @@ class N10FinalizeAndNotifyNode:
                     error_log.append({"stage": f"{node_name}._send_to_external_api",
                                       "error": f"External API call failed: {api_call_final_result.get('error', 'Unknown')}",
                                       "timestamp": datetime.now(timezone.utc).isoformat()})
-            else:  # ext_api_url_final이 None인 경우는 없지만 (하드코딩)
+            else:   # env에 EXTERNAL_NOTIFICATION_API_URL이 없는 경우
                 api_call_final_result = {"status": "skipped", "reason": "External API URL not configured"}
 
             final_stage_status = "DONE"
@@ -515,7 +515,7 @@ async def main_test_n10():
     state = WorkflowState(
         trace_id=trace_id, comic_id=comic_id,
         original_query="N10 Final API Payload Test",
-        config={"writer_id": "123"},  # 정수형 ID로 잘 변환되는지 확인
+        config={"writer_id": "1"},  # 정수형 ID로 잘 변환되는지 확인
         comic_scenarios=[  # slides의 content 필드 채우기 위함
             {"scene_identifier": "FinalCut_01_API",
              "scene_description": "This is the detailed description for the first cut scene, which can be quite long.",
@@ -569,5 +569,6 @@ if __name__ == "__main__":
     import logging
 
     logging.basicConfig(level=logging.INFO,
-                        format='%(asctime)s - %(name)s - %(levelname)s - [%(trace_id)s] [%(node_name)s] %(message)s')
+                        # format='%(asctime)s - %(name)s - %(levelname)s - [%(trace_id)s] [%(node_name)s] %(message)s')
+                        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     asyncio.run(main_test_n10())

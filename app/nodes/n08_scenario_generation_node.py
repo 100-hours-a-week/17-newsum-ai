@@ -190,6 +190,36 @@ class N08ScenarioGenerationNode:
                             extra=extra_log_data)
                 break
 
+        # 1. SCENE 블록 파싱 시도
+        scene_blocks = re.findall(r"--- SCENE \d+ START ---([\s\S]*?)--- SCENE \d+ END ---", llm_text_response)
+        if scene_blocks:
+            for idx, block in enumerate(scene_blocks):
+                temp_scene = {}
+                # 각 필드 추출 (필요시 정규식 보완)
+                setting = re.search(r"SETTING\s*:\s*(.*)", block)
+                chars = re.search(r"CHARACTERS_PRESENT\s*:\s*(.*)", block)
+                camera = re.search(r"CAMERA_SHOT_AND_ANGLE\s*:\s*(.*)", block)
+                actions = re.search(r"KEY_ACTIONS_OR_EVENTS\s*:\s*(.*)", block)
+                lighting = re.search(r"LIGHTING_AND_ATMOSPHERE\s*:\s*(.*)", block)
+                dialogue = re.search(r"\(Optional\) DIALOGUE_SUMMARY_FOR_IMAGE_CONTEXT\s*:\s*(.*)", block)
+                vfx = re.search(r"\(Optional\) VISUAL_EFFECTS_OR_KEY_PROPS\s*:\s*(.*)", block)
+                style = re.search(r"\(Optional\) IMAGE_STYLE_NOTES_FOR_SCENE\s*:\s*(.*)", block)
+                prompt = re.search(r"FINAL_IMAGE_PROMPT\s*:\s*(.*)", block)
+
+                temp_scene["panel_number"] = idx + 1
+                temp_scene["scene_identifier"] = f"S{idx+1:02d}P{idx+1:02d}"
+                temp_scene["scene_description"] = f"{setting.group(1).strip() if setting else ''} | {actions.group(1).strip() if actions else ''}"
+                temp_scene["final_image_prompt"] = prompt.group(1).strip() if prompt else ''
+                if chars: temp_scene["characters_present"] = chars.group(1).strip()
+                if camera: temp_scene["camera_shot_and_angle"] = camera.group(1).strip()
+                if lighting: temp_scene["lighting_and_atmosphere"] = lighting.group(1).strip()
+                if dialogue: temp_scene["dialogue_summary_for_image_context"] = dialogue.group(1).strip()
+                if vfx: temp_scene["visual_effects_or_key_props"] = vfx.group(1).strip()
+                if style: temp_scene["image_style_notes_for_scene"] = style.group(1).strip()
+                scenarios.append(temp_scene)
+            logger.info(f"N08: Successfully parsed {len(scenarios)} scenarios from SCENE blocks.", extra=extra_log_data)
+            return scenarios
+
         if not scenarios:
             logger.error(
                 f"N08: Failed to parse any valid scenarios using robust text patterns from LLM response. Response: {summarize_for_logging(llm_text_response)}",
@@ -205,30 +235,47 @@ class N08ScenarioGenerationNode:
             extra_log_data: dict
     ) -> List[Dict[str, Any]]:
         idea_title = comic_idea.get("title", "Untitled Idea")
-        # ... (이전과 동일한 프롬프트 구성 로직) ...
+        idea_summary = comic_idea.get("summary", "A fantastic adventure.")
+        idea_genre = comic_idea.get("genre", "adventure")
         user_prompt_content = (
-            f"Let's create a comic scenario. I have an idea and I need your help to develop it into about {num_target_scenes} scenes or panels. "
-            f"Please provide the details for each scene in a structured way, clearly labeling each piece of information.\n\n"
-            f"Here's the idea:\n"
+            f"You are a professional comic scenario writer.\n\n"
+            f"Your task is to generate exactly {num_target_scenes} comic scenes for the given idea.\n"
+            f"Do NOT include any thumbnail, cover, summary, or extra text—only the {num_target_scenes} main story scenes.\n"
+            f"If you output fewer or more than {num_target_scenes} scenes, or add any extra text, it will be considered a failure.\n\n"
+            f"Strict Output Rules:\n"
+            f"- Output ONLY the {num_target_scenes} scenes, in the exact format below.\n"
+            f"- Do NOT use markdown, headings, or conversational language.\n"
+            f"- Each scene MUST start with: --- SCENE N START --- and end with: --- SCENE N END --- (N = 1~{num_target_scenes}).\n"
+            f"- Use the following fields in this exact order for each scene. If a field is empty, write `None`.\n\n"
+            f"Output Format (repeat for each scene):\n"
+            f"--- SCENE N START ---\n"
+            f"SETTING:\n"
+            f"CHARACTERS_PRESENT:\n"
+            f"CAMERA_SHOT_AND_ANGLE:\n"
+            f"KEY_ACTIONS_OR_EVENTS:\n"
+            f"LIGHTING_AND_ATMOSPHERE:\n"
+            f"DIALOGUE_SUMMARY_FOR_IMAGE_CONTEXT:\n"
+            f"VISUAL_EFFECTS_OR_KEY_PROPS:\n"
+            f"IMAGE_STYLE_NOTES_FOR_SCENE:\n"
+            f"FINAL_IMAGE_PROMPT:\n"
+            f"--- SCENE N END ---\n\n"
+            f"Example for Scene 1:\n"
+            f"--- SCENE 1 START ---\n"
+            f"SETTING: A neon-lit alley at midnight.\n"
+            f"CHARACTERS_PRESENT: – Alex, detective; – Mysterious silhouette\n"
+            f"CAMERA_SHOT_AND_ANGLE: Wide, low-angle\n"
+            f"KEY_ACTIONS_OR_EVENTS: Alex corners the suspect.\n"
+            f"LIGHTING_AND_ATMOSPHERE: Harsh neon, light rain\n"
+            f"DIALOGUE_SUMMARY_FOR_IMAGE_CONTEXT: 'Stop right there!'\n"
+            f"VISUAL_EFFECTS_OR_KEY_PROPS: Steam rising from vents\n"
+            f"IMAGE_STYLE_NOTES_FOR_SCENE: Noir-inspired\n"
+            f"FINAL_IMAGE_PROMPT: (noir, rain, neon) Detective Alex aiming at silhouette in alley\n"
+            f"--- SCENE 1 END ---\n\n"
+            f"Reference Material:\n"
             f"Title: \"{idea_title}\"\n"
-            # ... (이전 영어 프롬프트 내용 유지, JSON 형식 요구 대신 레이블 기반 텍스트 응답 유도) ...
-            f"For each scene, please clearly label and provide the following information. Use these exact labels followed by a colon and then the content:\n"
-            f"Panel Number: [the panel number, e.g., 1]\n"
-            f"Scene Identifier: [a short unique ID for the scene, e.g., S01P01_Intro]\n"
-            f"Scene Description: [a detailed visual description of the scene...]\n"
-            f"Dialogue: [Optional: Key dialogue... If none, state 'No dialogue'.]\n"
-            f"SFX: [Optional: Sound effects... If none, state 'No SFX'.]\n"
-            f"Final Image Prompt: [Crucial! Based on description/dialogue, a concise, highly descriptive English prompt for an AI image generator, including style like '{settings.IMAGE_DEFAULT_STYLE_PROMPT or 'dynamic webtoon art style, cinematic angle'}'. Be specific!]\n\n"
-            f"Please list each scene's information clearly, one after another, using these labels. "
-            f"For example:\n"
-            f"Panel Number: 1\n"
-            f"Scene Identifier: S01P01_Introduction\n"
-            f"Scene Description: A young inventor, Alex, stands in a cluttered workshop...\n"
-            f"Dialogue: Alex: Almost... there!\n"
-            f"SFX: Sparks!\n"
-            f"Final Image Prompt: ({settings.IMAGE_DEFAULT_STYLE_PROMPT or 'detailed anime style'}) Young inventor Alex in a messy workshop, focused on a robot, sunlight, sparks flying, medium shot.\n\n"
-            f"Then, for the next scene, start again with 'Panel Number: 2', and so on.\n"
-            f"Can you generate these scenarios for me in this text format?"
+            f"Summary: \"{idea_summary}\"\n"
+            f"Genre: \"{idea_genre}\"\n\n"
+            f"Now, generate all {num_target_scenes} scenes for the idea above, following the exact format and rules."
         )
         logger.info(f"N08: Requesting scenario generation (text format) from LLM for idea: '{idea_title}'",
                     extra=extra_log_data)
@@ -355,6 +402,7 @@ class N08ScenarioGenerationNode:
                 logger.error(error_msg, extra=extra)
                 current_node_error_log.append({"stage": f"{node_name}._generate_scenarios", "error": error_msg,
                                                "timestamp": datetime.now(timezone.utc).isoformat()})
+                final_status = "N08_SCENARIO_GENERATION_FAILED"
             elif len(generated_scenarios_final) < num_scenes:
                 warn_msg = f"Only {len(generated_scenarios_final)} scenarios generated (target: {num_scenes})."
                 logger.warning(warn_msg, extra=extra)
@@ -433,7 +481,7 @@ async def main_test_n08():
         return
 
     llm_service_instance = LLMService()
-    node = N08ScenarioGenerationNode(llm_service_instance=llm_service_instance)
+    node = N08ScenarioGenerationNode(llm_service=llm_service_instance)
 
     trace_id = f"test-trace-n08-slmfix-{uuid.uuid4().hex[:8]}"
     comic_id = f"test-comic-n08-slmfix-{uuid.uuid4().hex[:8]}"
