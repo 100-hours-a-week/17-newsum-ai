@@ -218,6 +218,11 @@ class N10FinalizeAndNotifyNode:
         headers = {"Content-Type": "application/json"}
         logger.info(f"Sending data to external API: {api_url}", extra=extra_log_data)
         logger.debug(f"External API Payload: {summarize_for_logging(payload, max_len=1000)}", extra=extra_log_data)
+        # === DEBUG: 실제 전송하는 body 전체 출력 ===
+        import json as _json
+        print("\n[DEBUG] 실제 external API로 전송되는 body (payload):")
+        print(_json.dumps(payload, ensure_ascii=False, indent=2))
+        # === END DEBUG ===
         session_to_use = self._external_api_session
         internal_session_created = False
         if not session_to_use or session_to_use.closed:
@@ -348,9 +353,14 @@ class N10FinalizeAndNotifyNode:
                     "title") if state.selected_comic_idea_for_scenario else \
                     (state.original_query[:50] if state.original_query else f"Comic {comic_id}")
 
-                report_summary_text = extract_text_from_html(translated_report_final or state.report_content)
-                content_for_payload = (report_summary_text[:497] + "...") if len(report_summary_text or "") > 500 else (
-                            report_summary_text or "")
+                if state.comic_ideas and isinstance(state.comic_ideas, list) and len(state.comic_ideas) > 0:
+                    # title, logline, summary 등 우선순위로 content 구성 (필요시 조합)
+                    idea0 = state.comic_ideas[0]
+                    # title, logline, summary, genre 등에서 가장 적합한 필드 선택
+                    content_candidate = idea0.get("summary") or idea0.get("logline") or idea0.get("title") or str(idea0)
+                    content_for_payload = (content_candidate[:197] + "...") if len(content_candidate or "") > 200 else (content_candidate or "")
+                else:
+                    content_for_payload = ""
 
                 thumbnail_url_for_payload = next(
                     (img.get("s3_url") for img in s3_uploads_final if img.get("is_thumbnail") and img.get("s3_url")),
@@ -364,8 +374,13 @@ class N10FinalizeAndNotifyNode:
                     if not img_item.get("is_thumbnail") and img_item.get("s3_url"):
                         scene_id_slide = img_item.get("scene_identifier")
                         scenario_data = scenarios_map_for_payload.get(scene_id_slide) if scene_id_slide else None
-                        slide_content_text = scenario_data.get("dialogue") or scenario_data.get(
-                            "scene_description") or f"Content for {scene_id_slide}" if scenario_data else f"Content for {scene_id_slide}"
+                        slide_content_text = None
+                        if scenario_data:
+                            # 우선순위: dialogue -> scene_description
+                            slide_content_text = scenario_data.get("dialogue") or scenario_data.get("scene_description")
+                        # scenario_data가 없거나, content가 None/빈문자/None/None. 등일 경우 '-'로 대체
+                        if not slide_content_text or str(slide_content_text).strip().lower() in ["none", "none.", ""]:
+                            slide_content_text = "-"
                         slides_for_payload.append({
                             "slideSeq": seq_counter, "imageUrl": img_item["s3_url"],
                             "content": summarize_for_logging(slide_content_text, 200)  # 길이 제한
@@ -393,6 +408,46 @@ class N10FinalizeAndNotifyNode:
                     })
                     final_stage_status = "ERROR"
 
+                # S3 URI를 HTTPS URL로 변환하는 함수 추가
+                def s3_uri_to_https_url(s3_uri: str) -> str:
+                    if not s3_uri or not s3_uri.startswith("s3://"):
+                        return s3_uri
+                    # s3://bucket-name/path/to/file -> https://bucket-name.s3.region.amazonaws.com/path/to/file
+                    try:
+                        bucket_and_path = s3_uri[5:]  # remove 's3://'
+                        bucket, *path_parts = bucket_and_path.split("/")
+                        path = "/".join(path_parts)
+                        region = getattr(settings, "AWS_REGION", "ap-northeast-2")
+                        return f"https://{bucket}.s3.{region}.amazonaws.com/{path}"
+                    except Exception:
+                        return s3_uri
+
+                # uploaded_report_s3_uri 변환
+                s3_report_uri_https = s3_uri_to_https_url(s3_report_uri) if s3_report_uri else s3_report_uri
+
+                # slides, thumbnailImageUrl 등 S3 URL 변환
+                def convert_slide_urls(slides):
+                    new_slides = []
+                    for slide in slides:
+                        new_slide = dict(slide)
+                        if new_slide.get("imageUrl") and isinstance(new_slide["imageUrl"], str):
+                            new_slide["imageUrl"] = s3_uri_to_https_url(new_slide["imageUrl"])
+                        new_slides.append(new_slide)
+                    return new_slides
+                slides_for_payload = convert_slide_urls(slides_for_payload)
+                thumbnail_url_for_payload = s3_uri_to_https_url(thumbnail_url_for_payload) if thumbnail_url_for_payload else thumbnail_url_for_payload
+
+                # source_news_final에 s3 uri가 들어가는 경우 변환
+                def convert_source_news_urls(source_news_list):
+                    new_list = []
+                    for item in source_news_list:
+                        new_item = dict(item)
+                        if new_item.get("url") and isinstance(new_item["url"], str):
+                            new_item["url"] = s3_uri_to_https_url(new_item["url"])
+                        new_list.append(new_item)
+                    return new_list
+                source_news_final = convert_source_news_urls(source_news_final)
+
                 api_payload_final = {
                     "aiAuthorId": ai_author_id, "category": "IT", "title": title_for_payload,
                     "content": content_for_payload, "thumbnailImageUrl": thumbnail_url_for_payload,
@@ -413,7 +468,7 @@ class N10FinalizeAndNotifyNode:
                 "uploaded_image_urls": s3_uploads_final, "translated_report_content": translated_report_final,
                 "referenced_urls": [item['url'] for item in source_news_final],  # URL만 state에 저장
                 "source_news_payload_for_api": source_news_final,  # API 전송용 페이로드 따로 저장
-                "uploaded_report_s3_uri": s3_report_uri,
+                "uploaded_report_s3_uri": s3_report_uri_https,
                 "external_api_response": api_call_final_result, "current_stage": final_stage_status,
                 "error_log": error_log}
             logger.info(
@@ -421,31 +476,40 @@ class N10FinalizeAndNotifyNode:
                 extra=extra)
 
             print(f"\n[INFO] N10 Node Run Complete. Final Stage: {final_stage_status}")
-            print(f"  Uploaded Report S3 URI: {s3_report_uri}")
+            print(f"  Uploaded Report S3 URI: {s3_report_uri_https}")
             print(f"  External API Response: {api_call_final_result.get('status') if api_call_final_result else 'N/A'}")
 
             # === 시나리오 결과만 간단하게 출력 ===
-            print("\n================= [시나리오 결과 요약] =================")
-            if not state.comic_scenarios:
-                print("[경고] 생성된 시나리오가 없습니다.")
+            print("\n================= [External API로 전송되는 slides 요약] =================")
+            if not slides_for_payload:
+                print("[경고] 생성된 slides가 없습니다.")
             else:
-                for idx, sc in enumerate(state.comic_scenarios):
-                    print(f"==== 시나리오 {idx+1} =========================================")
-                    if sc.get('panel_number') is not None:
-                        print(f"[패널 번호]    : {sc.get('panel_number')}")
-                    print(f"[ID]         : {sc.get('scene_identifier')}")
-                    print(f"[설명]        : {sc.get('scene_description')}")
-                    if sc.get('dialogue') is not None:
-                        print(f"[대사]        : {sc.get('dialogue')}")
-                    if sc.get('sfx') is not None:
-                        print(f"[효과음]      : {sc.get('sfx')}")
-                    if sc.get('final_image_prompt') is not None:
-                        print(f"[이미지 프롬프트] : {sc.get('final_image_prompt')}")
+                for slide in slides_for_payload:
+                    print(f"==== Slide {slide.get('slideSeq')} =========================================")
+                    print(f"[imageUrl] : {slide.get('imageUrl')}")
+                    print(f"[content]  : {slide.get('content')}")
                     print("====================================================\n")
 
             if error_log:
                 print(f"  Error Log ({len(error_log)} entries):")
                 for err in error_log: print(f"    - Stage: {err.get('stage')}, Error: {err.get('error')}")
+
+            # external API 전송 payload 로그 출력
+            import json as _json
+            print("\n[DEBUG] External API로 전송되는 payload 전체:")
+            print(_json.dumps({
+                k: (v if k != 'slides' else '[생략]') for k, v in api_call_final_result.get('request', {}).items()
+            }, ensure_ascii=False, indent=2) if api_call_final_result and isinstance(api_call_final_result, dict) and 'request' in api_call_final_result else "(payload 정보 없음)")
+            # slides 배열만 별도 출력
+            slides = None
+            if api_call_final_result and isinstance(api_call_final_result, dict):
+                slides = api_call_final_result.get('request', {}).get('slides')
+            if slides:
+                print("\n[DEBUG] External API로 전송되는 slides:")
+                for slide in slides:
+                    print(f"  - slideSeq: {slide.get('slideSeq')}, imageUrl: {slide.get('imageUrl')}, content: {slide.get('content')}")
+            else:
+                print("(slides 정보 없음)")
 
             return update_dict_final
         except Exception as e:
@@ -518,8 +582,8 @@ async def main_test_n10():
         config={"writer_id": "1"},  # 정수형 ID로 잘 변환되는지 확인
         comic_scenarios=[  # slides의 content 필드 채우기 위함
             {"scene_identifier": "FinalCut_01_API",
-             "scene_description": "This is the detailed description for the first cut scene, which can be quite long.",
-             "dialogue": "Slide 1 Dialogue!"},
+             "scene_description": "-",
+             "dialogue": "-"},
             # 썸네일은 comic_scenarios에 직접 대응되지 않음
         ],
         selected_comic_idea_for_scenario={"title": "N10 Final API Test Title",
