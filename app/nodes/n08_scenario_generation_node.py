@@ -21,234 +21,31 @@ class N08ScenarioGenerationNode:
         self.llm_service = llm_service
         logger.info("N08ScenarioGenerationNode initialized with LLMService.")
 
-    def _parse_llm_scenarios_from_text(self, llm_text_response: str, num_target_scenes: int, extra_log_data: dict) -> \
-    List[Dict[str, Any]]:
+    def _build_scene_prompt(self, comic_idea: dict, panel_number: int, previous_summaries: str, thumbnail_prompt_example: str) -> str:
         """
-        LLM이 반환한 대화형 텍스트 응답에서 각 장면 정보를 파싱하여 JSON 객체 리스트로 변환합니다.
-        SLM이 완벽한 JSON을 생성하지 못할 경우를 대비하여 텍스트 패턴 매칭을 시도합니다.
+        Build an English prompt for LLM to generate a single scene, with context from previous scenes.
         """
-        scenarios: List[Dict[str, Any]] = []
-
-        # 0. 먼저, 응답 텍스트가 우연히 JSON 배열일 경우 직접 파싱 시도
-        try:
-            json_block_match = re.search(r"```json\s*(\[[\s\S]*?\])\s*```", llm_text_response,
-                                         re.DOTALL | re.IGNORECASE)
-            json_str_to_parse = ""
-            if json_block_match:
-                json_str_to_parse = json_block_match.group(1)
-            elif llm_text_response.strip().startswith("[") and llm_text_response.strip().endswith("]"):
-                # 전체 응답이 JSON 배열 형태일 수 있음
-                json_str_to_parse = llm_text_response.strip()
-
-            if json_str_to_parse:
-                parsed_data = json.loads(json_str_to_parse)
-                if isinstance(parsed_data, list):
-                    valid_items = 0
-                    for i, item in enumerate(parsed_data):
-                        if isinstance(item, dict) and all(
-                                k in item for k in ["scene_identifier", "scene_description", "final_image_prompt"]):
-                            item.setdefault("panel_number", i + 1)
-                            scenarios.append(item)
-                            valid_items += 1
-                    if valid_items > 0:  # 하나라도 제대로 파싱되면 JSON 파싱 성공으로 간주
-                        logger.info(
-                            f"N08: Successfully parsed {len(scenarios)} scenarios directly from JSON block in LLM response.",
-                            extra=extra_log_data)
-                        return scenarios
-                # 리스트가 아니거나, 필수 필드가 없는 경우 텍스트 파싱으로 넘어감
-                logger.warning(
-                    "N08: LLM response contained JSON-like array but failed validation or was not a list of objects. Attempting text parsing.",
-                    extra=extra_log_data)
-        except json.JSONDecodeError:
-            logger.warning("N08: LLM response was not a valid JSON array, attempting robust text parsing.",
-                           extra=extra_log_data)
-        except Exception as e_json:
-            logger.warning(f"N08: Error during initial JSON parsing attempt: {e_json}. Proceeding with text parsing.",
-                           extra=extra_log_data)
-
-        # 1. 텍스트 기반 파싱 로직 (SLM 응답 패턴에 매우 의존적)
-        # 예시 패턴: "Panel Number: 1", "Scene Identifier: S01P01", "Scene Description: ...", "Final Image Prompt: ..."
-        # 각 "Panel Number:" 또는 "Scene:" 키워드를 기준으로 블록 분리 시도
-        # LLM이 각 필드 정보를 명확한 레이블과 함께 제공한다고 가정
-
-        # 각 씬 정보를 담을 임시 딕셔너리
-        current_scene_data: Dict[str, Any] = {}
-        # 필드 추출을 위한 정규 표현식 (좀 더 유연하게)
-        # 각 필드명 뒤에 콜론(:)이 오고, 그 뒤에 내용이 온다고 가정. 내용은 다음 필드명 전까지.
-        field_patterns = {
-            "panel_number": re.compile(r"Panel Number\s*:\s*(\d+)", re.IGNORECASE),
-            "scene_identifier": re.compile(r"Scene Identifier\s*:\s*([^\n]+)", re.IGNORECASE),
-            "scene_description": re.compile(
-                r"Scene Description\s*:\s*([\s\S]+?)(?=\n\s*(?:Dialogue|SFX|Final Image Prompt|Panel Number|Scene Identifier|$))",
-                re.IGNORECASE),
-            "dialogue": re.compile(
-                r"Dialogue\s*:\s*([\s\S]+?)(?=\n\s*(?:SFX|Final Image Prompt|Panel Number|Scene Identifier|$))",
-                re.IGNORECASE),
-            "sfx": re.compile(r"SFX\s*:\s*([\s\S]+?)(?=\n\s*(?:Final Image Prompt|Panel Number|Scene Identifier|$))",
-                              re.IGNORECASE),
-            "final_image_prompt": re.compile(
-                r"Final Image Prompt\s*:\s*([\s\S]+?)(?=\n\s*(?:Panel Number|Scene Identifier|$))", re.IGNORECASE)
-        }
-
-        # 응답 텍스트를 "Panel Number:" 또는 "Scene Identifier:" (새로운 씬 시작점) 기준으로 분할
-        # re.split은 구분자도 포함하므로, 이를 활용하여 각 블록을 재구성할 수 있음
-        # 여기서는 더 간단하게, 응답 전체를 하나의 큰 텍스트로 보고 순차적으로 찾음
-
-        # 이전 로그의 오류 ("Expecting ',' delimiter: line 22 column 5 (char 2106)")는
-        # LLM이 JSON 유사 형식을 시도했으나 유효하지 않았음을 의미.
-        # 따라서, 레이블 기반의 텍스트 추출이 더 안정적일 수 있음.
-
-        # 하나의 큰 텍스트 블록에서 반복적으로 씬 정보를 추출 시도
-        text_to_parse = llm_text_response
-        panel_idx_counter = 1
-
-        while True:  # 최대 num_target_scenes 만큼 또는 파싱할 내용이 없을 때까지
-            if len(scenarios) >= num_target_scenes and num_target_scenes > 0:  # 목표 개수 도달 시
-                break
-
-            scene_data_found_in_iteration = False
-            current_panel_text_block = ""  # 현재 패널에 해당하는 텍스트 블록
-
-            # "Panel Number: X" 또는 "Scene Identifier: Y"로 시작하는 다음 블록 찾기
-            # 이 부분은 LLM 응답이 일관된 구조(예: 각 씬 정보가 명확히 구분됨)를 가질 때 효과적
-            # 매우 단순화된 예시:
-            next_panel_match = re.search(r"(Panel Number\s*:\s*\d+|Scene Identifier\s*:)", text_to_parse, re.IGNORECASE)
-            if current_scene_data:  # 이전 씬 데이터가 있다면, 그것을 먼저 저장
-                if all(k in current_scene_data for k in
-                       ["scene_identifier", "scene_description", "final_image_prompt"]):
-                    current_scene_data.setdefault("panel_number", panel_idx_counter - 1)  # 이전 루프의 카운터
-                    scenarios.append(current_scene_data)
-                    scene_data_found_in_iteration = True  # 이전 루프에서 찾은 데이터 저장
-                current_scene_data = {}  # 새 씬 위해 초기화
-
-            if next_panel_match:
-                start_index = next_panel_match.start()
-                # 다음 패널 시작점 전까지를 현재 패널의 텍스트 블록으로 간주
-                # 이 방식은 LLM이 각 패널 정보를 순차적으로 제공할 때 유효
-                # 좀 더 정교하게는, 각 필드 레이블을 찾아 해당 내용을 추출해야 함.
-
-                # 여기서는 좀 더 간단하게, 전체 텍스트에서 순차적으로 필드를 찾습니다.
-                # 이 방식은 필드 순서가 바뀌거나 누락되어도 어느정도 대응 가능.
-                # 하지만, 여러 씬 정보가 뒤섞여있다면 제대로 분리하기 어려움.
-                # LLM 프롬프트에서 각 씬 정보를 명확한 구분자 (예: "--- 다음 씬 ---")로 분리하도록 요청하는 것이 좋음.
-
-                # 아래는 임시로, 로그에서 보인 "I can help you..." 와 같은 머리말 제거 시도
-                if text_to_parse.lower().startswith("i can help you") or text_to_parse.lower().startswith(
-                        "sure, here are"):
-                    first_newline = text_to_parse.find('\n')
-                    if first_newline != -1:
-                        text_to_parse = text_to_parse[first_newline + 1:].strip()
-
-                # 매우 단순화된 접근: 전체 텍스트에서 각 필드를 찾고, 찾으면 사용하고, 못 찾으면 넘어감
-                # 이는 단일 씬 정보만 있는 응답에 더 적합. 여러 씬이 있다면 복잡해짐.
-                # SLM이 각 씬 정보를 명확히 구분해서 응답하도록 프롬프팅 하는 것이 핵심.
-                # 예: "--- SCENE 1 START ---", 필드들, "--- SCENE 1 END ---"
-
-                # 현재 로직은 전체 텍스트에서 필드를 찾으므로, 여러 씬이 있으면 마지막 씬 정보만 남게 됨.
-                # 실제로는 씬 단위로 텍스트를 분리 후, 각 블록에서 필드를 추출해야 함.
-                # 여기서는 데모를 위해 첫번째로 찾아지는 정보로 단일 씬을 구성 시도
-
-                if not scenarios:  # 아직 아무 시나리오도 못 찾았을 경우에만 전체 텍스트에서 추출 시도
-                    temp_scene = {}
-                    pn_match = field_patterns["panel_number"].search(text_to_parse)
-                    if pn_match: temp_scene["panel_number"] = int(pn_match.group(1).strip())
-
-                    si_match = field_patterns["scene_identifier"].search(text_to_parse)
-                    if si_match: temp_scene["scene_identifier"] = si_match.group(1).strip()
-
-                    desc_match = field_patterns["scene_description"].search(text_to_parse)
-                    if desc_match: temp_scene["scene_description"] = desc_match.group(1).strip()
-
-                    dialogue_match = field_patterns["dialogue"].search(text_to_parse)
-                    if dialogue_match: temp_scene["dialogue"] = dialogue_match.group(1).strip()
-
-                    sfx_match = field_patterns["sfx"].search(text_to_parse)
-                    if sfx_match: temp_scene["sfx"] = sfx_match.group(1).strip()
-
-                    prompt_match = field_patterns["final_image_prompt"].search(text_to_parse)
-                    if prompt_match: temp_scene["final_image_prompt"] = prompt_match.group(1).strip()
-
-                    if all(k in temp_scene for k in ["scene_identifier", "scene_description", "final_image_prompt"]):
-                        temp_scene.setdefault("panel_number", panel_idx_counter)
-                        scenarios.append(temp_scene)
-                        logger.info(f"N08: Text-parsed a single scene based on found fields.", extra=extra_log_data)
-                break  # 이 단순화된 로직에서는 일단 한 번만 시도하고 루프 종료
-
-            if not scene_data_found_in_iteration and not next_panel_match:  # 더 이상 파싱할 내용이 없으면 종료
-                break
-
-            if not next_panel_match and current_scene_data:  # 마지막 남은 데이터 처리
-                if all(k in current_scene_data for k in
-                       ["scene_identifier", "scene_description", "final_image_prompt"]):
-                    current_scene_data.setdefault("panel_number", panel_idx_counter - 1)
-                    scenarios.append(current_scene_data)
-                break
-
-            # num_target_scenes 만큼만 생성하도록 제한 (실제로는 LLM이 조절)
-            if len(scenarios) >= num_target_scenes:
-                logger.info(f"N08: Reached target number of scenes ({num_target_scenes}) via text parsing.",
-                            extra=extra_log_data)
-                break
-
-        # 1. SCENE 블록 파싱 시도
-        scene_blocks = re.findall(r"--- SCENE \d+ START ---([\s\S]*?)--- SCENE \d+ END ---", llm_text_response)
-        if scene_blocks:
-            for idx, block in enumerate(scene_blocks):
-                temp_scene = {}
-                # 각 필드 추출 (필요시 정규식 보완)
-                setting = re.search(r"SETTING\s*:\s*(.*)", block)
-                chars = re.search(r"CHARACTERS_PRESENT\s*:\s*(.*)", block)
-                camera = re.search(r"CAMERA_SHOT_AND_ANGLE\s*:\s*(.*)", block)
-                actions = re.search(r"KEY_ACTIONS_OR_EVENTS\s*:\s*(.*)", block)
-                lighting = re.search(r"LIGHTING_AND_ATMOSPHERE\s*:\s*(.*)", block)
-                dialogue = re.search(r"\(Optional\) DIALOGUE_SUMMARY_FOR_IMAGE_CONTEXT\s*:\s*(.*)", block)
-                vfx = re.search(r"\(Optional\) VISUAL_EFFECTS_OR_KEY_PROPS\s*:\s*(.*)", block)
-                style = re.search(r"\(Optional\) IMAGE_STYLE_NOTES_FOR_SCENE\s*:\s*(.*)", block)
-                prompt = re.search(r"FINAL_IMAGE_PROMPT\s*:\s*(.*)", block)
-
-                temp_scene["panel_number"] = idx + 1
-                temp_scene["scene_identifier"] = f"S{idx+1:02d}P{idx+1:02d}"
-                temp_scene["scene_description"] = f"{setting.group(1).strip() if setting else ''} | {actions.group(1).strip() if actions else ''}"
-                temp_scene["final_image_prompt"] = prompt.group(1).strip() if prompt else ''
-                if chars: temp_scene["characters_present"] = chars.group(1).strip()
-                if camera: temp_scene["camera_shot_and_angle"] = camera.group(1).strip()
-                if lighting: temp_scene["lighting_and_atmosphere"] = lighting.group(1).strip()
-                if dialogue: temp_scene["dialogue_summary_for_image_context"] = dialogue.group(1).strip()
-                if vfx: temp_scene["visual_effects_or_key_props"] = vfx.group(1).strip()
-                if style: temp_scene["image_style_notes_for_scene"] = style.group(1).strip()
-                scenarios.append(temp_scene)
-            logger.info(f"N08: Successfully parsed {len(scenarios)} scenarios from SCENE blocks.", extra=extra_log_data)
-            return scenarios
-
-        if not scenarios:
-            logger.error(
-                f"N08: Failed to parse any valid scenarios using robust text patterns from LLM response. Response: {summarize_for_logging(llm_text_response)}",
-                extra=extra_log_data)
-
-        return scenarios
-
-    async def _generate_scenarios_from_idea(
-            self,
-            comic_idea: Dict[str, Any],
-            num_target_scenes: int,
-            trace_id: str,
-            extra_log_data: dict
-    ) -> List[Dict[str, Any]]:
-        idea_title = comic_idea.get("title", "Untitled Idea")
-        idea_summary = comic_idea.get("summary", "A fantastic adventure.")
-        idea_genre = comic_idea.get("genre", "adventure")
-        user_prompt_content = (
-            f"You are a professional comic scenario writer.\n\n"
-            f"Your task is to generate exactly {num_target_scenes} comic scenes for the given idea.\n"
-            f"Do NOT include any thumbnail, cover, summary, or extra text—only the {num_target_scenes} main story scenes.\n"
-            f"If you output fewer or more than {num_target_scenes} scenes, or add any extra text, it will be considered a failure.\n\n"
-            f"Strict Output Rules:\n"
-            f"- Output ONLY the {num_target_scenes} scenes, in the exact format below.\n"
-            f"- Do NOT use markdown, headings, or conversational language.\n"
-            f"- Each scene MUST start with: --- SCENE N START --- and end with: --- SCENE N END --- (N = 1~{num_target_scenes}).\n"
-            f"- Use the following fields in this exact order for each scene. If a field is empty, write `None`.\n\n"
-            f"Output Format (repeat for each scene):\n"
-            f"--- SCENE N START ---\n"
+        title = comic_idea.get("title", "Untitled Idea")
+        summary = comic_idea.get("summary", "A fantastic adventure.")
+        genre = comic_idea.get("genre", "adventure")
+        prompt = (
+            f"You are a professional webtoon scenario writer.\n\n"
+            f"We are creating a 4-panel comic. Each panel should naturally connect to the previous one, forming a coherent and engaging short story.\n\n"
+            f"Here is the comic idea:\n"
+            f"Title: \"{title}\"\n"
+            f"Summary: \"{summary}\"\n"
+            f"Genre: \"{genre}\"\n\n"
+        )
+        if previous_summaries:
+            prompt += f"Here are the previous panels:\n{previous_summaries}\n\n"
+        prompt += (
+            f"Now, generate the details for Panel {panel_number}.\n"
+            f"All fields below must be filled. If a field is not applicable, write 'None'.\n"
+            f"The FINAL_IMAGE_PROMPT must be as detailed, vivid, and visually rich as the following example:\n\n"
+            f"Example:\n{thumbnail_prompt_example}\n\n"
+            f"Output format (no extra text, no markdown):\n\n"
+            f"PANEL_NUMBER: {panel_number}\n"
+            f"SCENE_IDENTIFIER: S{panel_number:02d}P{panel_number:02d}\n"
             f"SETTING:\n"
             f"CHARACTERS_PRESENT:\n"
             f"CAMERA_SHOT_AND_ANGLE:\n"
@@ -258,57 +55,67 @@ class N08ScenarioGenerationNode:
             f"VISUAL_EFFECTS_OR_KEY_PROPS:\n"
             f"IMAGE_STYLE_NOTES_FOR_SCENE:\n"
             f"FINAL_IMAGE_PROMPT:\n"
-            f"--- SCENE N END ---\n\n"
-            f"Example for Scene 1:\n"
-            f"--- SCENE 1 START ---\n"
-            f"SETTING: A neon-lit alley at midnight.\n"
-            f"CHARACTERS_PRESENT: – Alex, detective; – Mysterious silhouette\n"
-            f"CAMERA_SHOT_AND_ANGLE: Wide, low-angle\n"
-            f"KEY_ACTIONS_OR_EVENTS: Alex corners the suspect.\n"
-            f"LIGHTING_AND_ATMOSPHERE: Harsh neon, light rain\n"
-            f"DIALOGUE_SUMMARY_FOR_IMAGE_CONTEXT: 'Stop right there!'\n"
-            f"VISUAL_EFFECTS_OR_KEY_PROPS: Steam rising from vents\n"
-            f"IMAGE_STYLE_NOTES_FOR_SCENE: Noir-inspired\n"
-            f"FINAL_IMAGE_PROMPT: (noir, rain, neon) Detective Alex aiming at silhouette in alley\n"
-            f"--- SCENE 1 END ---\n\n"
-            f"Reference Material:\n"
-            f"Title: \"{idea_title}\"\n"
-            f"Summary: \"{idea_summary}\"\n"
-            f"Genre: \"{idea_genre}\"\n\n"
-            f"Now, generate all {num_target_scenes} scenes for the idea above, following the exact format and rules."
         )
-        logger.info(f"N08: Requesting scenario generation (text format) from LLM for idea: '{idea_title}'",
-                    extra=extra_log_data)
-        parsed_scenarios_list: List[Dict[str, Any]] = []
-        try:
-            max_tokens = settings.LLM_MAX_TOKENS_SCENARIO
-            llm_response = await self.llm_service.generate_text(
-                prompt=user_prompt_content, max_tokens=max_tokens, temperature=0.65
+        return prompt
+
+    def _summarize_previous_scenarios(self, scenarios: list) -> str:
+        """
+        Summarize previous scenarios for context in the next LLM prompt.
+        """
+        summary = ""
+        for sc in scenarios:
+            summary += (
+                f"Panel {sc.get('panel_number', '?')}:\n"
+                f"SETTING: {sc.get('setting', 'None')}\n"
+                f"KEY_ACTIONS_OR_EVENTS: {sc.get('key_actions_or_events', 'None')}\n"
+                f"DIALOGUE_SUMMARY_FOR_IMAGE_CONTEXT: {sc.get('dialogue_summary_for_image_context', 'None')}\n"
             )
-            if llm_response.get("error"):
-                logger.error(f"N08: LLMService error for scenarios: {llm_response['error']}", extra=extra_log_data)
-                return []
-            generated_text = llm_response.get("generated_text")
-            if not generated_text:
-                logger.error("N08: LLMService returned no text for scenarios.", extra=extra_log_data)
-                return []
+        return summary
 
-            # LLM이 반환한 텍스트에서 정보 추출하여 JSON 리스트로 변환
-            parsed_scenarios_list = self._parse_llm_scenarios_from_text(generated_text, num_target_scenes,
-                                                                        extra_log_data)
+    def _parse_scene_response(self, llm_text_response: str, panel_number: int) -> dict:
+        """
+        Parse LLM response for a single scene. Fill missing fields with 'None'.
+        """
+        # Define all required fields
+        fields = [
+            "panel_number", "scene_identifier", "setting", "characters_present", "camera_shot_and_angle",
+            "key_actions_or_events", "lighting_and_atmosphere", "dialogue_summary_for_image_context",
+            "visual_effects_or_key_props", "image_style_notes_for_scene", "final_image_prompt"
+        ]
+        # Flexible label mapping
+        label_map = {
+            "panel_number": r"PANEL_NUMBER\s*:\s*(\d+)",
+            "scene_identifier": r"SCENE_IDENTIFIER\s*:\s*([^\n]+)",
+            "setting": r"SETTING\s*:\s*([^\n]*)",
+            "characters_present": r"CHARACTERS_PRESENT\s*:\s*([^\n]*)",
+            "camera_shot_and_angle": r"CAMERA_SHOT_AND_ANGLE\s*:\s*([^\n]*)",
+            "key_actions_or_events": r"KEY_ACTIONS_OR_EVENTS\s*:\s*([^\n]*)",
+            "lighting_and_atmosphere": r"LIGHTING_AND_ATMOSPHERE\s*:\s*([^\n]*)",
+            "dialogue_summary_for_image_context": r"DIALOGUE_SUMMARY_FOR_IMAGE_CONTEXT\s*:\s*([^\n]*)",
+            "visual_effects_or_key_props": r"VISUAL_EFFECTS_OR_KEY_PROPS\s*:\s*([^\n]*)",
+            "image_style_notes_for_scene": r"IMAGE_STYLE_NOTES_FOR_SCENE\s*:\s*([^\n]*)",
+            "final_image_prompt": r"FINAL_IMAGE_PROMPT\s*:\s*([^\n]*)",
+        }
+        import re
+        result = {}
+        for field in fields:
+            pattern = label_map[field]
+            match = re.search(pattern, llm_text_response, re.IGNORECASE)
+            if match:
+                value = match.group(1).strip()
+                result[field] = value if value else "None"
+            else:
+                result[field] = "None"
+        # Ensure panel_number is int
+        try:
+            result["panel_number"] = int(result["panel_number"])
+        except Exception:
+            result["panel_number"] = panel_number
+        return result
 
-        except Exception as e:
-            logger.exception(f"N08: LLM call error for scenarios (idea: '{idea_title}'): {type(e).__name__} - {e}",
-                             extra=extra_log_data)
-        return parsed_scenarios_list
-
-    async def _generate_thumbnail_prompt(  # 인자 개수 수정 (comic_scenarios 제거)
-            self,
-            comic_idea: Dict[str, Any],
-            trace_id: str,
-            extra_log_data: dict
-    ) -> Optional[str]:
-        # (이전 답변의 _generate_thumbnail_prompt 내용과 거의 동일, 영어 프롬프트 유지)
+    async def _generate_thumbnail_prompt(self, comic_idea: dict, trace_id: str, extra_log_data: dict) -> str:
+        # ... 기존 썸네일 프롬프트 생성 코드 유지 ...
+        # (썸네일 프롬프트 예시를 각 장면 프롬프트에 활용하기 위해 반환값을 사용)
         idea_title = comic_idea.get("title", "Untitled Idea")
         idea_summary = comic_idea.get("summary", "A fantastic adventure.")
         idea_genre = comic_idea.get("genre", "adventure")
@@ -321,46 +128,35 @@ class N08ScenarioGenerationNode:
             f"Core Summary: \"{idea_summary}\"\n\n"
             f"Based on this, please generate a single, concise, and powerful image prompt for an AI image generator. "
             f"It should be in English and focus on creating an impactful thumbnail. "
-            f"Think about incorporating elements like: key characters in a dynamic pose, a hint of the central conflict or mystery, vibrant colors, and an art style like '{settings.IMAGE_DEFAULT_STYLE_PROMPT or 'eye-catching webtoon cover art, cinematic quality'}'.\n\n"
+            f"Think about incorporating elements like: key characters in a dynamic pose, a hint of the central conflict or mystery, vibrant colors, and an art style like 'eye-catching webtoon cover art, cinematic quality'.\n\n"
             f"Please provide only the final image generation prompt string as your response, nothing else. Just the prompt itself, without any conversational fluff before or after it."
-        # 좀 더 명확한 지시
         )
-        logger.info(f"N08: Requesting thumbnail prompt generation from LLM for idea: '{idea_title}'",
-                    extra=extra_log_data)
+        logger.info(f"N08: Requesting thumbnail prompt generation from LLM for idea: '{idea_title}'", extra=extra_log_data)
         try:
-            llm_response = await self.llm_service.generate_text(prompt=user_prompt_content, max_tokens=150,
-                                                                temperature=0.7)
+            llm_response = await self.llm_service.generate_text(prompt=user_prompt_content, max_tokens=150, temperature=0.7)
             if llm_response.get("error"):
-                logger.error(f"N08: LLMService error for thumbnail prompt: {llm_response['error']}",
-                             extra=extra_log_data)
-                return None
+                logger.error(f"N08: LLMService error for thumbnail prompt: {llm_response['error']}", extra=extra_log_data)
+                return ""
             generated_prompt = llm_response.get("generated_text")
             if generated_prompt:
                 final_thumbnail_prompt = generated_prompt.strip()
-                # LLM이 "The prompt is: [PROMPT]" 와 같이 응답할 경우 대비
-                common_prefixes = ["here is the prompt:", "the prompt is:", "thumbnail prompt:", "image prompt:",
-                                   "prompt:"]
+                # Remove common prefixes
+                common_prefixes = ["here is the prompt:", "the prompt is:", "thumbnail prompt:", "image prompt:", "prompt:"]
                 for prefix in common_prefixes:
                     if final_thumbnail_prompt.lower().startswith(prefix):
                         final_thumbnail_prompt = final_thumbnail_prompt[len(prefix):].strip()
-                # 혹시 markdown 코드 블록으로 감싸서 줄 경우
                 if final_thumbnail_prompt.startswith("```") and final_thumbnail_prompt.endswith("```"):
                     final_thumbnail_prompt = final_thumbnail_prompt.strip("` \n")
-
-                logger.info(f"N08: Generated thumbnail prompt: '{final_thumbnail_prompt[:150]}...'",
-                            extra=extra_log_data)
+                logger.info(f"N08: Generated thumbnail prompt: '{final_thumbnail_prompt[:150]}...'", extra=extra_log_data)
                 return final_thumbnail_prompt
             else:
                 logger.error("N08: LLMService returned no text for thumbnail prompt.", extra=extra_log_data)
-                return None
+                return ""
         except Exception as e:
-            logger.exception(
-                f"N08: LLM call error for thumbnail prompt (idea: '{idea_title}'): {type(e).__name__} - {e}",
-                extra=extra_log_data)
-            return None
+            logger.exception(f"N08: LLM call error for thumbnail prompt (idea: '{idea_title}'): {type(e).__name__} - {e}", extra=extra_log_data)
+            return ""
 
-    async def run(self, state: WorkflowState) -> Dict[str, Any]:
-        # (run 메소드 상단은 이전과 동일)
+    async def run(self, state: WorkflowState) -> dict:
         node_name = self.__class__.__name__
         trace_id = state.trace_id
         comic_id = state.comic_id
@@ -368,106 +164,75 @@ class N08ScenarioGenerationNode:
         writer_id = config.get('writer_id', 'default_writer')
         current_node_error_log = []
         extra = {'trace_id': trace_id, 'comic_id': comic_id, 'writer_id': writer_id, 'node_name': node_name}
-        logger.info(f"Entering node {node_name}. Generating scenarios and thumbnail prompt (SLM optimized).",
-                    extra=extra)
-
-        generated_scenarios_final: List[Dict[str, Any]] = []
-        thumbnail_image_prompt_final: Optional[str] = None
+        logger.info(f"Entering node {node_name}. Generating scenarios and thumbnail prompt (SLM optimized).", extra=extra)
 
         selected_idea = state.selected_comic_idea_for_scenario
         if not selected_idea or not isinstance(selected_idea, dict):
             if state.comic_ideas and isinstance(state.comic_ideas, list) and state.comic_ideas:
                 selected_idea = state.comic_ideas[0]
-                logger.warning(
-                    f"N08: selected_comic_idea_for_scenario not found, using first from comic_ideas: '{selected_idea.get('title')}'",
-                    extra=extra)
+                logger.warning(f"N08: selected_comic_idea_for_scenario not found, using first from comic_ideas: '{selected_idea.get('title')}'", extra=extra)
             else:
                 error_msg = "No valid comic idea found in state for N08."
-                # (이하 오류 처리 동일)
                 logger.error(error_msg, extra=extra)
-                current_node_error_log.append(
-                    {"stage": node_name, "error": error_msg, "timestamp": datetime.now(timezone.utc).isoformat()})
+                current_node_error_log.append({"stage": node_name, "error": error_msg, "timestamp": datetime.now(timezone.utc).isoformat()})
                 state.error_log.extend(current_node_error_log)
-                return {"current_stage": "ERROR", "error_log": state.error_log,
-                        "error_message": f"{node_name}: {error_msg}"}
+                return {"current_stage": "ERROR", "error_log": state.error_log, "error_message": f"{node_name}: {error_msg}"}
 
-        try:
-            num_scenes = settings.SCENARIO_TARGET_SCENES_COUNT
-            generated_scenarios_final = await self._generate_scenarios_from_idea(
-                selected_idea, num_scenes, trace_id, extra  # type: ignore
+        # 1. Generate thumbnail prompt first (to use as example in scene prompts)
+        thumbnail_image_prompt_final = await self._generate_thumbnail_prompt(selected_idea, trace_id, extra)
+        if not thumbnail_image_prompt_final:
+            logger.warning("N08: Failed to generate thumbnail prompt.", extra=extra)
+            current_node_error_log.append({"stage": f"{node_name}._generate_thumbnail_prompt", "error": "Thumbnail prompt generation failed.", "timestamp": datetime.now(timezone.utc).isoformat()})
+
+        # 2. Generate 4 scenes, one by one, using previous scenes as context
+        scenarios = []
+        scenarios_raw_texts = []  # DEBUG: collect raw LLM responses
+        for i in range(4):
+            previous_summaries = self._summarize_previous_scenarios(scenarios) if i > 0 else ""
+            prompt = self._build_scene_prompt(
+                comic_idea=selected_idea,
+                panel_number=i+1,
+                previous_summaries=previous_summaries,
+                thumbnail_prompt_example=thumbnail_image_prompt_final or "Vibrant webtoon-style illustration of a frantic, quantum-powered squirrel in mid-air, surrounded by swirling acorns and shattered suburban houses, with a bewildered suburban mom and a shocked kid in the foreground, as a bright, glowing acorn floats out of the squirrel's paw, casting a distorted, warped glow on the chaotic scene, dynamic camera angle from above, bold lines, and bright, poppy colors."
             )
+            try:
+                llm_response = await self.llm_service.generate_text(prompt=prompt, max_tokens=600, temperature=0.65)
+                if llm_response.get("error"):
+                    logger.error(f"N08: LLMService error for scene {i+1}: {llm_response['error']}", extra=extra)
+                    current_node_error_log.append({"stage": f"{node_name}._generate_scene_{i+1}", "error": llm_response['error'], "timestamp": datetime.now(timezone.utc).isoformat()})
+                    scenarios.append({"panel_number": i+1, "scene_identifier": f"S{i+1:02d}P{i+1:02d}", "setting": "None", "characters_present": "None", "camera_shot_and_angle": "None", "key_actions_or_events": "None", "lighting_and_atmosphere": "None", "dialogue_summary_for_image_context": "None", "visual_effects_or_key_props": "None", "image_style_notes_for_scene": "None", "final_image_prompt": "None"})
+                    scenarios_raw_texts.append("")
+                    continue
+                generated_text = llm_response.get("generated_text", "")
+                scene = self._parse_scene_response(generated_text, i+1)
+                scenarios.append(scene)
+                scenarios_raw_texts.append(generated_text)  # DEBUG: save raw response
+            except Exception as e:
+                logger.exception(f"N08: Exception during scene {i+1} generation: {e}", extra=extra)
+                current_node_error_log.append({"stage": f"{node_name}._generate_scene_{i+1}", "error": str(e), "timestamp": datetime.now(timezone.utc).isoformat()})
+                scenarios.append({"panel_number": i+1, "scene_identifier": f"S{i+1:02d}P{i+1:02d}", "setting": "None", "characters_present": "None", "camera_shot_and_angle": "None", "key_actions_or_events": "None", "lighting_and_atmosphere": "None", "dialogue_summary_for_image_context": "None", "visual_effects_or_key_props": "None", "image_style_notes_for_scene": "None", "final_image_prompt": "None"})
+                scenarios_raw_texts.append("")
 
-            if not generated_scenarios_final:
-                error_msg = f"Failed to generate/parse any valid scenarios for idea: '{selected_idea.get('title')}'"
-                logger.error(error_msg, extra=extra)
-                current_node_error_log.append({"stage": f"{node_name}._generate_scenarios", "error": error_msg,
-                                               "timestamp": datetime.now(timezone.utc).isoformat()})
-                final_status = "N08_SCENARIO_GENERATION_FAILED"
-            elif len(generated_scenarios_final) < num_scenes:
-                warn_msg = f"Only {len(generated_scenarios_final)} scenarios generated (target: {num_scenes})."
-                logger.warning(warn_msg, extra=extra)
-                current_node_error_log.append({"stage": f"{node_name}._generate_scenarios", "error": warn_msg,
-                                               "timestamp": datetime.now(timezone.utc).isoformat()})
-                final_status = "N08_COMPLETED_WITH_PARTIAL_ERRORS"
-            else:
-                final_status = "N08_SCENARIO_GENERATION_COMPLETED"
+        state.error_log.extend(current_node_error_log)
+        final_status = "N08_SCENARIO_GENERATION_COMPLETED"
+        if not scenarios or any(sc.get("final_image_prompt", "None") == "None" for sc in scenarios):
+            final_status = "N08_COMPLETED_WITH_PARTIAL_ERRORS"
+        if not scenarios:
+            final_status = "N08_SCENARIO_GENERATION_FAILED"
 
-            # _generate_thumbnail_prompt 호출 시 인자 개수 수정 (comic_scenarios 제거)
-            # 이전 로그에서 TypeError 발생 지점: takes 4 positional arguments but 5 were given
-            # 메소드 정의가 (self, comic_idea, trace_id, extra_log_data) 4개로 가정하고 호출
-            thumbnail_image_prompt_final = await self._generate_thumbnail_prompt(
-                selected_idea, trace_id, extra  # type: ignore
-            )
-            if not thumbnail_image_prompt_final:
-                logger.warning("N08: Failed to generate thumbnail prompt.", extra=extra)
-                current_node_error_log.append(
-                    {"stage": f"{node_name}._generate_thumbnail_prompt", "error": "Thumbnail prompt generation failed.",
-                     "timestamp": datetime.now(timezone.utc).isoformat()})
-
-            state.error_log.extend(current_node_error_log)  # 현재 노드의 오류들 전체 로그에 추가
-
-            # ====== 시나리오/프롬프트 디버그 출력 추가 ======
-            print("\n====== [selected_idea_and_scenario] idea_details ======")
-            print(f"Title: {selected_idea.get('title')}")
-            print(f"Summary: {selected_idea.get('summary')}")
-            print(f"Genre: {selected_idea.get('genre')}")
-            print(f"Characters: {selected_idea.get('characters')}")
-            print("====== [selected_idea_and_scenario] scenario_details ======")
-            for idx, sc in enumerate(generated_scenarios_final):
-                print(f"-- Scenario {idx+1} --")
-                print(f"ID: {sc.get('scene_identifier')}")
-                print(f"Desc: {sc.get('scene_description')[:60]}{'...' if sc.get('scene_description') and len(sc.get('scene_description'))>60 else ''}")
-                print(f"Prompt: {sc.get('final_image_prompt')[:60]}{'...' if sc.get('final_image_prompt') and len(sc.get('final_image_prompt'))>60 else ''}")
-            print("====== [selected_idea_and_scenario] END ======\n")
-            # ====== 디버그 출력 끝 ======
-
-            update_dict = {
-                "comic_scenarios": generated_scenarios_final,
-                "selected_comic_idea_for_scenario": selected_idea,
-                "thumbnail_image_prompt": thumbnail_image_prompt_final,
-                "current_stage": final_status,
-                "error_log": state.error_log
-            }
-            logger.info(
-                f"Exiting node {node_name}. Scenarios: {len(generated_scenarios_final)}, "
-                f"Thumbnail prompt: {'Generated' if thumbnail_image_prompt_final else 'Not generated'}. Status: {final_status}",
-                extra=extra
-            )
-            return update_dict
-
-        except Exception as e:  # run 메소드 내의 최상위 예외 처리
-            error_msg = f"N08: Unexpected critical error in {node_name} execution: {type(e).__name__} - {e}"
-            logger.exception(error_msg, extra=extra)
-            current_node_error_log.append({"stage": node_name, "error": error_msg, "detail": traceback.format_exc(),
-                                           "timestamp": datetime.now(timezone.utc).isoformat()})
-            state.error_log.extend(current_node_error_log)
-            return {
-                "comic_scenarios": generated_scenarios_final,  # 이미 생성된 부분 결과 포함
-                "thumbnail_image_prompt": thumbnail_image_prompt_final,  # 이미 생성된 부분 결과 포함
-                "error_log": state.error_log,
-                "current_stage": "ERROR",
-                "error_message": f"{node_name} Exception: {error_msg}"
-            }
+        update_dict = {
+            "comic_scenarios": scenarios,
+            "scenarios_raw_texts": scenarios_raw_texts,  # DEBUG: add raw LLM responses
+            "selected_comic_idea_for_scenario": selected_idea,
+            "thumbnail_image_prompt": thumbnail_image_prompt_final,
+            "current_stage": final_status,
+            "error_log": state.error_log
+        }
+        logger.info(
+            f"Exiting node {node_name}. Scenarios: {len(scenarios)}, Thumbnail prompt: {'Generated' if thumbnail_image_prompt_final else 'Not generated'}. Status: {final_status}",
+            extra=extra
+        )
+        return update_dict
 
 
 async def main_test_n08():
@@ -505,22 +270,27 @@ async def main_test_n08():
     result_update = None
     try:
         result_update = await node.run(state)
-        logger.info(f"N08 Test: node.run() result summary: {summarize_for_logging(result_update, max_len=1500)}")
+        logger.info(f"N08 Test: node.run() result summary: {result_update}")
         print(f"\n[INFO] N08 Node Run Complete. Final Stage: {result_update.get('current_stage')}")
-        # ... (이전과 동일한 결과 출력 로직) ...
+        print("\n========== FULL N08 DEBUG OUTPUT ==========")
+        # 썸네일 프롬프트 전체 출력
+        print(f"\n[THUMBNAIL PROMPT]\n{result_update.get('thumbnail_image_prompt')}")
+        # 각 시나리오별 LLM raw 응답 및 파싱 결과 전체 출력
         comic_scenarios_output = result_update.get('comic_scenarios', [])
-        print(f"  Generated Scenarios ({len(comic_scenarios_output)} items):")
-        for i, sc in enumerate(comic_scenarios_output):
-            print(f"    --- Scenario {i + 1} ({sc.get('scene_identifier')}) ---")
-            print(f"      Description: {summarize_for_logging(sc.get('scene_description'), 50)}")
-            print(f"      Image Prompt: {summarize_for_logging(sc.get('final_image_prompt'), 70)}")
-        print(
-            f"\n  Generated Thumbnail Image Prompt: {summarize_for_logging(result_update.get('thumbnail_image_prompt'), 150)}")
-        if result_update.get('error_log'):
-            print(f"  Error Log ({len(result_update['error_log'])} entries):")
-            for err in result_update['error_log']: print(
-                f"    - Stage: {err.get('stage')}, Error: {summarize_for_logging(err.get('error'))}")
-
+        scenarios_raw_texts = result_update.get('scenarios_raw_texts', [])
+        print(f"\n[SCENARIOS] (Total: {len(comic_scenarios_output)})")
+        for i, (sc, raw) in enumerate(zip(comic_scenarios_output, scenarios_raw_texts)):
+            print(f"\n--- Scenario {i+1} ({sc.get('scene_identifier')}) ---")
+            print(f"[LLM RAW RESPONSE]:\n{raw}")
+            print("[PARSED FIELDS]:")
+            for k, v in sc.items():
+                print(f"  {k}: {v}")
+        # 에러 로그 전체 출력
+        error_log = result_update.get('error_log', [])
+        print(f"\n[ERROR LOG] (Total: {len(error_log)})")
+        for err in error_log:
+            print(f"  - Stage: {err.get('stage')}, Error: {err.get('error')}, Detail: {err.get('detail', '')}")
+        print("\n========== END OF N08 DEBUG OUTPUT ==========")
     except Exception as e:
         logger.error(f"N08 Test: Exception in main test execution: {e}", exc_info=True)
         print(f"[ERROR] Exception in N08 test: {e}")

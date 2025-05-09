@@ -40,6 +40,18 @@ app.include_router(v1_endpoints.router, prefix="/api/v1")
 if __name__ == "__main__":
     # logger.info("로컬 개발 서버 (Uvicorn) 시작...") # 예시: 로깅
     # host, port, log_level, reload 등은 추후 settings 객체에서 읽어오도록 수정
+    # 워크플로우 테스트용 디버그 출력 임포트
+    try:
+        from app.utils.debug import print_final_state_debug
+    except ImportError:
+        print_final_state_debug = None
+
+    # 아래는 실제 워크플로우 실행 예시 (state/result_dict는 실제 워크플로우 실행 결과에 맞게 전달)
+    # 예시:
+    # state, result_dict = run_full_workflow(...)
+    # if print_final_state_debug:
+    #     print_final_state_debug(state, result_dict)
+
     uvicorn.run(
         "main:app",       # 실행할 FastAPI 앱 (main.py 파일의 app 객체)
         host="0.0.0.0",   # 외부 접속 허용 (예: settings.APP_HOST)

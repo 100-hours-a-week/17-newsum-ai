@@ -50,10 +50,13 @@ class N07ComicIdeationNode:
 
         prompt = f"""[System] You are a creative comic idea generator with the persona '{writer_persona}', targeting a '{target_audience}' audience.
 Based on the provided 'Report Summary', 'Original User Query', and 'Refined Core Question', generate {num_ideas} unique and engaging comic ideas.
+
+IMPORTANT: Each idea MUST be directly inspired by and summarize key points from the 'Report Summary'. The logline (or summary) of each idea should clearly reflect the main findings or insights from the report. Do NOT invent ideas unrelated to the report content.
+
 Each idea MUST strictly follow this XML-like format:
 <idea>
   <title>Comic Title (concise and catchy)</title>
-  <logline>A one or two-sentence core plot or concept</logline>
+  <logline>A one or two-sentence core plot or concept, summarizing and reflecting the main points of the report</logline>
   <genre>Comic Genre (e.g., Sci-Fi, Fantasy, Drama, Comedy, Educational, Satire)</genre>
   <target_emotion>Primary emotion to evoke in the reader (e.g., Curiosity, Amusement, Empathy, Awareness, Thrill)</target_emotion>
   <key_elements_from_report>Key elements or keywords from the report that inspired this idea (comma-separated)</key_elements_from_report>
