@@ -204,6 +204,30 @@ class N09ImageGenerationNode:
                 has_actual_errors = True
                 break
 
+        expected_images_count = len(state.comic_scenarios or [])
+        generated_images_count = len([
+            img for img in generated_images_overall
+            if (img.get("image_path") or img.get("image_url")) and not img.get("is_thumbnail")
+        ])
+        if expected_images_count > 0 and generated_images_count < expected_images_count:
+            warn_msg = f"Only {generated_images_count} images generated (target: {expected_images_count})."
+            logger.warning(warn_msg, extra=extra_log_data)
+            node_specific_error_log.append({
+                "stage": f"{node_name}.image_generation",
+                "error": warn_msg,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            })
+            final_status = "N09_COMPLETED_WITH_PARTIAL_ERRORS"
+        elif expected_images_count > 0 and generated_images_count == 0:
+            error_msg = "Failed to generate any images for provided scenarios."
+            logger.error(error_msg, extra=extra_log_data)
+            node_specific_error_log.append({
+                "stage": f"{node_name}.image_generation",
+                "error": error_msg,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            })
+            final_status = "ERROR"
+
         if has_actual_errors:
             final_status = "N09_COMPLETED_WITH_ERRORS"
 

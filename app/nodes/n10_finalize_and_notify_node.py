@@ -10,6 +10,7 @@ import mimetypes
 import os
 import shutil  # main 테스트에서 디렉토리 삭제용
 import uuid
+import pprint
 
 # --- 실제 애플리케이션 환경에 맞게 설정되어야 하는 임포트 ---
 from app.workflows.state import WorkflowState
@@ -341,8 +342,8 @@ class N10FinalizeAndNotifyNode:
             source_news_final.extend(self._extract_referenced_urls(state))
 
             # 외부 API 페이로드 구성 (명세에 따라)
-            ext_api_url_final = "http://34.64.219.46:8080/api/v1/webtoons"  # 명세 URL
-            if ext_api_url_final:  # 이 URL은 고정
+            ext_api_url_final = settings.EXTERNAL_NOTIFICATION_API_URL
+            if ext_api_url_final:
                 title_for_payload = state.selected_comic_idea_for_scenario.get(
                     "title") if state.selected_comic_idea_for_scenario else \
                     (state.original_query[:50] if state.original_query else f"Comic {comic_id}")
@@ -371,6 +372,27 @@ class N10FinalizeAndNotifyNode:
                         })
                         seq_counter += 1
 
+                expected_slides_count = len(state.comic_scenarios or [])
+                slides_count = len(slides_for_payload)
+                if expected_slides_count > 0 and slides_count < expected_slides_count:
+                    warn_msg = f"Only {slides_count} slides to send to external API (target: {expected_slides_count})."
+                    logger.warning(warn_msg, extra=extra)
+                    error_log.append({
+                        "stage": f"{node_name}.slides_count",
+                        "error": warn_msg,
+                        "timestamp": datetime.now(timezone.utc).isoformat()
+                    })
+                    final_stage_status = "DONE_WITH_PARTIAL_ERRORS"
+                elif expected_slides_count > 0 and slides_count == 0:
+                    error_msg = "No slides generated for external API payload."
+                    logger.error(error_msg, extra=extra)
+                    error_log.append({
+                        "stage": f"{node_name}.slides_count",
+                        "error": error_msg,
+                        "timestamp": datetime.now(timezone.utc).isoformat()
+                    })
+                    final_stage_status = "ERROR"
+
                 api_payload_final = {
                     "aiAuthorId": ai_author_id, "category": "IT", "title": title_for_payload,
                     "content": content_for_payload, "thumbnailImageUrl": thumbnail_url_for_payload,
@@ -382,7 +404,7 @@ class N10FinalizeAndNotifyNode:
                     error_log.append({"stage": f"{node_name}._send_to_external_api",
                                       "error": f"External API call failed: {api_call_final_result.get('error', 'Unknown')}",
                                       "timestamp": datetime.now(timezone.utc).isoformat()})
-            else:  # ext_api_url_final이 None인 경우는 없지만 (하드코딩)
+            else:   # env에 EXTERNAL_NOTIFICATION_API_URL이 없는 경우
                 api_call_final_result = {"status": "skipped", "reason": "External API URL not configured"}
 
             final_stage_status = "DONE"
@@ -397,6 +419,34 @@ class N10FinalizeAndNotifyNode:
             logger.info(
                 f"Exiting node {node_name}. Status: {final_stage_status}. API Response: {api_call_final_result.get('status') if api_call_final_result else 'N/A'}",
                 extra=extra)
+
+            print(f"\n[INFO] N10 Node Run Complete. Final Stage: {final_stage_status}")
+            print(f"  Uploaded Report S3 URI: {s3_report_uri}")
+            print(f"  External API Response: {api_call_final_result.get('status') if api_call_final_result else 'N/A'}")
+
+            # === 시나리오 결과만 간단하게 출력 ===
+            print("\n================= [시나리오 결과 요약] =================")
+            if not state.comic_scenarios:
+                print("[경고] 생성된 시나리오가 없습니다.")
+            else:
+                for idx, sc in enumerate(state.comic_scenarios):
+                    print(f"==== 시나리오 {idx+1} =========================================")
+                    if sc.get('panel_number') is not None:
+                        print(f"[패널 번호]    : {sc.get('panel_number')}")
+                    print(f"[ID]         : {sc.get('scene_identifier')}")
+                    print(f"[설명]        : {sc.get('scene_description')}")
+                    if sc.get('dialogue') is not None:
+                        print(f"[대사]        : {sc.get('dialogue')}")
+                    if sc.get('sfx') is not None:
+                        print(f"[효과음]      : {sc.get('sfx')}")
+                    if sc.get('final_image_prompt') is not None:
+                        print(f"[이미지 프롬프트] : {sc.get('final_image_prompt')}")
+                    print("====================================================\n")
+
+            if error_log:
+                print(f"  Error Log ({len(error_log)} entries):")
+                for err in error_log: print(f"    - Stage: {err.get('stage')}, Error: {err.get('error')}")
+
             return update_dict_final
         except Exception as e:
             # ... (이전과 동일한 최상위 예외 처리) ...
@@ -465,7 +515,7 @@ async def main_test_n10():
     state = WorkflowState(
         trace_id=trace_id, comic_id=comic_id,
         original_query="N10 Final API Payload Test",
-        config={"writer_id": "123"},  # 정수형 ID로 잘 변환되는지 확인
+        config={"writer_id": "1"},  # 정수형 ID로 잘 변환되는지 확인
         comic_scenarios=[  # slides의 content 필드 채우기 위함
             {"scene_identifier": "FinalCut_01_API",
              "scene_description": "This is the detailed description for the first cut scene, which can be quite long.",
@@ -519,5 +569,6 @@ if __name__ == "__main__":
     import logging
 
     logging.basicConfig(level=logging.INFO,
-                        format='%(asctime)s - %(name)s - %(levelname)s - [%(trace_id)s] [%(node_name)s] %(message)s')
+                        # format='%(asctime)s - %(name)s - %(levelname)s - [%(trace_id)s] [%(node_name)s] %(message)s')
+                        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     asyncio.run(main_test_n10())
