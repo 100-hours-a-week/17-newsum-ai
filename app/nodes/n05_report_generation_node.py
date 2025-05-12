@@ -65,14 +65,6 @@ class N05ReportGenerationNode:
     <div class="section">
         <h2>{{ loop.index + 1 }}. {{ section_item.aspect_title | e }}</h2>
         <p>{{ section_item.content | replace('\\n', '<br>') | safe }}</p>
-        {% if section_item.supporting_snippets and section_item.supporting_snippets|length > 0 %}
-            <h3>주요 참고 자료:</h3>
-            <ul>
-            {% for snippet in section_item.supporting_snippets[:3] %} {# 섹션별 주요 스니펫 최대 3개 표시 #}
-                <li><a href="{{ snippet.url }}" target="_blank">{{ snippet.title | e }}</a> (출처: {{ snippet.source_domain | e }})</li>
-            {% endfor %}
-            </ul>
-        {% endif %}
     </div>
     {% endfor %}
 
