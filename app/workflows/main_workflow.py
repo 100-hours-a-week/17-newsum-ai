@@ -64,7 +64,6 @@ async def compile_workflow(
     n09_image_generation = N09ImageGenerationNode(image_service=image_generation_service)
     n10_finalize_and_notify = N10FinalizeAndNotifyNode(
         storage_service=storage_service,
-        translation_service=translation_service,
         http_session=external_api_session  # 공유 세션 전달 또는 None
     )
     # --- 노드 추가 (Node 1 ~ 9) ---
@@ -89,6 +88,7 @@ async def compile_workflow(
     workflow.add_edge("n06_save_report", "n07_comic_ideation")
     workflow.add_edge("n07_comic_ideation", "n08_scenario_generation")
     workflow.add_edge("n08_scenario_generation", "n09_image_generation")
+    # workflow.add_edge("n09_image_generation", END)  # <<< N10 실행 후 종료
     workflow.add_edge("n09_image_generation", "n10_finalize_and_notify")
     workflow.add_edge("n10_finalize_and_notify", END)  # <<< N10 실행 후 종료
 

@@ -1,5 +1,4 @@
 # ai/app/config/settings.py
-import os
 from pathlib import Path # <<< Path 객체 사용 위해 임포트
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field, AnyHttpUrl
@@ -37,43 +36,43 @@ class Settings(BaseSettings):
     REDIS_HOST: str = "localhost"
     REDIS_PORT: int = 6379
     REDIS_DB: int = 0
-    REDIS_PASSWORD: Optional[str] = Field(None) # <<< validation_alias 제거
+    REDIS_PASSWORD: Optional[str] = Field(None) 
 
     # --- LLM 서비스 ---
-    LLM_API_ENDPOINT: Optional[AnyHttpUrl] = Field(None) # <<< validation_alias 제거
+    LLM_API_ENDPOINT: Optional[AnyHttpUrl] = Field(None) 
     LLM_API_TIMEOUT: int = 60
     LLM_API_RETRIES: int = 3
     DEFAULT_LLM_MODEL: str = "default-model-name"
 
     # --- 번역 서비스 (Papago 예시) ---
-    NAVER_CLIENT_ID: Optional[str] = Field(None) # <<< validation_alias 제거
-    NAVER_CLIENT_SECRET: Optional[str] = Field(None) # <<< validation_alias 제거
+    NAVER_CLIENT_ID: Optional[str] = Field(None) 
+    NAVER_CLIENT_SECRET: Optional[str] = Field(None) 
 
     # --- 스팸 탐지 서비스 ---
-    SPAM_KEYWORDS: List[str] = Field(default_factory=lambda: ["광고", "홍보", "클릭"]) # <<< validation_alias 제거
+    SPAM_KEYWORDS: List[str] = Field(default_factory=lambda: ["광고", "홍보", "클릭"]) 
     SPAM_MAX_URL_COUNT: int = 2
     SPAM_MAX_UPPERCASE_RATIO: float = 0.7
 
     # --- 스토리지 서비스 (S3 예시) ---
-    S3_BUCKET_NAME: Optional[str] = Field(None) # <<< validation_alias 제거
-    AWS_REGION: Optional[str] = Field(None) # <<< validation_alias 제거
-    ACCESS_KEY: Optional[str] = Field(None) # <<< validation_alias 제거
-    SECRET_KEY: Optional[str] = Field(None) # <<< validation_alias 제거
-    LOCAL_STORAGE_PATH: str = Field("local_storage_path") # <<< validation_alias 제거
-    S3_STORAGE_PATH: str = Field("s3_storage_path") # <<< validation_alias 제거
+    S3_BUCKET_NAME: Optional[str] = Field(None) 
+    AWS_REGION: Optional[str] = Field(None) 
+    ACCESS_KEY: Optional[str] = Field(None) 
+    SECRET_KEY: Optional[str] = Field(None) 
+    LOCAL_STORAGE_PATH: str = Field("local_storage_path") 
+    S3_STORAGE_PATH: str = Field("s3_storage_path") 
 
     # --- 이미지 생성 서비스 ---
-    IMAGE_SERVER_URL: Optional[AnyHttpUrl] = Field(None) # <<< validation_alias 제거
-    IMAGE_SERVER_API_TOKEN: Optional[str] = Field(None) # <<< validation_alias 제거
-    IMAGE_STORAGE_PATH: str = Field("generated_images") # <<< validation_alias 제거
+    IMAGE_SERVER_URL: Optional[AnyHttpUrl] = Field(None) 
+    IMAGE_SERVER_API_TOKEN: Optional[str] = Field(None) 
+    IMAGE_STORAGE_PATH: str = Field("generated_images") 
     LLM_MAX_TOKENS_SCENARIO: int = 2000
     IMAGE_DEFAULT_NEGATIVE_PROMPT: str = Field("(worst quality, low quality, normal quality:1.2), deformed, blurry, text, signature")
 
     # --- 검색 도구 (Google 예시) ---
-    GOOGLE_API_KEY: Optional[str] = Field(None) # <<< validation_alias 제거
-    GOOGLE_CSE_ID: Optional[str] = Field(None) # <<< validation_alias 제거
-    TARGET_COMMUNITY_DOMAINS: List[str] = Field(default_factory=list) # <<< validation_alias 제거
-    EXTERNAL_NOTIFICATION_API_URL: Optional[str] = Field(None) # <<< validation_alias 제거
+    GOOGLE_API_KEY: Optional[str] = Field(None) 
+    GOOGLE_CSE_ID: Optional[str] = Field(None) 
+    TARGET_COMMUNITY_DOMAINS: List[str] = Field(default_factory=list) 
+    EXTERNAL_NOTIFICATION_API_URL: Optional[str] = Field(None) 
     EXTERNAL_API_TIMEOUT_SECONDS: int = 30
 
     # --- 도구 공통 설정 ---
@@ -83,17 +82,21 @@ class Settings(BaseSettings):
     TOOL_RETRY_WAIT_MAX: int = 3
 
     # --- LangSmith ---
-    LANGCHAIN_TRACING_V2: Optional[str] = Field("true") # <<< validation_alias 제거
-    LANGCHAIN_ENDPOINT: Optional[AnyHttpUrl] = Field("https://api.smith.langchain.com") # <<< validation_alias 제거
-    LANGCHAIN_API_KEY: Optional[str] = Field(None) # <<< validation_alias 제거
-    LANGCHAIN_PROJECT: Optional[str] = Field("NewSum-Project") # <<< validation_alias 제거
+    LANGCHAIN_TRACING_V2: Optional[str] = Field("true") 
+    LANGCHAIN_ENDPOINT: Optional[AnyHttpUrl] = Field("https://api.smith.langchain.com") 
+    LANGCHAIN_API_KEY: Optional[str] = Field(None) 
+    LANGCHAIN_PROJECT: Optional[str] = Field("NewSum-Project") 
 
     SCENARIO_TARGET_SCENES_COUNT: int = 4
     IMAGE_MAX_PARALLEL_TASKS: int = 1
     S3_MAX_PARALLEL_UPLOADS: int = 5
 
-    EXTERNAL_API_TIMEOUT_SECONDS: int = 60
     IMAGE_DEFAULT_STYLE_PROMPT: str = "vibrant webtoon art style, dynamic camera angle"
+
+    TRANSLATION_BATCH_SIZE: int = 60
+    TRANSLATION_BATCH_CHAR_LIMIT: int = 25000
+    ORIGINAL_REPORT_LANGUAGE: str = "en"
+    N06_REPORT_TRANSLATION_TARGET_LANG: str = "ko"
 
 # 설정 객체 인스턴스 생성
 settings = Settings()
