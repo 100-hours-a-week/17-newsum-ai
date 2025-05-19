@@ -19,6 +19,7 @@ from app.nodes.n02_analyze_query_node import N02AnalyzeQueryNode
 from app.nodes.n03_understand_and_plan_node import N03UnderstandAndPlanNode
 from app.nodes.n04_execute_search_node import N04ExecuteSearchNode
 from app.nodes.n05_report_generation_node import N05ReportGenerationNode
+from app.nodes.n05_hitl_review_node import N05HITLReviewNode  # HITL 노드 추가
 from app.nodes.n06_save_report_node import N06SaveReportNode
 from app.nodes.n07_comic_ideation_node import N07ComicIdeationNode
 from app.nodes.n08_scenario_generation_node import N08ScenarioGenerationNode
@@ -58,6 +59,7 @@ async def compile_workflow(
     n03_understand_and_plan = N03UnderstandAndPlanNode(llm_service=llm_service)
     n04_execute_search = N04ExecuteSearchNode(search_tool=Google_Search_tool)
     n05_report_generation = N05ReportGenerationNode(llm_service=llm_service)
+    n05_hitl_review = N05HITLReviewNode(llm_service=llm_service)  # LLM 서비스 주입
     n06_save_report = N06SaveReportNode()
     n07_comic_ideation = N07ComicIdeationNode(llm_service=llm_service)
     n08_scenario_generation = N08ScenarioGenerationNode(llm_service=llm_service)
@@ -72,6 +74,7 @@ async def compile_workflow(
     workflow.add_node("n03_understand_and_plan", n03_understand_and_plan.run)
     workflow.add_node("n04_execute_search", n04_execute_search.run)
     workflow.add_node("n05_report_generation", n05_report_generation.run)
+    workflow.add_node("n05_hitl_review", n05_hitl_review.run)  # HITL 노드 추가
     workflow.add_node("n06_save_report", n06_save_report.run)
     workflow.add_node("n07_comic_ideation", n07_comic_ideation.run)
     workflow.add_node("n08_scenario_generation", n08_scenario_generation.run)
@@ -84,16 +87,32 @@ async def compile_workflow(
     workflow.add_edge("n02_analyze_query", "n03_understand_and_plan")
     workflow.add_edge("n03_understand_and_plan", "n04_execute_search")
     workflow.add_edge("n04_execute_search", "n05_report_generation")
-    workflow.add_edge("n05_report_generation", "n06_save_report")
+    workflow.add_edge("n05_report_generation", "n05_hitl_review")  # HITL 노드로 연결
+    
+    # HITL 노드의 결과에 따른 분기 추가
+    def should_continue(state: WorkflowState) -> bool:
+        """HITL 노드의 결과를 확인하여 워크플로우 계속 진행 여부를 결정"""
+        return state.workflow_status != "intentionally_terminated"
+    
+    # HITL 노드에서 조건부 분기 추가
+    workflow.add_conditional_edges(
+        "n05_hitl_review",
+        should_continue,
+        {
+            True: "n06_save_report",  # 계속 진행
+            False: END  # 의도적 종료
+        }
+    )
+    
+    # 나머지 엣지들
     workflow.add_edge("n06_save_report", "n07_comic_ideation")
     workflow.add_edge("n07_comic_ideation", "n08_scenario_generation")
     workflow.add_edge("n08_scenario_generation", "n09_image_generation")
-    # workflow.add_edge("n09_image_generation", END)  # <<< N10 실행 후 종료
     workflow.add_edge("n09_image_generation", "n10_finalize_and_notify")
-    workflow.add_edge("n10_finalize_and_notify", END)  # <<< N10 실행 후 종료
+    workflow.add_edge("n10_finalize_and_notify", END)
 
     # --- 워크플로우 컴파일 ---
     compiled_app = workflow.compile()
 
-    logger.info("Main workflow compiled successfully (Nodes 1-9 sequential, ends after n09).") # 로그 메시지 업데이트
+    logger.info("Main workflow compiled successfully with HITL review node.") # 로그 메시지 업데이트
     return compiled_app

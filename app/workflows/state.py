@@ -32,6 +32,12 @@ class WorkflowState(BaseModel):
 
     # --- Node 5 (Report Generation) ---
     report_content: Optional[str] = Field(None, description="생성된 원본 보고서 내용 (HTML)")
+    report_full: Optional[str] = Field(None, description="생성된 원본 보고서 전체 내용 (HTML)")
+    hitl_status: Optional[str] = Field(None, description="HITL 리뷰 상태")
+    hitl_last_updated: Optional[str] = Field(None, description="HITL 리뷰 마지막 업데이트 시각")
+    workflow_status: Optional[str] = Field(None, description="워크플로우 상태")
+    hitl_feedback: Optional[str] = Field(None, description="HITL 리뷰 사용자 피드백")
+    hitl_revision_history: List[Dict[str, Any]] = Field(default_factory=list, description="HITL 리뷰 수정 이력")
     # Node 5에서 생성된, 보고서 작성에 참조된 외부 URL 목록 (N10의 sourceNews와는 별개로 관리)
     referenced_urls_for_report: Optional[List[Dict[str, str]]] = Field(default_factory=list,
                                                                        description="보고서 생성에 참조된 외부 소스 정보 목록 (예: {'title': '기사 제목', 'url': 'http://...'})")
