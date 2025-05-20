@@ -84,21 +84,21 @@ class N05HITLReviewNode:
 
     async def _handle_modification(self, state: WorkflowState) -> WorkflowState:
         """보고서 수정 요청을 처리합니다."""
-        console.print("[bold yellow]수정이 필요한 부분을 설명해주세요:[/bold yellow]")
+        console.print("[bold yellow]수정이 필요한 부분을 설명해주세요(slm에게 prompt로 들어갈 내용입니다):[/bold yellow]")
         modification_request = Prompt.ask("수정 요청")
         
         # LLM을 사용하여 보고서 수정
         modification_prompt = f"""
-        다음 보고서를 수정해주세요:
-        
-        원본 보고서:
-        {state.report_content}
-        
-        수정 요청:
-        {modification_request}
-        
-        수정된 보고서를 HTML 형식으로 반환해주세요.
-        """
+Please revise the following report based on the user's feedback.
+
+Original Report:
+{state.report_content}
+
+User's Modification Request:
+{modification_request}
+
+Return the revised report in **HTML format only**.
+"""
         
         try:
             response = await self.llm_service.generate_text(modification_prompt)

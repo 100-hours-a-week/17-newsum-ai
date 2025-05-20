@@ -27,8 +27,15 @@ class N02AnalyzeQueryNode:
     ) -> List[str]:
         """sLLM을 사용하여 키워드 및 명명된 개체 추출 (쉼표 구분 문자열 요청)"""
         prompt = f"""[System] You are a text analysis expert. Your task is to extract key information from the user's query.
-From the 'Original Query' below, identify and list all important keywords, noun phrases, specific names (like model names, product names, company names, technologies, persons), and key technical terms. These must be *extracted directly* from the query. Do not generate new words or rephrase.
-Respond ONLY with the extracted items, separated by commas. If no specific items are found, respond with "N/A".
+
+From the 'Original Query' below, identify and list:
+- All important keywords and noun phrases
+- Specific named entities (such as model names, companies, technologies, products, locations, persons)
+- Key technical terms
+
+Strictly extract only terms **explicitly mentioned** in the query. Do not generate new words, synonyms, or paraphrases.
+Respond **only** with a comma-separated list. Do not include explanations or formatting. Do not number the items. Do not add categories.
+If nothing relevant is found, reply with exactly: `N/A`
 
 Original Query: "{query}"
 
@@ -94,6 +101,36 @@ Predicted Query Type (choose one from the list):"""
 
         logger.debug(f"sLLM generated query_type: {query_type}", extra=extra_log_data)
         return query_type
+    
+    async def _get_query_category_sllm(
+        self, query: str, trace_id: str, extra_log_data: dict
+    ) -> Optional[str]:
+        """sLLM을 사용하여 분야(category) 분류"""
+        category_options = ["IT", "Economy", "Politics", "Leisure", "Science", "Other"]
+        prompt = f"""[System] You are a topic classification expert.
+    Classify the following user query into ONE of the predefined high-level categories:
+    {', '.join(category_options)}.
+    Respond ONLY with the category name.
+
+    Original Query: "{query}"
+
+    [Task]
+    Predicted Query Category (choose one):"""
+
+        logger.debug("Attempting to get query_category from sLLM...", extra=extra_log_data)
+        result = await self.llm_service.generate_text(prompt=prompt, max_tokens=30, temperature=0.1)
+
+        if "error" in result or not result.get("generated_text"):
+            logger.error(f"sLLM query_category classification failed: {result.get('error', 'No text generated')}",
+                        extra=extra_log_data)
+            return None
+
+        category = result["generated_text"].strip().removeprefix('"').removesuffix('"').strip()
+        if category not in category_options:
+            logger.warning(f"Unexpected category received: {category}", extra=extra_log_data)
+            return "Other"
+        return category
+
 
     async def _get_detected_ambiguities_sllm(
             self, query: str, keywords: List[str], query_type: Optional[str],
@@ -158,7 +195,15 @@ Detected Ambiguities (comma-separated, from original query):"""
         else:
             analysis_results["query_type"] = query_type
 
-        # 3. 모호성 감지
+        # 3. 분야 분류
+        query_category = await self._get_query_category_sllm(query, trace_id, extra_log_data)
+        if not query_category:
+            sllm_errors.append("Query category classification failed or returned N/A.")
+            analysis_results["query_category"] = "Unknown"  # Fallback
+        else:
+            analysis_results["query_category"] = query_category 
+
+        # 4. 모호성 감지
         # 이전 단계의 키워드 및 쿼리 유형을 컨텍스트로 활용
         detected_ambiguities = await self._get_detected_ambiguities_sllm(
             query, analysis_results["extracted_keywords"], analysis_results["query_type"],
@@ -252,7 +297,7 @@ Detected Ambiguities (comma-separated, from original query):"""
             # --- _analyze_query_sequentially 호출 (새로운 방식) ---
             query_analysis_results = await self._analyze_query_sequentially(original_query, trace_id, extra)
             # -------------------------------------------------------
-            query_context = query_analysis_results  # 여기에는 extracted_keywords, query_type, detected_ambiguities, error 포함
+            query_context = query_analysis_results  # 여기에는 extracted_keywords, query_type, query_category, detected_ambiguities, error 포함
 
             # query_context에 sLLM 처리 중 발생한 오류가 있다면 error_log에 추가
             if query_context.get("error"):

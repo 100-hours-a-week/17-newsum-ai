@@ -67,6 +67,18 @@ Reformulated Core Intent (single sentence, considering persona and audience):"""
         refined_intent_str = refined_intent_str.removeprefix('"').removesuffix('"').strip()
         logger.debug(f"sLLM generated refined_intent string: '{refined_intent_str}'", extra=extra_log_data)
         return refined_intent_str if refined_intent_str else None
+    
+    def _adjust_audience_by_category(self, category: str) -> str:
+        mapping = {
+            "IT": "tech_industry",
+            "Economy": "financial_analysts",
+            "Politics": "policy_makers",
+            "Leisure": "general_public",
+            "Science": "academic_researchers",
+            "Other": "general_public"
+        }
+        return mapping.get(category, "general_public")
+
 
     async def _get_key_aspects_sllm(
             self, refined_intent: str, config: dict,  # config 추가
@@ -74,7 +86,7 @@ Reformulated Core Intent (single sentence, considering persona and audience):"""
     ) -> List[str]:
         writer_id = config.get('writer_id', 'default_writer')
         target_audience = config.get('target_audience', 'general_public')
-
+        
         # --- 프롬프트 수정: config (writer_id, target_audience) 활용 ---
         prompt = f"""[System] Your current persona is '{writer_id}' and the target audience is '{target_audience}'.
 Based on the provided refined user intent, list up to 5 specific search queries or key aspects that would help answer this intent.
@@ -346,6 +358,12 @@ Concise Clarification for '{ambiguity_term}' (for search query use, or "Clarific
                 {"stage": node_name, "error": error_msg, "timestamp": datetime.now(timezone.utc).isoformat()})
             return {"error_log": error_log, "current_stage": "ERROR", "error_message": error_msg}
 
+        # --- target_audience를 query_category 기반으로 동적으로 결정 ---
+        query_category = state.query_context.get('query_category', 'Other')
+        target_audience = self._adjust_audience_by_category(query_category)
+        config = dict(config)  # 혹시 모를 side effect 방지 (복사)
+        config['target_audience'] = target_audience
+
         try:
             # state.query_context에 _extra_log_data 임시 저장 (하위 함수에서 사용 가능하도록)
             # 이는 상태 객체 스키마에 정의되어 있어야 하거나, 일시적 사용 후 제거해야 함
@@ -355,7 +373,7 @@ Concise Clarification for '{ambiguity_term}' (for search query use, or "Clarific
                 state.original_query,
                 state.query_context,
                 state.initial_context_results,
-                config,  # config 전달
+                config,  # config 전달 (target_audience 반영)
                 trace_id,
                 extra
             )

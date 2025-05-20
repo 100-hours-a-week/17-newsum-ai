@@ -45,13 +45,13 @@ class N01InitializeNode:
         # 만약 전달된 ID가 없다면 (예: 워크플로우가 다른 방식으로 시작된 경우) 새로 생성 (Fallback)
         if not comic_id_to_use:
             comic_id_to_use = str(uuid.uuid4())
-            logger.warning(f"N01: comic_id was not provided, generating a new one: {comic_id_to_use}")
+            logger.warning(f"[{node_name}] comic_id not provided. Generated: {comic_id_to_use}")
         if not trace_id_to_use:
             # trace_id는 comic_id와 동일하게 사용하거나, 별도로 관리할 수 있음
             # 여기서는 comic_id와 동일하게 설정
             trace_id_to_use = comic_id_to_use
             if comic_id_to_use != state.comic_id:  # comic_id는 있었는데 trace_id만 없었던 경우
-                logger.warning(f"N01: trace_id was not provided, using comic_id as trace_id: {trace_id_to_use}")
+                logger.warning(f"[{node_name}] trace_id not provided. Using comic_id as trace_id: {trace_id_to_use}")
 
         timestamp = datetime.now(timezone.utc).isoformat()
         writer_id = initial_config.get('writer_id', 'default_writer')
@@ -65,8 +65,7 @@ class N01InitializeNode:
         }
 
         logger.info(
-            f"Entering node. Initial Query: '{original_query}', "
-            f"Config Summary: {summarize_for_logging(initial_config, max_len=200)}",
+            f"[{node_name}] Entered. Initial query: '{original_query}' | Config: {summarize_for_logging(initial_config, max_len=200)}",
             extra=extra_log_data
         )
 
@@ -83,7 +82,7 @@ class N01InitializeNode:
 
         if error_messages:
             full_error_msg = " ".join(error_messages)
-            logger.error(f"Input validation failed: {full_error_msg}", extra=extra_log_data)
+            logger.error(f"[{node_name}] Input validation failed: {full_error_msg}", extra=extra_log_data)
             return {
                 "trace_id": trace_id_to_use,
                 "comic_id": comic_id_to_use,
@@ -98,31 +97,30 @@ class N01InitializeNode:
         # 상태 업데이트 준비
         try:
             update_dict = {
-                "trace_id": trace_id_to_use,  # 명시적으로 다시 설정하여 확인
-                "comic_id": comic_id_to_use,  # 명시적으로 다시 설정하여 확인
+                "trace_id": trace_id_to_use,
+                "comic_id": comic_id_to_use,
                 "timestamp": timestamp,  # N01에서 생성하는 타임스탬프
-                "query_context": {},  # 초기화
-                "initial_context_results": [],  # 초기화
-                "search_strategy": None,  # 초기화
-                "raw_search_results": None,  # 초기화 (state.py 정의에 따름)
-                "report_content": None,  # 초기화 (state.py 정의에 따름)
-                "saved_report_path": None,  # 초기화 (state.py 정의에 따름)
-                "retry_count": 0,  # 초기화
-                "error_log": [],  # 초기화
-                "error_message": None,  # 초기화
+                "query_context": {},
+                "initial_context_results": [],
+                "search_strategy": None,
+                "raw_search_results": None,
+                "report_content": None,
+                "saved_report_path": None,
+                "retry_count": 0,
+                "error_log": [],
+                "error_message": None,
                 "current_stage": node_name  # 현재 노드 이름 설정
                 # original_query와 config는 변경하지 않으므로 update_dict에 포함 X (state에 이미 존재)
             }
-            logger.info(f"Exiting node. State Initialized. Summary: {summarize_for_logging(update_dict)}",
-                        extra=extra_log_data)
+            logger.info(f"[{node_name}] Initialization complete. State summary: {summarize_for_logging(update_dict)}", extra=extra_log_data)
             return update_dict
 
         except Exception as e:
             error_msg = f"Error during state initialization: {e}"
-            logger.exception(error_msg, extra=extra_log_data)
+            logger.exception(f"[{node_name}] {error_msg}", extra=extra_log_data)
             return {
-                "trace_id": trace_id_to_use, # 명시적으로 다시 설정하여 확인
-                "comic_id": comic_id_to_use, # 명시적으로 다시 설정하여 확인
+                "trace_id": trace_id_to_use,
+                "comic_id": comic_id_to_use,
                 "timestamp": timestamp,
                 "current_stage": "ERROR",
                 "error_message": f"N01 Initialization Exception: {error_msg}",
