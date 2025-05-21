@@ -45,6 +45,9 @@ class WorkflowState(BaseModel):
     saved_report_path: Optional[str] = Field(None, description="로컬 저장된 보고서 경로")
     translated_report_path: Optional[str] = Field(None, description="로컬 저장된 번역본 경로")
 
+    # --- N06A: 보고서 문맥 기반 요약 ---
+    contextual_summary: Optional[str] = Field(None, description="refined intent 기반 요약된 보고서 요지")
+
     # --- N07: 아이디어 생성 ---
     comic_ideas: Optional[List[Dict[str, Any]]] = Field(default_factory=list, description="생성된 만화 아이디어 목록")
 
