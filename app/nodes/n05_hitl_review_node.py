@@ -8,7 +8,7 @@ from rich.prompt import Prompt, Confirm
 from bs4 import BeautifulSoup
 import re
 
-from app.workflows.state import WorkflowState
+from app.workflows.state_v2 import WorkflowState
 from app.utils.logger import get_logger
 from app.services.llm_service import LLMService
 
@@ -82,7 +82,7 @@ class N05HITLReviewNode:
         
         return action, feedback
 
-    async def _handle_modification(self, state: WorkflowState) -> WorkflowState:
+    async def _handle_modification(self, report_sec, meta_sec, llm_service) -> bool:
         """보고서 수정 요청을 처리합니다."""
         console.print("[bold yellow]수정이 필요한 부분을 설명해주세요(slm에게 prompt로 들어갈 내용입니다):[/bold yellow]")
         modification_request = Prompt.ask("수정 요청")
@@ -92,7 +92,7 @@ class N05HITLReviewNode:
 Please revise the following report based on the user's feedback.
 
 Original Report:
-{state.report_content}
+{report_sec.report_content}
 
 User's Modification Request:
 {modification_request}
@@ -101,17 +101,17 @@ Return the revised report in **HTML format only**.
 """
         
         try:
-            response = await self.llm_service.generate_text(modification_prompt)
+            response = await llm_service.generate_text(modification_prompt)
             # LLM 응답에서 generated_text 추출
             if isinstance(response, dict) and 'generated_text' in response:
                 modified_report = response['generated_text']
             else:
                 modified_report = str(response)
                 
-            state.report_content = modified_report
+            report_sec.report_content = modified_report
             
             # 수정 이력 기록
-            state.hitl_revision_history.append({
+            report_sec.hitl_revision_history.append({
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "action": "modify",
                 "feedback": modification_request,
@@ -119,91 +119,81 @@ Return the revised report in **HTML format only**.
             })
             
             console.print("[bold green]보고서가 수정되었습니다.[/bold green]")
-            return state
+            return True
             
         except Exception as e:
             logger.error(f"보고서 수정 중 오류 발생: {str(e)}")
-            state.error_message = f"보고서 수정 실패: {str(e)}"
-            state.hitl_status = "error"
-            state.workflow_status = "error"
-            return state
+            meta_sec.error_message = f"보고서 수정 실패: {str(e)}"
+            report_sec.hitl_status = "error"
+            meta_sec.current_stage = "ERROR"
+            return False
 
-    async def run(self, state: WorkflowState) -> WorkflowState:
+    async def run(self, state: WorkflowState) -> Dict[str, Any]:
         """
         HITL 리뷰 프로세스를 실행합니다.
-        
-        Args:
-            state (WorkflowState): 현재 워크플로우 상태
-
-        Returns:
-            WorkflowState: 업데이트된 워크플로우 상태
+        state_v2 구조에 맞게 Section 객체를 직접 사용하며, 주석도 최대한 유지합니다.
         """
-        logger.info(f"[{self.name}] HITL 리뷰 프로세스 시작")
-
-        # HITL 상태 초기화
-        state.hitl_status = "pending"
-        state.hitl_last_updated = datetime.now(timezone.utc).isoformat()
-
+        meta = state.meta
+        report_sec = state.report
+        node_name = self.name
+        meta.current_stage = node_name
+        meta.error_message = None
+        meta.error_log = list(meta.error_log or [])
+        report_sec.hitl_status = "pending"
+        report_sec.hitl_last_updated = datetime.now(timezone.utc).isoformat()
         # 보고서가 없는 경우 에러 처리
-        if not state.report_content:
-            state.error_message = "HITL 리뷰를 위한 보고서가 없습니다."
-            logger.error(f"[{self.name}] {state.error_message}")
-            return state
-
+        if not report_sec.report_content:
+            meta.error_message = "HITL 리뷰를 위한 보고서가 없습니다."
+            meta.current_stage = "ERROR"
+            logger.error(f"[{node_name}] {meta.error_message}")
+            return {"report": report_sec.model_dump(), "meta": meta.model_dump()}
         # HITL 리뷰 이력 초기화
-        state.hitl_revision_history = [{
-            "timestamp": state.hitl_last_updated,
+        report_sec.hitl_revision_history = [{
+            "timestamp": report_sec.hitl_last_updated,
             "action": "initial_review",
-            "report_content": state.report_content
+            "report_content": report_sec.report_content
         }]
-
         # 보고서 표시
-        await self._display_report(state.report_content)
-
+        await self._display_report(report_sec.report_content)
         modification_count = 0
         while True:
             # 사용자 피드백 받기
             action, feedback = await self._get_user_feedback()
-            
             # 피드백 저장
-            state.hitl_feedback = feedback
-            state.hitl_status = action
-            state.hitl_last_updated = datetime.now(timezone.utc).isoformat()
-            
+            report_sec.hitl_feedback = feedback
+            report_sec.hitl_status = action
+            report_sec.hitl_last_updated = datetime.now(timezone.utc).isoformat()
             # 수정 이력 기록
-            state.hitl_revision_history.append({
-                "timestamp": state.hitl_last_updated,
+            report_sec.hitl_revision_history.append({
+                "timestamp": report_sec.hitl_last_updated,
                 "action": action,
                 "feedback": feedback
             })
-
             if action == "approve":
                 console.print("[bold green]보고서가 승인되었습니다.[/bold green]")
                 break
             elif action == "reject":
                 console.print("[bold red]보고서가 거부되었습니다.[/bold red]")
-                state.error_message = f"사용자에 의해 보고서가 거부됨: {feedback}"
-                state.hitl_status = "rejected"
-                state.workflow_status = "intentionally_terminated"  # 의도적 종료 상태 추가
+                meta.error_message = f"사용자에 의해 보고서가 거부됨: {feedback}"
+                report_sec.hitl_status = "rejected"
+                meta.current_stage = "intentionally_terminated"
+                meta.workflow_status = "intentionally_terminated"
                 break
             elif action == "modify":
                 if modification_count >= self.MAX_MODIFICATION_ATTEMPTS:
                     console.print("[bold red]최대 수정 횟수(3회)를 초과했습니다.[/bold red]")
-                    state.error_message = "최대 수정 횟수를 초과했습니다."
-                    state.hitl_status = "max_modifications_reached"
-                    state.workflow_status = "intentionally_terminated"  # 의도적 종료 상태 추가
+                    meta.error_message = "최대 수정 횟수를 초과했습니다."
+                    report_sec.hitl_status = "max_modifications_reached"
+                    meta.current_stage = "intentionally_terminated"
+                    meta.workflow_status = "intentionally_terminated"
                     break
-                
-                state = await self._handle_modification(state)
-                if state.error_message:
+                success = await self._handle_modification(report_sec, meta, self.llm_service)
+                if not success and meta.error_message:
                     break
-                
                 modification_count += 1
                 console.print(f"[bold yellow]남은 수정 횟수: {self.MAX_MODIFICATION_ATTEMPTS - modification_count}회[/bold yellow]")
-                
                 # 수정된 보고서 표시
-                await self._display_report(state.report_content)
+                await self._display_report(report_sec.report_content)
                 continue
-
-        logger.info(f"[{self.name}] HITL 리뷰 프로세스 완료")
-        return state 
+        logger.info(f"[{node_name}] HITL 리뷰 프로세스 완료")
+        return {"report": report_sec.model_dump(), "meta": meta.model_dump()} 

@@ -5,7 +5,7 @@ import aiohttp
 from langgraph.graph import StateGraph, END
 
 # 워크플로우 상태 정의
-from .state import WorkflowState
+from .state_v2 import WorkflowState
 
 # 유틸리티 및 서비스 임포트
 from app.utils.logger import get_logger
@@ -90,24 +90,24 @@ async def compile_workflow(
     workflow.add_edge("n02_analyze_query", "n03_understand_and_plan")
     workflow.add_edge("n03_understand_and_plan", "n04_execute_search")
     workflow.add_edge("n04_execute_search", "n05_report_generation")
-    workflow.add_edge("n05_report_generation", "n06_save_report")
-    # workflow.add_edge("n05_report_generation", "n05_hitl_review")  # HITL 노드로 연결
-    
-    # # HITL 노드의 결과에 따른 분기 추가
-    # def should_continue(state: WorkflowState) -> bool:
-    #     """HITL 노드의 결과를 확인하여 워크플로우 계속 진행 여부를 결정"""
-    #     return state.workflow_status != "intentionally_terminated"
-    
-    # # HITL 노드에서 조건부 분기 추가
-    # workflow.add_conditional_edges(
-    #     "n05_hitl_review",
-    #     should_continue,
-    #     {
-    #         True: "n06_save_report",  # 계속 진행
-    #         False: END  # 의도적 종료
-    #     }
-    # )
-    
+    workflow.add_edge("n05_report_generation", "n05_hitl_review")
+
+    # HITL 노드의 결과에 따른 분기 추가 (Section 구조에 맞게 state.meta.workflow_status 사용)
+    def should_continue(state: WorkflowState) -> bool:
+        """HITL 노드의 결과를 확인하여 워크플로우 계속 진행 여부를 결정 (Section 구조 사용)"""
+        # state.meta.workflow_status가 'intentionally_terminated'이면 종료, 아니면 계속
+        return getattr(state.meta, "workflow_status", None) != "intentionally_terminated"
+
+    # HITL 노드에서 조건부 분기 추가
+    workflow.add_conditional_edges(
+        "n05_hitl_review",
+        should_continue,
+        {
+            True: "n06_save_report",  # 계속 진행
+            False: END  # 의도적 종료
+        }
+    )
+
     # HITL 이후 노드들
     workflow.add_edge("n06_save_report", "n06a_contextual_summary")
     workflow.add_edge("n06a_contextual_summary", "n07_comic_ideation")

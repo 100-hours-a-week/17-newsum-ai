@@ -5,7 +5,7 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
-from app.workflows.state import WorkflowState
+from app.workflows.state_v2 import WorkflowState
 from app.utils.logger import get_logger, summarize_for_logging
 from app.tools.search.Google_Search_tool import GoogleSearchTool
 
@@ -106,48 +106,44 @@ class N04ExecuteSearchNode:
         return options
 
     async def run(self, state: WorkflowState) -> Dict[str, Any]:
+        meta = state.meta
+        search_sec = state.search
+        config_sec = state.config
         node_name = self.__class__.__name__
-        trace_id = state.trace_id
-        comic_id = state.comic_id
-        config = state.config or {}
+        trace_id = meta.trace_id
+        comic_id = meta.comic_id
+        config = config_sec.config
         writer_id = config.get('writer_id', 'default_writer')
-
         extra_log_data = {'trace_id': trace_id, 'comic_id': comic_id, 'writer_id': writer_id, 'node_name': node_name}
         logger.info(f"Entering node. Executing searches based on strategy.", extra=extra_log_data)
-
         raw_search_results_accumulator: List[Dict[str, Any]] = []
-        error_log = list(state.error_log or [])
-
-        search_strategy = state.search_strategy
+        error_log = list(meta.error_log or [])
+        search_strategy = search_sec.search_strategy
         if not search_strategy or not isinstance(search_strategy, dict) or not search_strategy.get("queries"):
             msg = "Search strategy or queries missing in state. Skipping search execution."
             logger.warning(msg, extra=extra_log_data)
             error_log.append({"stage": node_name, "error": msg, "timestamp": datetime.now(timezone.utc).isoformat()})
+            meta.current_stage = "n05_report_generation"
+            meta.error_log = error_log
+            search_sec.raw_search_results = []
             return {
-                "raw_search_results": [],
-                "current_stage": "n05_report_generation",
-                "error_log": error_log
+                "search": search_sec.model_dump(),
+                "meta": meta.model_dump(),
             }
-
         queries_from_n03: List[str] = search_strategy.get("queries", [])
         selected_tools: List[str] = search_strategy.get("selected_tools", ["GoogleCSE_WebSearch"])
         writer_concept: Dict[str, Any] = search_strategy.get("writer_concept", {})
         base_search_params: Dict[str, Any] = search_strategy.get("parameters", {"max_results_per_query": 5})
-
         logger.info(f"Search plan: {len(queries_from_n03)} queries using tools: {selected_tools}", extra=extra_log_data)
-
         for query_text in queries_from_n03:
             query_extra_log = {**extra_log_data, "current_query": query_text}
             if not query_text or not isinstance(query_text, str) or query_text.strip().upper() == "N/A":
                 logger.warning(f"Skipping invalid query: '{query_text}'", extra=query_extra_log)
                 continue
-
             search_tasks_for_current_query = []
-
             for tool_name_iter in selected_tools:
                 if tool_name_iter == self.youtube_tool_identifier: # self.youtube_tool_identifier 사용
                     continue
-
                 tool_extra_log_iter = {**query_extra_log, "search_tool": tool_name_iter}
                 current_tool_params = base_search_params.copy()
                 target_sites_for_tool = self._determine_target_sites(writer_concept, config, tool_name_iter, query_text)
@@ -155,7 +151,6 @@ class N04ExecuteSearchNode:
                 current_tool_params.update(advanced_options_for_tool)
                 max_results_for_tool = current_tool_params.pop("max_results_per_query", 5)
                 api_call_coroutine = None
-
                 if target_sites_for_tool:
                     api_call_coroutine = self.search_tool.search_specific_sites_via_cse(
                         keyword=query_text, sites=target_sites_for_tool, max_results=max_results_for_tool,
@@ -173,7 +168,6 @@ class N04ExecuteSearchNode:
                      api_call_coroutine = self.search_tool.search_communities_via_cse(
                         keyword=query_text, max_results=max_results_for_tool, trace_id=trace_id, **current_tool_params
                     )
-
                 if api_call_coroutine:
                     async def search_wrapper(coroutine_to_await, tool_name_val, query_text_val, log_ctx_val): # Renamed log_ctx
                         task_error_log_wrapper = []
@@ -182,12 +176,14 @@ class N04ExecuteSearchNode:
                             results = await coroutine_to_await
                             processed_items = []
                             if results:
-                                for res_item in results:
+                                for idx, res_item in enumerate(results):
                                     if isinstance(res_item, dict):
                                         res_item['query_source'] = query_text_val
                                         res_item['tool_used'] = tool_name_val
                                         res_item['retrieved_at'] = datetime.now(timezone.utc).isoformat()
                                         res_item.setdefault('source_domain', urlparse(res_item.get("url", "")).netloc)
+                                        # rank 필드 추가 (1부터 시작)
+                                        res_item['rank'] = idx + 1
                                         processed_items.append(res_item)
                                 logger.info(f"Found {len(processed_items)} results using {tool_name_val} for '{query_text_val}'.", extra=log_ctx_val)
                             else:
@@ -201,9 +197,7 @@ class N04ExecuteSearchNode:
                                 "detail": traceback.format_exc(), "timestamp": datetime.now(timezone.utc).isoformat()
                             })
                             return task_error_log_wrapper # Return error log list
-
                     search_tasks_for_current_query.append(search_wrapper(api_call_coroutine, tool_name_iter, query_text, tool_extra_log_iter))
-
             if self.youtube_tool_identifier in selected_tools: # self.youtube_tool_identifier 사용
                 async def Youtube_and_transcript_task_runner(current_query_text, yt_trace_id):
                     yt_task_results = []
@@ -304,7 +298,7 @@ class N04ExecuteSearchNode:
         unique_results = []
         seen_identifiers = set()
 
-        for item in raw_search_results_accumulator:
+        for idx, item in enumerate(raw_search_results_accumulator):
             identifier = None
             # self.youtube_tool_identifier를 여기서 사용 (오류 1 수정)
             if item.get('tool_used') == self.youtube_tool_identifier and item.get('video_id'):
@@ -313,31 +307,31 @@ class N04ExecuteSearchNode:
                 identifier = item['url']
 
             if identifier and identifier not in seen_identifiers:
+                # rank 필드 보장 (unique_results 내에서 1부터)
+                item['rank'] = len(unique_results) + 1
                 unique_results.append(item)
                 seen_identifiers.add(identifier)
             elif not identifier:
+                item['rank'] = len(unique_results) + 1
                 unique_results.append(item)
 
         logger.info(
             f"Total raw search results collected across all queries: {len(raw_search_results_accumulator)}, Unique results after final processing: {len(unique_results)}",
             extra=extra_log_data)
 
-        update_dict = {
-            "raw_search_results": unique_results,
-            "current_stage": "n05_report_generation",
-            "error_log": error_log
+        search_sec.raw_search_results = unique_results
+        meta.current_stage = "n05_report_generation"
+        meta.error_log = error_log
+        update_dict_summary_for_log = {
+            'raw_search_results_count': len(unique_results),
+            'current_stage': meta.current_stage,
+            'error_log': error_log
         }
-
-        # 로깅용 요약 정보 (오류 2 수정)
-        update_dict_summary_for_log = {}
-        for k, v in update_dict.items():
-            if k == "raw_search_results":
-                update_dict_summary_for_log['raw_search_results_count'] = len(v) if isinstance(v, list) else 0
-            else:
-                update_dict_summary_for_log[k] = v
-
         logger.info(
             f"Exiting node. Search execution complete. Output Update Summary: {summarize_for_logging(update_dict_summary_for_log, fields_to_show=['current_stage', 'raw_search_results_count', 'error_log'])}", # 수정된 요약 사용
             extra=extra_log_data)
 
-        return update_dict
+        return {
+            "search": search_sec.model_dump(),
+            "meta": meta.model_dump(),
+        }

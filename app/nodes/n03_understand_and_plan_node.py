@@ -5,7 +5,7 @@ import re
 from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime, timezone
 
-from app.workflows.state import WorkflowState
+from app.workflows.state_v2 import WorkflowState
 from app.utils.logger import get_logger, summarize_for_logging
 from app.services.llm_service import LLMService
 
@@ -22,19 +22,17 @@ class N03UnderstandAndPlanNode:
     def __init__(self, llm_service: LLMService):
         self.llm_service = llm_service
 
-    async def _get_refined_intent_sllm(
-            self, original_query: str, n02_keywords: list[str], n02_query_type: str,
-            initial_snippets: list[dict], config: dict,  # config 추가
-            trace_id: str, extra_log_data: dict
-    ) -> Optional[str]:
+    async def _get_refined_intent_sllm(self, state: WorkflowState, extra_log_data: dict) -> Optional[str]:
+        query_sec = state.query
+        config = state.config.config
+        original_query = query_sec.original_query
+        n02_keywords = query_sec.query_context.get("extracted_keywords", [original_query])
+        n02_query_type = query_sec.query_context.get("query_type", "Unknown")
+        initial_snippets = query_sec.initial_context_results
+        writer_id = config.get('writer_id', 'default_writer')
+        target_audience = config.get('target_audience', 'general_public')
         snippets_summary = chr(10).join(
             [f"- {res.get('source', 'Unknown')}: {str(res.get('snippet', ''))[:100]}..." for res in initial_snippets])
-
-        # --- config에서 writer_id 및 target_audience 가져오기 ---
-        writer_id = config.get('writer_id', 'default_writer')
-        target_audience = config.get('target_audience', 'general_public')  # N01에서 설정된 예시 config
-
-        # --- 프롬프트 수정: config (writer_id, target_audience) 활용 ---
         prompt = f"""[System] You are an expert analyst. Your current persona is '{writer_id}' and you are addressing a '{target_audience}' audience.
 Based on the user's original query, extracted keywords, predicted query type, and initial context snippets, reformulate the user's core information need into a single, clear sentence.
 This sentence should represent their most likely true intent, staying faithful to the original query's core topic, and reflecting your persona and target audience.
@@ -56,18 +54,16 @@ Reformulated Core Intent (single sentence, considering persona and audience):"""
         logger.debug(
             f"Attempting to get refined_intent string from sLLM (persona: {writer_id}, audience: {target_audience})...",
             extra=extra_log_data)
-        result = await self.llm_service.generate_text(prompt=prompt, max_tokens=180, temperature=0.25)  # 온도 약간 더 높여 유연성
-
+        result = await self.llm_service.generate_text(prompt=prompt, max_tokens=180, temperature=0.25)
         if "error" in result or not result.get("generated_text"):
             logger.error(f"sLLM refined_intent generation failed: {result.get('error', 'No text generated')}",
                          extra=extra_log_data)
             return None
-
         refined_intent_str = result["generated_text"].strip()
         refined_intent_str = refined_intent_str.removeprefix('"').removesuffix('"').strip()
         logger.debug(f"sLLM generated refined_intent string: '{refined_intent_str}'", extra=extra_log_data)
         return refined_intent_str if refined_intent_str else None
-    
+
     def _adjust_audience_by_category(self, category: str) -> str:
         mapping = {
             "IT": "tech_industry",
@@ -79,15 +75,10 @@ Reformulated Core Intent (single sentence, considering persona and audience):"""
         }
         return mapping.get(category, "general_public")
 
-
-    async def _get_key_aspects_sllm(
-            self, refined_intent: str, config: dict,  # config 추가
-            trace_id: str, extra_log_data: dict
-    ) -> List[str]:
+    async def _get_key_aspects_sllm(self, state: WorkflowState, refined_intent: str, extra_log_data: dict) -> List[str]:
+        config = state.config.config
         writer_id = config.get('writer_id', 'default_writer')
         target_audience = config.get('target_audience', 'general_public')
-        
-        # --- 프롬프트 수정: config (writer_id, target_audience) 활용 ---
         prompt = f"""[System] Your current persona is '{writer_id}' and the target audience is '{target_audience}'.
 Based on the provided refined user intent, list up to 5 specific search queries or key aspects that would help answer this intent.
 Each aspect should be a concrete search term or phrase, suitable for the persona and audience.
@@ -105,12 +96,10 @@ Key Search Aspects (one per line, max 5, considering persona and audience):"""
             f"Attempting to get key_aspects_to_search from sLLM for intent: '{refined_intent}' (persona: {writer_id}, audience: {target_audience})...",
             extra=extra_log_data)
         result = await self.llm_service.generate_text(prompt=prompt, max_tokens=250, temperature=0.25)
-
         if "error" in result or not result.get("generated_text"):
             logger.error(f"sLLM key_aspects generation failed: {result.get('error', 'No text generated')}",
                          extra=extra_log_data)
             return []
-
         aspects_text = result["generated_text"].strip()
         key_aspects_list = [line.strip() for line in aspects_text.splitlines() if line.strip()]
         cleaned_aspects = []
@@ -122,15 +111,13 @@ Key Search Aspects (one per line, max 5, considering persona and audience):"""
         logger.debug(f"sLLM generated key_aspects: {cleaned_aspects}", extra=extra_log_data)
         return cleaned_aspects
 
-    async def _resolve_one_ambiguity_sllm(
-            self, refined_intent: str, ambiguity_term: str, initial_snippets: list[dict], config: dict,  # config 추가
-            trace_id: str, extra_log_data: dict
-    ) -> str:
+    async def _resolve_one_ambiguity_sllm(self, state: WorkflowState, refined_intent: str, ambiguity_term: str, extra_log_data: dict) -> str:
+        query_sec = state.query
+        config = state.config.config
+        initial_snippets = query_sec.initial_context_results
+        writer_id = config.get('writer_id', 'default_writer')
         snippets_summary = chr(10).join(
             [f"- {res.get('source', 'Unknown')}: {str(res.get('snippet', ''))[:80]}..." for res in initial_snippets])
-        writer_id = config.get('writer_id', 'default_writer')
-
-        # --- 프롬프트 수정: 검색어에 직접 활용 가능한 간결한 해결책 요청 ---
         prompt = f"""[System] Your current persona is '{writer_id}'.
 For the given 'Refined User Intent', the term '{ambiguity_term}' has been identified as ambiguous.
 Based on the intent and the 'Initial Context Snippets', provide a CONCISE clarification for '{ambiguity_term}'.
@@ -151,40 +138,31 @@ Concise Clarification for '{ambiguity_term}' (for search query use, or "Clarific
         logger.debug(
             f"Attempting to resolve ambiguity '{ambiguity_term}' from sLLM (persona: {writer_id}, aiming for conciseness)...",
             extra=extra_log_data)
-        result = await self.llm_service.generate_text(prompt=prompt, max_tokens=80, temperature=0.15)  # max_tokens 줄임
-
+        result = await self.llm_service.generate_text(prompt=prompt, max_tokens=80, temperature=0.15)
         if "error" in result or not result.get("generated_text"):
             logger.error(f"sLLM resolution for '{ambiguity_term}' failed: {result.get('error', 'No text generated')}",
                          extra=extra_log_data)
             return f"Clarification needed: sLLM call failed for '{ambiguity_term}'"
-
         resolution_text = result["generated_text"].strip()
         resolution_text = resolution_text.removeprefix('"').removesuffix('"').strip()
         logger.debug(f"sLLM resolution for '{ambiguity_term}': '{resolution_text}'", extra=extra_log_data)
         return resolution_text
 
-    async def _clarify_intent_via_sequential_prompting(
-            self, original_query: str, n02_context: dict, initial_results: list[dict],
-            config: dict,  # config 추가
-            trace_id: str, extra_log_data: dict
-    ) -> Dict[str, Any]:
+    async def _clarify_intent_via_sequential_prompting(self, state: WorkflowState, extra_log_data: dict) -> Dict[str, Any]:
+        query_sec = state.query
+        config = state.config.config
         final_understanding = {
-            "refined_intent": original_query,
+            "refined_intent": query_sec.original_query,
             "resolutions_for_ambiguities": {},
-            "key_aspects_to_search": [original_query],
-            "unresolved_ambiguities": n02_context.get('detected_ambiguities', []),
+            "key_aspects_to_search": [query_sec.original_query],
+            "unresolved_ambiguities": query_sec.query_context.get('detected_ambiguities', []),
             "clarification_error": None
         }
         sllm_errors = []
-
-        # 1. 정제된 의도 생성
         try:
-            n02_keywords = n02_context.get('extracted_keywords', [original_query])
-            n02_query_type = n02_context.get('query_type', 'Unknown')
-
-            refined_intent_str = await self._get_refined_intent_sllm(
-                original_query, n02_keywords, n02_query_type, initial_results, config, trace_id, extra_log_data
-            )
+            n02_keywords = query_sec.query_context.get('extracted_keywords', [query_sec.original_query])
+            n02_query_type = query_sec.query_context.get('query_type', 'Unknown')
+            refined_intent_str = await self._get_refined_intent_sllm(state, extra_log_data)
             if refined_intent_str:
                 final_understanding["refined_intent"] = refined_intent_str
             else:
@@ -192,14 +170,9 @@ Concise Clarification for '{ambiguity_term}' (for search query use, or "Clarific
         except Exception as e:
             logger.error(f"Error in _get_refined_intent_sllm: {e}", extra=extra_log_data, exc_info=True)
             sllm_errors.append(f"Refined intent step errored: {e}")
-
         current_intent_for_aspects = final_understanding["refined_intent"]
-
-        # 2. 검색할 핵심 주제 생성
         try:
-            key_aspects_list = await self._get_key_aspects_sllm(
-                current_intent_for_aspects, config, trace_id, extra_log_data
-            )
+            key_aspects_list = await self._get_key_aspects_sllm(state, current_intent_for_aspects, extra_log_data)
             if key_aspects_list:
                 final_understanding["key_aspects_to_search"] = key_aspects_list
             else:
@@ -208,9 +181,7 @@ Concise Clarification for '{ambiguity_term}' (for search query use, or "Clarific
         except Exception as e:
             logger.error(f"Error in _get_key_aspects_sllm: {e}", extra=extra_log_data, exc_info=True)
             sllm_errors.append(f"Key aspects step errored: {e}")
-
-        # 3. 모호성 해결
-        detected_ambiguities = n02_context.get('detected_ambiguities', [])
+        detected_ambiguities = query_sec.query_context.get('detected_ambiguities', [])
         resolutions = {}
         unresolved = []
         if detected_ambiguities:
@@ -219,9 +190,7 @@ Concise Clarification for '{ambiguity_term}' (for search query use, or "Clarific
                 extra=extra_log_data)
             for term in detected_ambiguities:
                 try:
-                    resolution = await self._resolve_one_ambiguity_sllm(
-                        final_understanding["refined_intent"], term, initial_results, config, trace_id, extra_log_data
-                    )
+                    resolution = await self._resolve_one_ambiguity_sllm(state, final_understanding["refined_intent"], term, extra_log_data)
                     resolutions[f"'{term}'"] = resolution
                     if "Clarification needed:" in resolution or "sLLM call failed" in resolution:
                         unresolved.append(term)
@@ -234,12 +203,10 @@ Concise Clarification for '{ambiguity_term}' (for search query use, or "Clarific
             final_understanding["unresolved_ambiguities"] = unresolved
         else:
             final_understanding["unresolved_ambiguities"] = []
-
         if sllm_errors:
             final_understanding["clarification_error"] = "; ".join(sllm_errors)
             logger.warning(f"sLLM processing in N03 encountered errors: {final_understanding['clarification_error']}",
                            extra=extra_log_data)
-
         logger.info(
             f"Final understanding after sequential prompting (upgraded N03): {summarize_for_logging(final_understanding)}",
             extra=extra_log_data)
@@ -335,116 +302,90 @@ Concise Clarification for '{ambiguity_term}' (for search query use, or "Clarific
         return params
 
     async def run(self, state: WorkflowState) -> Dict[str, Any]:
+        meta = state.meta
+        query_sec = state.query
+        search_sec = state.search
+        config_sec = state.config
         node_name = self.__class__.__name__
-        trace_id = state.trace_id
-        comic_id = state.comic_id
-        # config는 N01에서 초기화되어 state에 존재한다고 가정
-        config = state.config or {}  # config 가져오기
-        writer_id = config.get('writer_id', 'default_writer')  # run 메서드 내에서 사용할 writer_id
-
-        error_log = list(state.error_log or [])
+        trace_id = meta.trace_id
+        comic_id = meta.comic_id
+        config = config_sec.config
+        writer_id = config.get('writer_id', 'default_writer')
+        error_log = list(meta.error_log or [])
         extra = {'trace_id': trace_id, 'comic_id': comic_id, 'writer_id': writer_id, 'node_name': node_name,
-                 'retry_count': state.retry_count or 0}
-
+                 'retry_count': meta.retry_count or 0}
         logger.info(
-            f"Entering node. Input State Summary: {summarize_for_logging(state.model_dump(exclude_none=True), fields_to_show=['original_query', 'query_context', 'initial_context_results', 'current_stage', 'config'])}",
+            f"Entering node. Input State Summary: {summarize_for_logging(state.model_dump(exclude_none=True), fields_to_show=['query.original_query', 'query.query_context', 'query.initial_context_results', 'meta.current_stage', 'config.config'])}",
             extra=extra)
-
-        if not state.original_query or not isinstance(state.query_context,
-                                                      dict) or state.initial_context_results is None:
+        if not query_sec.original_query or not isinstance(query_sec.query_context, dict) or query_sec.initial_context_results is None:
             error_msg = "Required inputs are missing for N03."
             logger.error(error_msg, extra=extra)
             error_log.append(
                 {"stage": node_name, "error": error_msg, "timestamp": datetime.now(timezone.utc).isoformat()})
-            return {"error_log": error_log, "current_stage": "ERROR", "error_message": error_msg}
-
-        # --- target_audience를 query_category 기반으로 동적으로 결정 ---
-        query_category = state.query_context.get('query_category', 'Other')
+            meta.current_stage = "ERROR"
+            meta.error_log = error_log
+            meta.error_message = error_msg
+            return {"meta": meta.model_dump()}
+        query_category = query_sec.query_context.get('query_category', 'Other')
         target_audience = self._adjust_audience_by_category(query_category)
-        config = dict(config)  # 혹시 모를 side effect 방지 (복사)
+        config = dict(config)
         config['target_audience'] = target_audience
-
+        config_sec.config = config
         try:
-            # state.query_context에 _extra_log_data 임시 저장 (하위 함수에서 사용 가능하도록)
-            # 이는 상태 객체 스키마에 정의되어 있어야 하거나, 일시적 사용 후 제거해야 함
-            # 더 나은 방법은 extra_log_data를 명시적으로 전달하는 것 (이미 하고 있음)
-
-            clarified_understanding_dict = await self._clarify_intent_via_sequential_prompting(
-                state.original_query,
-                state.query_context,
-                state.initial_context_results,
-                config,  # config 전달 (target_audience 반영)
-                trace_id,
-                extra
-            )
-
+            clarified_understanding_dict = await self._clarify_intent_via_sequential_prompting(state, extra)
             if clarified_understanding_dict.get("clarification_error"):
                 error_log.append({
                     "stage": f"{node_name}._clarify_sequential",
                     "error": clarified_understanding_dict["clarification_error"],
                     "timestamp": datetime.now(timezone.utc).isoformat()
                 })
-
-            updated_query_context = {**state.query_context, **clarified_understanding_dict}
-
-            refined_intent = updated_query_context.get("refined_intent", state.original_query)
-            query_type = updated_query_context.get("query_type")
-
-            # _determine_writer_concept에 config 전달
+            query_sec.query_context.update(clarified_understanding_dict)
+            refined_intent = query_sec.query_context.get("refined_intent", query_sec.original_query)
+            query_type = query_sec.query_context.get("query_type")
             writer_concept = self._determine_writer_concept(refined_intent, query_type, config)
             logger.info(f"Determined Writer Concept: {writer_concept}", extra=extra)
-
-            key_aspects = updated_query_context.get("key_aspects_to_search", [])
-            if not key_aspects or key_aspects == [state.original_query]:  # 또는 refined_intent가 fallback 된 경우
-                key_aspects = [refined_intent] if refined_intent and refined_intent != state.original_query else [
-                    state.original_query]
-
+            key_aspects = query_sec.query_context.get("key_aspects_to_search", [])
+            if not key_aspects or key_aspects == [query_sec.original_query]:
+                key_aspects = [refined_intent] if refined_intent and refined_intent != query_sec.original_query else [query_sec.original_query]
             selected_tools = self._select_search_tools(writer_concept, key_aspects)
             logger.info(f"Selected Search Tools: {selected_tools}", extra=extra)
-
-            resolved_ambiguities = updated_query_context.get("resolutions_for_ambiguities", {})
-            # _generate_final_search_queries에 config를 직접 전달할 필요는 없으나,
-            # query_context_full을 통해 _extra_log_data 등 간접 활용 가능
-            updated_query_context['_extra_log_data'] = extra  # 임시로 추가하여 로깅에 사용
+            resolved_ambiguities = query_sec.query_context.get("resolutions_for_ambiguities", {})
+            query_sec.query_context['_extra_log_data'] = extra
             final_queries = self._generate_final_search_queries(
-                refined_intent, resolved_ambiguities, key_aspects, writer_concept, updated_query_context, selected_tools
+                refined_intent, resolved_ambiguities, key_aspects, writer_concept, query_sec.query_context, selected_tools
             )
-            updated_query_context.pop('_extra_log_data', None)  # 사용 후 제거
-
+            query_sec.query_context.pop('_extra_log_data', None)
             if not final_queries:
-                final_queries = [state.original_query]
+                final_queries = [query_sec.original_query]
             logger.info(f"Generated Final Search Queries ({len(final_queries)}): {final_queries}", extra=extra)
-
             search_params = self._define_search_parameters(writer_concept)
             logger.info(f"Defined Search Parameters: {search_params}", extra=extra)
-
             search_strategy = {
                 "writer_concept": writer_concept,
                 "selected_tools": selected_tools,
                 "queries": final_queries,
                 "parameters": search_params
             }
-            next_stage = "n04_execute_search"
-
-            update_dict = {
-                "query_context": updated_query_context,
-                "search_strategy": search_strategy,
-                "current_stage": next_stage,
-                "error_log": error_log
-            }
-
+            search_sec.search_strategy = search_strategy
+            meta.current_stage = "n04_execute_search"
+            meta.error_log = error_log
+            meta.error_message = clarified_understanding_dict.get("clarification_error")
             logger.info(
-                f"Exiting node. Search Strategy Created. Output Update Summary: {summarize_for_logging(update_dict, fields_to_show=['current_stage', 'search_strategy.queries'])}",
+                f"Exiting node. Search Strategy Created. Output Update Summary: {summarize_for_logging({'meta': meta.model_dump(), 'search': search_sec.model_dump()}, fields_to_show=['meta.current_stage', 'search.search_strategy.queries'])}",
                 extra=extra)
-            return update_dict
-
+            return {
+                "query": query_sec.model_dump(),
+                "search": search_sec.model_dump(),
+                "meta": meta.model_dump(),
+            }
         except Exception as e:
             error_msg = f"Unexpected error in N03 node execution: {e}"
             logger.exception(error_msg, extra=extra)
             error_log.append({"stage": node_name, "error": error_msg, "detail": traceback.format_exc(),
                               "timestamp": datetime.now(timezone.utc).isoformat()})
+            meta.current_stage = "ERROR"
+            meta.error_log = error_log
+            meta.error_message = f"N03 Exception: {error_msg}"
             return {
-                "error_log": error_log,
-                "current_stage": "ERROR",
-                "error_message": f"N03 Exception: {error_msg}"
+                "meta": meta.model_dump(),
             }

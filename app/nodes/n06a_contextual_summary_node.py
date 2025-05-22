@@ -4,7 +4,7 @@ from typing import Dict, Any
 from datetime import datetime, timezone
 
 from app.utils.logger import get_logger, summarize_for_logging
-from app.workflows.state import WorkflowState
+from app.workflows.state_v2 import WorkflowState
 from app.services.llm_service import LLMService
 
 logger = get_logger(__name__)
@@ -24,32 +24,34 @@ class N06AContextualSummaryNode:
         return re.sub(r'\s+', ' ', text).strip()
 
     async def run(self, state: WorkflowState) -> Dict[str, Any]:
+        """
+        보고서 내용을 요약하여 report Section에 저장하고, stage/error 등은 meta Section에 저장합니다.
+        반환값은 state_v2 구조에 맞게 {"report": ..., "meta": ...} 형태로 반환합니다.
+        """
+        meta = state.meta
+        report_sec = state.report
+        query_sec = state.query
+        config_sec = state.config
         node_name = self.__class__.__name__
-        trace_id = state.trace_id
-        comic_id = state.comic_id
-        retry_count = state.retry_count or 0
-
+        trace_id = meta.trace_id
+        comic_id = meta.comic_id
+        retry_count = meta.retry_count or 0
         extra = {
             "trace_id": trace_id,
             "comic_id": comic_id,
             "node_name": node_name,
             "retry_count": retry_count
         }
-
-        logger.info(f"Entering node. Input State Summary: {summarize_for_logging(state, fields_to_show=['report_content', 'query_context'])}", extra=extra)
-
-        error_log = list(state.error_log or [])
-
+        logger.info(f"Entering node. Input State Summary: {summarize_for_logging(state, fields_to_show=['report.report_content', 'query.query_context'])}", extra=extra)
+        error_log = list(meta.error_log or [])
         try:
-            if not state.report_content:
+            if not report_sec.report_content:
                 raise ValueError("report_content is missing")
-
             # 입력값 추출
-            report_text = self._strip_html(state.report_content)
-            refined_intent = state.query_context.get("refined_intent", state.original_query)
-            category = state.query_context.get("query_category", "Other")
-            audience = state.config.get("target_audience", "general_public")
-
+            report_text = self._strip_html(report_sec.report_content)
+            refined_intent = query_sec.query_context.get("refined_intent", query_sec.original_query)
+            category = query_sec.query_context.get("query_category", "Other")
+            audience = config_sec.config.get("target_audience", "general_public")
             # 프롬프트 구성
             system_msg = "You are a helpful summarization assistant."
             user_msg = f"""
@@ -61,7 +63,6 @@ Summarize the following report with the following rules:
 Report:
 {report_text[:8000]}
             """
-
             result = await self.llm_service.generate_text(
                 messages=[
                     {"role": "system", "content": system_msg},
@@ -70,17 +71,15 @@ Report:
                 max_tokens=1000,
                 temperature=0.3
             )
-
             summary_text = result.get("generated_text", "").strip()
-            state.contextual_summary = summary_text
-
+            report_sec.contextual_summary = summary_text
+            meta.current_stage = "n07_comic_ideation"
+            meta.error_log = error_log
             logger.info(f"Generated contextual summary (truncated): {summary_text[:200]}...", extra=extra)
             return {
-                "contextual_summary": summary_text,
-                "current_stage": "n07_comic_ideation",
-                "error_log": error_log
+                "report": report_sec.model_dump(),
+                "meta": meta.model_dump(),
             }
-
         except Exception as e:
             error_msg = f"Error in N06AContextualSummaryNode: {e}"
             logger.exception(error_msg, extra=extra)
@@ -90,8 +89,10 @@ Report:
                 "detail": traceback.format_exc(),
                 "timestamp": datetime.now(timezone.utc).isoformat()
             })
+            meta.current_stage = "ERROR"
+            meta.error_log = error_log
+            meta.error_message = error_msg
             return {
-                "current_stage": "ERROR",
-                "error_message": error_msg,
-                "error_log": error_log
+                "report": report_sec.model_dump(),
+                "meta": meta.model_dump(),
             }

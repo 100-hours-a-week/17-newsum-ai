@@ -1,10 +1,12 @@
 # ai/app/nodes/n02_analyze_query_node.py
+from __future__ import annotations
+
 import json  # JSON 파싱은 이제 사용하지 않지만, 혹시 모를 상황 대비 또는 로깅용으로 남겨둘 수 있음
 import traceback
 from typing import Dict, Any, List, Optional  # Optional 추가
 from datetime import datetime, timezone
 
-from app.workflows.state import WorkflowState
+from app.workflows.state_v2 import WorkflowState
 from app.utils.logger import get_logger, summarize_for_logging
 from app.services.llm_service import LLMService
 from app.tools.search.Google_Search_tool import GoogleSearchTool
@@ -278,67 +280,71 @@ Detected Ambiguities (comma-separated, from original query):"""
 
     async def run(self, state: WorkflowState) -> Dict[str, Any]:
         node_name = self.__class__.__name__
-        trace_id = state.trace_id
-        comic_id = state.comic_id
-        writer_id = state.config.get('writer_id', 'default') if isinstance(state.config, dict) else 'default'
-        original_query = state.original_query
-        error_log = list(state.error_log or [])
-        retry_count = state.retry_count or 0
+        meta, query_sec, config_sec = state.meta, state.query, state.config.config
 
-        extra = {'trace_id': trace_id, 'comic_id': comic_id, 'writer_id': writer_id, 'node_name': node_name,
-                 'retry_count': retry_count}
+        trace_id = meta.trace_id
+        comic_id = meta.comic_id
+        retry_count = meta.retry_count
+        error_log = list(meta.error_log)
+
+        extra = {
+            "trace_id": trace_id,
+            "comic_id": comic_id,
+            "node_name": node_name,
+            "retry_count": retry_count,
+        }
         logger.info(
-            f"Entering node. Input State Summary: {summarize_for_logging(state.model_dump(exclude_none=True), fields_to_show=['original_query', 'current_stage', 'config'])}",
-            extra=extra)
+            "Entering node (section‑aware). Input summary: "
+            f"{summarize_for_logging(state.model_dump(exclude_none=True), fields_to_show=['query.original_query'])}",
+            extra=extra,
+        )
 
-        query_context = {}
-        initial_context_results = []
+        original_query = query_sec.original_query or ""
+        # original_query가 비어 있으면 config에서 가져오거나 meta에서 가져오기 (초기 진입 시)
+        if not original_query:
+            original_query = config_sec.get("original_query") or getattr(meta, "original_query", "")
+            query_sec.original_query = original_query
+
         try:
-            # --- _analyze_query_sequentially 호출 (새로운 방식) ---
+            # 1. 쿼리 분석 (키워드, 유형, 카테고리, 모호성)
             query_analysis_results = await self._analyze_query_sequentially(original_query, trace_id, extra)
-            # -------------------------------------------------------
-            query_context = query_analysis_results  # 여기에는 extracted_keywords, query_type, query_category, detected_ambiguities, error 포함
+            # 2. 초기 컨텍스트 검색
+            initial_context_results = await self._fetch_initial_context_revised(
+                original_query,
+                query_analysis_results.get("extracted_keywords", [original_query]),
+                trace_id,
+                extra
+            )
 
-            # query_context에 sLLM 처리 중 발생한 오류가 있다면 error_log에 추가
-            if query_context.get("error"):
-                error_log.append({
-                    "stage": f"{node_name}._analyze_query_sequentially",
-                    "error": query_context["error"],
-                    "timestamp": datetime.now(timezone.utc).isoformat()
-                })
-            # 오류 유무와 관계없이 query_context는 상태에 저장 (N03에서 활용 가능하도록)
+            # 3. 결과를 state_v2 구조에 맞게 Section 객체에 직접 할당
+            query_sec.query_context = query_analysis_results
+            query_sec.initial_context_results = initial_context_results
+            meta.current_stage = "n03_understand_and_plan"
+            meta.error_log = error_log
+            meta.error_message = query_analysis_results.get("error")
 
-            extracted_terms = query_context.get("extracted_keywords", [original_query])  # fallback은 유지
-            fetch_log_data = extra.copy()
-            initial_context_results = await self._fetch_initial_context_revised(original_query, extracted_terms,
-                                                                                trace_id, fetch_log_data)
-            if 'search_errors' in fetch_log_data:
-                for err_info in fetch_log_data['search_errors']:
-                    error_log.append({
-                        "stage": f"{node_name}._fetch_context",
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                        **err_info
-                    })
-            update_dict = {
-                "query_context": query_context,  # sLLM 분석 결과 (오류 메시지 포함 가능)
-                "initial_context_results": initial_context_results,
-                "current_stage": "n03_understand_and_plan",
-                "error_log": error_log
-            }
             logger.info(
-                f"Exiting node. Output Update Summary: {summarize_for_logging(update_dict, fields_to_show=['current_stage', 'query_context'])}",
-                extra=extra)
-            return update_dict
-        except Exception as e:
-            error_msg = f"Unexpected error in N02 node execution: {e}"
-            logger.exception(error_msg, extra=extra)
-            error_log.append({"stage": node_name, "error": error_msg, "detail": traceback.format_exc(),
-                              "timestamp": datetime.now(timezone.utc).isoformat()})
-            # 심각한 예외 발생 시, query_context는 빈 상태로 다음으로 넘어갈 수 있음
-            # 또는 에러 상태로 즉시 종료하는 것이 나을 수도 있음 (현재는 다음 노드로 넘김)
+                "Exiting node. Output Update Summary: "
+                f"{summarize_for_logging({'meta': meta.model_dump()}, fields_to_show=['meta.current_stage'])}",
+                extra=extra,
+            )
             return {
-                "query_context": {"error": f"N02 Unhandled Exception: {str(e)}"},  # 최소한의 컨텍스트 전달
-                "error_log": error_log,
-                "current_stage": "n03_understand_and_plan",  # 또는 "ERROR"
-                "error_message": f"N02 Exception: {error_msg}"
+                "query": query_sec.model_dump(),
+                "meta": meta.model_dump(),
+            }
+
+        except Exception as e:
+            err_msg = f"N02 unexpected error: {e}"
+            logger.exception(err_msg, extra=extra)
+            error_log.append({
+                "stage": node_name,
+                "error": str(e),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+            return {
+                "meta": {
+                    "current_stage": "ERROR",
+                    "error_log": error_log,
+                    "error_message": err_msg,
+                }
             }

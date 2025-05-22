@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone
 
-from app.workflows.state import WorkflowState
+from app.workflows.state_v2 import WorkflowState
 from app.utils.logger import get_logger, summarize_for_logging  # PROJECT_ROOT는 여기서 직접 사용 안함
 from app.config.settings import Settings
 from app.services.image_service import ImageService  # 제공된 ImageService 사용
@@ -91,30 +91,37 @@ class N09ImageGenerationNode:
         return image_result_info
 
     async def run(self, state: WorkflowState) -> Dict[str, Any]:
-        # (이전 답변의 run 메소드 내용과 거의 동일, 오류 상태 결정 로직은 이전 로그 분석 후 수정된 버전 사용)
+        """
+        이미지 생성 결과를 image Section에, stage/error 등은 meta Section에 직접 할당합니다.
+        반환값은 state_v2 구조에 맞게 {"image": ..., "meta": ...} 형태로 반환합니다.
+        """
         node_name = self.__class__.__name__
-        trace_id = state.trace_id
-        comic_id = state.comic_id
+        meta = state.meta
+        image_sec = state.image
+        scenario_sec = state.scenario
+        config_sec = state.config
+        trace_id = meta.trace_id
+        comic_id = meta.comic_id
         if not comic_id:
             error_msg = "N09 Error: comic_id is missing. Cannot proceed."
             logger.error(error_msg, extra={'trace_id': trace_id, 'node_name': node_name})
-            state.error_log.append(
+            meta.current_stage = "ERROR"
+            meta.error_log = list(meta.error_log or [])
+            meta.error_log.append(
                 {"stage": node_name, "error": error_msg, "timestamp": datetime.now(timezone.utc).isoformat()})
-            return {"current_stage": "ERROR", "error_log": state.error_log, "error_message": error_msg}
-
-        config = state.config or {}
+            meta.error_message = error_msg
+            return {"image": image_sec.model_dump(), "meta": meta.model_dump()}
+        config = config_sec.config or {}
         writer_id = config.get('writer_id', 'default_writer')
         image_style_config_main = config.get('image_generation_style', {})
         extra_log_data = {'trace_id': trace_id, 'comic_id': comic_id, 'writer_id': writer_id, 'node_name': node_name}
         logger.info(f"Entering node {node_name}. Generating images for scenarios and thumbnail.", extra=extra_log_data)
-
         generated_images_overall: List[Dict[str, Any]] = []
         node_specific_error_log = []
         tasks = []
-
         # 1. 컷 이미지 생성 작업 추가
-        if state.comic_scenarios and isinstance(state.comic_scenarios, list):
-            for i, scene_info in enumerate(state.comic_scenarios):
+        if scenario_sec.comic_scenarios and isinstance(scenario_sec.comic_scenarios, list):
+            for i, scene_info in enumerate(scenario_sec.comic_scenarios):
                 if isinstance(scene_info, dict) and scene_info.get("final_image_prompt"):
                     scene_id_for_style = scene_info.get("scene_identifier", f"default_scene_{i}")
                     current_scene_style = image_style_config_main.get(scene_id_for_style,
@@ -137,12 +144,11 @@ class N09ImageGenerationNode:
                          "timestamp": datetime.now(timezone.utc).isoformat()})
         else:
             logger.warning("N09: No comic scenarios in state. Skipping main image generation.", extra=extra_log_data)
-
         # 2. 썸네일 이미지 생성 작업 추가
-        if state.thumbnail_image_prompt:
+        if scenario_sec.thumbnail_image_prompt:
             thumbnail_style = image_style_config_main.get("thumbnail", image_style_config_main.get("default", {}))
             tasks.append(self._generate_single_image_entry(
-                prompt=state.thumbnail_image_prompt, scene_identifier="thumbnail_01", is_thumbnail=True,
+                prompt=scenario_sec.thumbnail_image_prompt, scene_identifier="thumbnail_01", is_thumbnail=True,
                 image_style_config=thumbnail_style, trace_id=trace_id, extra_log_data=extra_log_data  # type: ignore
             ))
         else:
@@ -154,16 +160,13 @@ class N09ImageGenerationNode:
             generated_images_overall.append(
                 {"scene_identifier": "thumbnail_01", "prompt_used": None, "image_path": None, "image_url": None,
                  "is_thumbnail": True, "error": "Thumbnail prompt missing"})
-
         if tasks:
             logger.info(
                 f"N09: Starting {len(tasks)} total image generation tasks. Max parallel: {MAX_PARALLEL_IMAGE_GENERATION}",
                 extra=extra_log_data)
             semaphore = asyncio.Semaphore(MAX_PARALLEL_IMAGE_GENERATION)
-
             async def run_with_semaphore(task_coro):
                 async with semaphore: return await task_coro
-
             results = await asyncio.gather(*(run_with_semaphore(task) for task in tasks), return_exceptions=True)
             for result_item in results:
                 if isinstance(result_item, Exception):
@@ -184,27 +187,23 @@ class N09ImageGenerationNode:
                              "timestamp": datetime.now(timezone.utc).isoformat()})
         else:
             logger.info("N09: No image generation tasks to run.", extra=extra_log_data)
-
-        state.error_log.extend(node_specific_error_log)
-
-        # 최종 상태 결정 로직 (TypeError 해결된 버전)
+        meta.error_log = list(meta.error_log or []) + node_specific_error_log
+        # 최종 상태 결정 로직
         final_status = "N09_IMAGE_GENERATION_COMPLETED"
         attempted_images_with_prompts = [
             img for img in generated_images_overall
             if img.get("prompt_used") is not None or
-               (img.get("is_thumbnail") and state.thumbnail_image_prompt)  # 썸네일 프롬프트가 있었던 경우
+               (img.get("is_thumbnail") and scenario_sec.thumbnail_image_prompt)
         ]
-
         has_actual_errors = False
         for img in attempted_images_with_prompts:
-            img_error_val = img.get("error", "")  # None일 경우 빈 문자열로 처리
+            img_error_val = img.get("error", "")
             if img_error_val and \
                     img_error_val != "Thumbnail prompt missing" and \
                     "Skipping image generation" not in img_error_val:
                 has_actual_errors = True
                 break
-
-        expected_images_count = len(state.comic_scenarios or [])
+        expected_images_count = len(scenario_sec.comic_scenarios or [])
         generated_images_count = len([
             img for img in generated_images_overall
             if (img.get("image_path") or img.get("image_url")) and not img.get("is_thumbnail")
@@ -227,27 +226,26 @@ class N09ImageGenerationNode:
                 "timestamp": datetime.now(timezone.utc).isoformat()
             })
             final_status = "ERROR"
-
         if has_actual_errors:
             final_status = "N09_COMPLETED_WITH_ERRORS"
-
         successful_generations = [
             img for img in attempted_images_with_prompts
             if not img.get("error") and (img.get("image_path") or img.get("image_url"))
         ]
-
         if attempted_images_with_prompts and not successful_generations:
-            if has_actual_errors:  # 실제 오류로 인해 성공 못한 경우
+            if has_actual_errors:
                 final_status = "N09_IMAGE_GENERATION_FAILED"
-        elif not attempted_images_with_prompts and (state.comic_scenarios or state.thumbnail_image_prompt):
-            final_status = "N09_IMAGE_GENERATION_SKIPPED"  # 입력은 있었으나 작업이 생성 안됨
-
-        update_dict = {"generated_comic_images": generated_images_overall, "current_stage": final_status,
-                       "error_log": state.error_log}
+        elif not attempted_images_with_prompts and (scenario_sec.comic_scenarios or scenario_sec.thumbnail_image_prompt):
+            final_status = "N09_IMAGE_GENERATION_SKIPPED"
+        image_sec.generated_comic_images = generated_images_overall
+        meta.current_stage = final_status
         logger.info(
             f"Exiting node {node_name}. Status: {final_status}. Total image entries: {len(generated_images_overall)}. Successful generations: {len(successful_generations)}.",
             extra=extra_log_data)
-        return update_dict
+        return {
+            "image": image_sec.model_dump(),
+            "meta": meta.model_dump(),
+        }
 
     async def close_services(self):
         if hasattr(self.image_service, 'close') and asyncio.iscoroutinefunction(

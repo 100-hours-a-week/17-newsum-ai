@@ -3,7 +3,7 @@ import re, traceback
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from app.workflows.state import WorkflowState
+from app.workflows.state_v2 import WorkflowState
 from app.utils.logger import get_logger, summarize_for_logging
 from app.services.llm_service import LLMService
 
@@ -214,43 +214,52 @@ class N07ComicIdeationNode:
 
     # ──────────────────── 3. run() ────────────────────
     async def run(self, state: WorkflowState) -> Dict[str, Any]:
+        """
+        만화 아이디어 생성 결과를 idea Section에, stage/error 등은 meta Section에 직접 할당합니다.
+        반환값은 state_v2 구조에 맞게 {"idea": ..., "meta": ...} 형태로 반환합니다.
+        """
+        meta = state.meta
+        idea_sec = state.idea
+        report_sec = state.report
+        query_sec = state.query
+        config_sec = state.config
         node_name = self.__class__.__name__
-        extra = {"trace_id": state.trace_id, "comic_id": state.comic_id, "node_name": node_name}
+        extra = {"trace_id": meta.trace_id, "comic_id": meta.comic_id, "node_name": node_name}
         logger.info("Entering N07.", extra=extra)
-
-        error_log = list(state.error_log or [])
-        if not state.report_content:
+        error_log = list(meta.error_log or [])
+        if not report_sec.report_content:
             logger.error("report_content missing.", extra=extra)
-            return {"comic_ideas": [], "current_stage": "ERROR", "error_log": error_log}
-
-        refined_intent = state.query_context.get("refined_intent", state.original_query)
-        category       = state.query_context.get("query_category", "Other")
-        audience       = state.config.get("target_audience", "general_public")
-        contextual_sum = getattr(state, "contextual_summary", None)
-
+            meta.current_stage = "ERROR"
+            meta.error_log = error_log
+            return {"idea": idea_sec.model_dump(), "meta": meta.model_dump()}
+        refined_intent = query_sec.query_context.get("refined_intent", query_sec.original_query)
+        category       = query_sec.query_context.get("query_category", "Other")
+        audience       = config_sec.config.get("target_audience", "general_public")
+        contextual_sum = getattr(report_sec, "contextual_summary", None)
         # 1) Summary 확보
         summary_text = await self._preprocess_report_content(
-            state.report_content, state.trace_id, extra, contextual_sum
+            report_sec.report_content, meta.trace_id, extra, contextual_sum
         )
         if len(summary_text) < 50:
             logger.error("Pre-processed summary too short.", extra=extra)
-            return {"comic_ideas": [], "current_stage": "ERROR", "error_log": error_log}
-
+            meta.current_stage = "ERROR"
+            meta.error_log = error_log
+            return {"idea": idea_sec.model_dump(), "meta": meta.model_dump()}
         # 2) Insight 추출
         insights = await self._extract_key_insights_sllm(
-            summary_text, refined_intent, category, audience, state.trace_id, extra
+            summary_text, refined_intent, category, audience, meta.trace_id, extra
         )
-
         # 3) Idea 생성
         ideas = await self._generate_comic_ideas_sllm(
-            summary_text, insights, refined_intent, state.original_query,
-            category, MAX_IDEAS_TO_GENERATE, state.config or {},
-            state.trace_id, extra
+            summary_text, insights, refined_intent, query_sec.original_query,
+            category, MAX_IDEAS_TO_GENERATE, config_sec.config or {},
+            meta.trace_id, extra
         )
-
+        idea_sec.comic_ideas = ideas
+        meta.current_stage = "n08_scenario_generation"
+        meta.error_log = error_log
         logger.info(f"Generated {len(ideas)} comic ideas.", extra=extra)
         return {
-            "comic_ideas": ideas,
-            "current_stage": "n08_scenario_generation",
-            "error_log": error_log,
+            "idea": idea_sec.model_dump(),
+            "meta": meta.model_dump(),
         }

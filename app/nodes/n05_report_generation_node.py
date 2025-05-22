@@ -4,7 +4,7 @@ import jinja2  # Jinja2 임포트
 from typing import Dict, Any, List, Optional, Set, Tuple
 from datetime import datetime, timezone
 
-from app.workflows.state import WorkflowState
+from app.workflows.state_v2 import WorkflowState
 from app.utils.logger import get_logger, summarize_for_logging
 from app.services.llm_service import LLMService
 
@@ -277,18 +277,35 @@ Report Conclusion:"""
         return conclusion or "Conclusion could not be generated."
 
     async def run(self, state: WorkflowState) -> Dict[str, Any]:
+        meta = state.meta
+        report_sec = state.report
+        query_sec = state.query
+        search_sec = state.search
+        config_sec = state.config
+
         node_name = self.__class__.__name__
-        trace_id = state.trace_id
-        comic_id = state.comic_id
-        config = state.config or {}
+        trace_id = meta.trace_id
+        comic_id = meta.comic_id
+        config = config_sec.config
         writer_id = config.get('writer_id', 'default_writer')
 
         extra_log_data = {'trace_id': trace_id, 'comic_id': comic_id, 'writer_id': writer_id, 'node_name': node_name}
         logger.info(f"Entering node. Generating report.", extra=extra_log_data)
 
-        report_data_for_template: Dict[str, Any] = {  # Jinja2 템플릿에 전달될 데이터
+        error_log = list(meta.error_log or [])
+
+        query_context = query_sec.query_context
+        raw_search_results = search_sec.raw_search_results
+
+        # raw_search_results의 각 dict에 rank 필드가 없으면 자동 부여 (1부터)
+        if raw_search_results and isinstance(raw_search_results, list):
+            for idx, item in enumerate(raw_search_results):
+                if isinstance(item, dict) and 'rank' not in item:
+                    item['rank'] = idx + 1
+
+        report_data_for_template: Dict[str, Any] = {
             "title": "Research Report (Title to be generated)",
-            "original_query": state.original_query,
+            "original_query": query_sec.original_query,
             "refined_intent": "N/A",
             "introduction": "N/A",
             "sections": [],  # List of {"aspect_title": str, "content": str, "supporting_snippets": List[Dict]}
@@ -297,23 +314,22 @@ Report Conclusion:"""
             "generation_timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
             "writer_id": writer_id
         }
-        error_log = list(state.error_log or [])
 
-        query_context = state.query_context
-        if not query_context or not state.raw_search_results:
+        if not query_context or not raw_search_results:
             error_msg = "Query context or raw search results are missing. Cannot generate report."
             logger.error(error_msg, extra=extra_log_data)
             error_log.append(
                 {"stage": node_name, "error": error_msg, "timestamp": datetime.now(timezone.utc).isoformat()})
-            # 보고서 내용 없이 다음 단계로 (오류 상태로)
+            meta.current_stage = "ERROR"
+            meta.error_log = error_log
+            meta.error_message = error_msg
+            report_sec.report_content = "Error: Missing required data for report generation."
             return {
-                "report_content": "Error: Missing required data for report generation.",
-                "current_stage": "ERROR",  # 또는 다음 단계
-                "error_message": error_msg,
-                "error_log": error_log
+                "report": report_sec.model_dump(),
+                "meta": meta.model_dump(),
             }
 
-        refined_intent = query_context.get("refined_intent", state.original_query)
+        refined_intent = query_context.get("refined_intent", query_sec.original_query)
         report_data_for_template["refined_intent"] = refined_intent
 
         # 1. 보고서 제목 생성 (sLLM 호출)
@@ -324,12 +340,11 @@ Report Conclusion:"""
             logger.error(f"Failed to generate report title: {e}", exc_info=True, extra=extra_log_data)
             error_log.append({"stage": f"{node_name}._generate_title", "error": str(e),
                               "timestamp": datetime.now(timezone.utc).isoformat()})
-            # Fallback title은 이미 설정됨
 
         # 2. 서론 생성 (sLLM 호출)
         try:
             introduction = await self._generate_introduction_sllm(
-                state.original_query, refined_intent, config, trace_id, extra_log_data
+                query_sec.original_query, refined_intent, config, trace_id, extra_log_data
             )
             report_data_for_template["introduction"] = introduction
         except Exception as e:
@@ -339,9 +354,8 @@ Report Conclusion:"""
 
         # 3. 각 주제(Aspect)별 본론 섹션 생성
         key_aspects = query_context.get("key_aspects_to_search", [])
-        all_raw_snippets = state.raw_search_results or []
-
-        processed_source_urls_for_main_list: Set[str] = set()  # 전체 보고서 참고자료 중복 방지용
+        all_raw_snippets = raw_search_results or []
+        processed_source_urls_for_main_list: Set[str] = set()
 
         for aspect in key_aspects:
             section_extra_log = {**extra_log_data, "current_aspect": aspect}
@@ -381,7 +395,6 @@ Report Conclusion:"""
                             "tool_used": snip.get("tool_used", "N/A")
                         })
                         processed_source_urls_for_main_list.add(url)
-
             except Exception as e:
                 logger.error(f"Failed to generate section for aspect '{aspect}': {e}", exc_info=True,
                              extra=section_extra_log)
@@ -406,7 +419,7 @@ Report Conclusion:"""
                               "timestamp": datetime.now(timezone.utc).isoformat()})
 
         # 5. Jinja2 템플릿을 사용하여 최종 보고서 렌더링
-        final_report_html = "Error: Report template could not be rendered."  # Fallback
+        final_report_html = "Error: Report template could not be rendered."
         try:
             template = self.jinja_env.get_template(self.report_template_name)
             final_report_html = template.render(report_data_for_template)
@@ -415,22 +428,19 @@ Report Conclusion:"""
             logger.error(f"Failed to render Jinja2 template: {e}", exc_info=True, extra=extra_log_data)
             error_log.append({"stage": f"{node_name}.render_template", "error": str(e),
                               "timestamp": datetime.now(timezone.utc).isoformat()})
-            # final_report_html은 이미 fallback 값으로 설정됨
 
-        update_dict = {
-            "report_content": final_report_html,  # 생성된 HTML 보고서 내용
-            "current_stage": "n06_finalize_report",  # 다음 스테이지 (가칭)
-            "error_log": error_log
+        report_sec.report_content = final_report_html
+        meta.current_stage = "n06_finalize_report"
+        meta.error_log = error_log
+        update_dict_summary = {
+            'report_content_length': len(final_report_html),
+            'current_stage': meta.current_stage,
+            'error_log': error_log
         }
         logger.info(
-            f"Exiting node. Report generation complete. Output Update Summary: {summarize_for_logging(update_dict, fields_to_show=['current_stage', 'report_content_length'])}",
+            f"Exiting node. Report generation complete. Output Update Summary: {summarize_for_logging(update_dict_summary, fields_to_show=['current_stage', 'report_content_length'])}",
             extra=extra_log_data)
-        # 로깅 위해 report_content_length 추가
-        if 'report_content_length' not in update_dict:
-            update_dict_summary = update_dict.copy()
-            update_dict_summary['report_content_length'] = len(final_report_html)
-            logger.info(
-                f"Exiting node. Report generation complete. Output Update Summary: {summarize_for_logging(update_dict_summary, fields_to_show=['current_stage', 'report_content_length'])}",
-                extra=extra_log_data)
-
-        return update_dict
+        return {
+            "report": report_sec.model_dump(),
+            "meta": meta.model_dump(),
+        }
