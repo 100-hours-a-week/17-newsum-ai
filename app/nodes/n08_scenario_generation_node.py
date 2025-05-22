@@ -7,7 +7,7 @@ import re
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone
 
-from app.workflows.state import WorkflowState
+from app.workflows.state_v2 import WorkflowState
 from app.utils.logger import get_logger, summarize_for_logging
 from app.config.settings import Settings
 from app.services.llm_service import LLMService  # 타입 힌팅을 위해 기존 LLMService 사용
@@ -127,53 +127,55 @@ FINAL_IMAGE_PROMPT: (CRITICAL: Synthesize ALL visual details from above fields i
 
     def _parse_scene_response(self, llm_text_response: str, panel_number: int, extra_log_data: dict) -> dict:
         result = {}
-        # Regex patterns made more robust, especially for the last field
-        fields_patterns = {
-            "panel_number": r"PANEL_NUMBER\s*:\s*(\d+)",
-            "scene_identifier": r"SCENE_IDENTIFIER\s*:\s*([^\n]+)",
-            "setting": r"SETTING\s*:\s*((?:.|\n)*?)(?=\nCHARACTERS_PRESENT\s*:|\Z)",
-            "characters_present": r"CHARACTERS_PRESENT\s*:\s*((?:.|\n)*?)(?=\nCAMERA_SHOT_AND_ANGLE\s*:|\Z)",
-            "camera_shot_and_angle": r"CAMERA_SHOT_AND_ANGLE\s*:\s*((?:.|\n)*?)(?=\nKEY_ACTIONS_OR_EVENTS\s*:|\Z)",
-            "key_actions_or_events": r"KEY_ACTIONS_OR_EVENTS\s*:\s*((?:.|\n)*?)(?=\nLIGHTING_AND_ATMOSPHERE\s*:|\Z)",
-            "lighting_and_atmosphere": r"LIGHTING_AND_ATMOSPHERE\s*:\s*((?:.|\n)*?)(?=\nDIALOGUE_SUMMARY_FOR_IMAGE_CONTEXT\s*:|\Z)",
-            "dialogue_summary_for_image_context": r"DIALOGUE_SUMMARY_FOR_IMAGE_CONTEXT\s*:\s*((?:.|\n)*?)(?=\nVISUAL_EFFECTS_OR_KEY_PROPS\s*:|\Z)",
-            "visual_effects_or_key_props": r"VISUAL_EFFECTS_OR_KEY_PROPS\s*:\s*((?:.|\n)*?)(?=\nIMAGE_STYLE_NOTES_FOR_SCENE\s*:|\Z)",
-            "image_style_notes_for_scene": r"IMAGE_STYLE_NOTES_FOR_SCENE\s*:\s*((?:.|\n)*?)(?=\nFINAL_IMAGE_PROMPT\s*:|\Z)",
-            "final_image_prompt": r"FINAL_IMAGE_PROMPT\s*:\s*((?:.|\n)*?)(?=\nPANEL_NUMBER\s*:|\nSCENE_IDENTIFIER\s*:|\Z|$)"
-            # Use \Z or $
+        # 필드명 유사 매칭을 위한 후보군 정의 (alias 확장)
+        field_aliases = {
+            "panel_number": ["panel_number", "panel num", "panel no", "panel #", "panel", "number"],
+            "scene_identifier": ["scene_identifier", "scene id", "sceneidentifier", "scene", "identifier", "scene code"],
+            "setting": ["setting", "scene setting", "background", "location", "environment", "place", "context"],
+            "characters_present": ["characters_present", "characters & poses", "characters", "character", "poses", "people", "figures", "cast", "who is present", "who appears"],
+            "camera_shot_and_angle": [
+                "camera_shot_and_angle", "camera shot and angle", "camera shot", "shot", "angle", "perspective", "viewpoint", "view", "framing", "composition", "camera perspective", "camera angle", "camera viewpoint", "shot type", "frame", "camera framing"
+            ],
+            "key_actions_or_events": ["key_actions_or_events", "key actions/events", "key actions", "events", "actions", "main action", "main event", "what happens", "activity", "action/event", "event/action", "scene action", "scene event"],
+            "lighting_and_atmosphere": ["lighting_and_atmosphere", "lighting & atmosphere", "lighting", "atmosphere", "mood", "ambience", "light", "scene lighting", "scene mood", "scene atmosphere", "illumination"],
+            "dialogue_summary_for_image_context": ["dialogue_summary_for_image_context", "dialogue context", "dialogue summary", "dialogue", "conversation", "speech", "text", "spoken words", "what is said", "quote", "line", "lines", "caption"],
+            "visual_effects_or_key_props": ["visual_effects_or_key_props", "visual effects or key props", "visual effects", "key props", "props", "special effects", "fx", "important props", "notable props", "notable objects", "key objects", "special visuals", "visual highlight", "visual element"],
+            "image_style_notes_for_scene": ["image_style_notes_for_scene", "image style notes", "style notes", "style", "art style", "visual style", "drawing style", "render style", "aesthetic", "artistic style", "scene style", "style keyword", "style guide"],
+            "final_image_prompt": ["final_image_prompt", "final image prompt", "image prompt", "prompt", "full prompt", "description", "image description", "scene description", "final prompt", "visual prompt", "visual description"]
         }
-
-        remaining_text = llm_text_response
-        for field, pattern in fields_patterns.items():
-            match = re.search(pattern, remaining_text, re.IGNORECASE | re.DOTALL)
-            if match:
-                value = match.group(1).strip()
-                result[field] = value if value.strip() else "None"  # Ensure empty strings become "None"
-            else:
-                result[field] = "None"  # Default to "None" string if not found
+        # 필드별로 가장 먼저 매칭되는 것을 우선 추출
+        for field, aliases in field_aliases.items():
+            found = False
+            for alias in aliases:
+                # re: 대소문자, 공백, 언더스코어, 하이픈, 콜론 등 유연하게 매칭
+                pattern = rf"{alias.replace('_', '[_\- ]*')}\s*[:：]\s*((?:.|\n)*?)(?=\n[A-Z_\- ]+\s*[:：]|\Z)"
+                match = re.search(pattern, llm_text_response, re.IGNORECASE | re.DOTALL)
+                if match:
+                    value = match.group(1).strip()
+                    result[field] = value if value.strip() else "None"
+                    found = True
+                    break
+            if not found:
+                result[field] = "None"
                 logger.debug(
-                    f"Parsing: Field '{field}' not found in response for panel {panel_number}. Snippet: {remaining_text[:100]}",
+                    f"Parsing: Field '{field}' not found in response for panel {panel_number}. Snippet: {llm_text_response[:100]}",
                     extra=extra_log_data)
-
+        # panel_number int 변환 보완
         try:
-            # Ensure panel_number is correctly parsed or set, even if LLM includes it in wrong format
             parsed_pn = result.get("panel_number")
             if isinstance(parsed_pn, str) and parsed_pn.isdigit():
                 result["panel_number"] = int(parsed_pn)
-            elif not isinstance(parsed_pn, int):  # If it's "None" or something else
-                result["panel_number"] = panel_number  # Fallback to loop index
-        except ValueError:
-            logger.warning(
-                f"Panel_number parsing error, value was '{result.get('panel_number')}'. Defaulting to loop index {panel_number}.",
-                extra=extra_log_data)
+            elif not isinstance(parsed_pn, int):
+                result["panel_number"] = panel_number
+        except Exception:
             result["panel_number"] = panel_number
-
         if result.get("scene_identifier") == "None" and isinstance(result.get("panel_number"), int):
             pn_val = result["panel_number"]
             result["scene_identifier"] = f"S{pn_val:02d}P{pn_val:02d}"
-
+        # 파싱 결과 요약 로그 (dict comprehension을 f-string 밖에서 처리)
+        preview = {k: (v[:50] + '...' if isinstance(v, str) and len(v) > 50 else v) for k, v in result.items()}
         logger.debug(
-            f"Parsed scene response for panel {panel_number}: { {k: (v[:50] + '...' if isinstance(v, str) and len(v) > 50 else v) for k, v in result.items()} }",
+            f"Parsed scene response for panel {panel_number}: {preview}",
             extra=extra_log_data)
         return result
 
@@ -328,22 +330,26 @@ FINAL_IMAGE_PROMPT: (CRITICAL: Synthesize ALL visual details from above fields i
         }
 
     async def run(self, state: WorkflowState) -> dict:
+        """
+        시나리오 생성 결과를 scenario Section에, stage/error 등은 meta Section에 직접 할당합니다.
+        반환값은 state_v2 구조에 맞게 {"scenario": ..., "meta": ...} 형태로 반환합니다.
+        """
+        meta = state.meta
+        scenario_sec = state.scenario
+        idea_sec = state.idea
+        config_sec = state.config
         node_name = self.__class__.__name__
-        trace_id = state.trace_id
-        comic_id = state.comic_id
-        config = state.config or {}
-
+        trace_id = meta.trace_id
+        comic_id = meta.comic_id
+        config = config_sec.config or {}
         current_node_error_log = []
-        previous_error_log = list(state.error_log or [])
-        extra = {'trace_id': trace_id, 'comic_id': comic_id, 'node_name': node_name,
-                 'retry_flow': 0}  # Base retry_flow for logs
-
+        previous_error_log = list(meta.error_log or [])
+        extra = {'trace_id': trace_id, 'comic_id': comic_id, 'node_name': node_name, 'retry_flow': 0}
         logger.info(f"Entering node {node_name}. Trace ID: {trace_id}", extra=extra)
-
-        selected_idea = state.selected_comic_idea_for_scenario
+        selected_idea = scenario_sec.selected_comic_idea_for_scenario
         if not selected_idea or not isinstance(selected_idea, dict):
-            if state.comic_ideas and isinstance(state.comic_ideas, list) and state.comic_ideas:
-                selected_idea = state.comic_ideas[0]
+            if idea_sec.comic_ideas and isinstance(idea_sec.comic_ideas, list) and idea_sec.comic_ideas:
+                selected_idea = idea_sec.comic_ideas[0]
                 logger.info(
                     f"Using first comic idea as selected_comic_idea_for_scenario was not set: '{selected_idea.get('title', 'N/A')}'",
                     extra=extra)
@@ -353,30 +359,31 @@ FINAL_IMAGE_PROMPT: (CRITICAL: Synthesize ALL visual details from above fields i
                 current_node_error_log.append(
                     {"stage": node_name, "error": error_msg, "timestamp": datetime.now(timezone.utc).isoformat()})
                 final_error_log = previous_error_log + current_node_error_log
-                return {"current_stage": "ERROR", "comic_scenarios": [], "thumbnail_image_prompt": "",
-                        "error_log": final_error_log, "error_message": f"{node_name}: {error_msg}"}
+                meta.current_stage = "ERROR"
+                meta.error_log = final_error_log
+                meta.error_message = f"{node_name}: {error_msg}"
+                scenario_sec.comic_scenarios = []
+                scenario_sec.thumbnail_image_prompt = ""
+                return {"scenario": scenario_sec.model_dump(), "meta": meta.model_dump()}
         else:
             logger.info(f"Successfully retrieved selected_comic_idea: '{selected_idea.get('title', 'N/A')}'",
                         extra=extra)
-
+        scenario_sec.selected_comic_idea_for_scenario = selected_idea
         thumbnail_prompt_example_final = await self._generate_thumbnail_prompt_example(selected_idea, trace_id, extra)
         logger.info(f"Thumbnail prompt example to be used: '{thumbnail_prompt_example_final}'", extra=extra)
-        if "Fallback example:" in thumbnail_prompt_example_final:  # Log if fallback was used
+        if "Fallback example:" in thumbnail_prompt_example_final:
             current_node_error_log.append({"stage": f"{node_name}._generate_thumbnail_prompt_example",
                                            "warning": "Used fallback thumbnail prompt example.",
                                            "value_used": thumbnail_prompt_example_final,
                                            "timestamp": datetime.now(timezone.utc).isoformat()})
-
         scenarios = []
         scenarios_raw_texts = []
         num_panels_to_generate = 4
         all_panels_valid = True
-
         for i in range(num_panels_to_generate):
             panel_number = i + 1
-            panel_extra_log = {**extra, 'panel_number_flow': panel_number}  # For panel specific flow logging
+            panel_extra_log = {**extra, 'panel_number_flow': panel_number}
             previous_scenarios_summary = self._summarize_previous_scenarios(scenarios)
-
             logger.info(f"Starting generation for panel {panel_number}/{num_panels_to_generate}", extra=panel_extra_log)
             panel_generation_result = await self._generate_single_panel_scenario(
                 comic_idea=selected_idea, panel_number=panel_number,
@@ -384,12 +391,9 @@ FINAL_IMAGE_PROMPT: (CRITICAL: Synthesize ALL visual details from above fields i
                 thumbnail_prompt_example=thumbnail_prompt_example_final,
                 config=config, trace_id=trace_id, extra_log_data=panel_extra_log
             )
-
             scenarios_raw_texts.append(panel_generation_result.get("raw_text", "No raw text recorded."))
-
             panel_data = panel_generation_result.get("panel_data")
             panel_error = panel_generation_result.get("error")
-
             if panel_error or not panel_data:
                 error_message_for_log = f"Failed to generate valid data for panel {panel_number}: {panel_error or 'Panel data was None'}"
                 logger.error(error_message_for_log, extra=panel_extra_log)
@@ -399,32 +403,21 @@ FINAL_IMAGE_PROMPT: (CRITICAL: Synthesize ALL visual details from above fields i
                     "detail": panel_generation_result.get("exception_trace"),
                     "timestamp": datetime.now(timezone.utc).isoformat()
                 })
-                # Use a structured error placeholder if panel_data is None or marked with an error that _is_valid_scene_data would catch
-                # If _generate_single_panel_scenario already returned a partially parsed dict with an error flag, it might be used if it has some data.
-                # However, for consistency if a major error occurred, use a full placeholder.
                 scenarios.append(self._create_error_panel_data(panel_number, panel_error or "Unknown generation error"))
-                all_panels_valid = False  # Mark that at least one panel failed
+                all_panels_valid = False
             else:
                 logger.info(f"Successfully obtained panel_data for panel {panel_number}", extra=panel_extra_log)
                 scenarios.append(panel_data)
-
         final_error_log = previous_error_log + current_node_error_log
-
         final_status = "N08_SCENARIO_GENERATION_COMPLETED"
-        if not all_panels_valid or len(scenarios) < num_panels_to_generate:  # If any panel failed or not enough panels
+        if not all_panels_valid or len(scenarios) < num_panels_to_generate:
             final_status = "N08_COMPLETED_WITH_PARTIAL_ERRORS"
-        if not scenarios:  # Should be redundant if placeholders are added, but for safety
+        if not scenarios:
             final_status = "N08_SCENARIO_GENERATION_FAILED"
-
-        update_dict = {
-            "comic_scenarios": scenarios,
-            "scenarios_raw_texts": scenarios_raw_texts,  # For debugging
-            "selected_comic_idea_for_scenario": selected_idea,  # Pass along the idea used
-            "thumbnail_image_prompt": thumbnail_prompt_example_final,  # This is the "example" used for style guidance
-            "current_stage": final_status,
-            "error_log": final_error_log
-        }
-
+        scenario_sec.comic_scenarios = scenarios
+        scenario_sec.thumbnail_image_prompt = thumbnail_prompt_example_final
+        meta.current_stage = final_status
+        meta.error_log = final_error_log
         logger.info(
             f"Exiting node {node_name}. Scenarios count: {len(scenarios)}. "
             f"First scenario FIP empty/error: {'N/A' if not scenarios else (not scenarios[0].get('final_image_prompt') or 'Error' in scenarios[0].get('final_image_prompt', ''))}. "
@@ -432,8 +425,9 @@ FINAL_IMAGE_PROMPT: (CRITICAL: Synthesize ALL visual details from above fields i
             extra=extra
         )
         if scenarios:
-            logger.debug(
-                f"First panel data being saved: { {k: (v[:50] + '...' if isinstance(v, str) and len(v) > 50 else v) for k, v in scenarios[0].items()} }",
-                extra=extra)
-
-        return update_dict
+            preview = {k: (v[:50] + '...' if isinstance(v, str) and len(v) > 50 else v) for k, v in scenarios[0].items()}
+            logger.debug(f"First panel data being saved: {preview}", extra=extra)
+        return {
+            "scenario": scenario_sec.model_dump(),
+            "meta": meta.model_dump(),
+        }

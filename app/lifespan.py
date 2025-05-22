@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from typing import AsyncGenerator
 from pathlib import Path
 import aiohttp # 외부 API 호출용 세션 생성 위해 추가
+from dotenv import load_dotenv
 
 # --- 로깅 및 설정 임포트 ---
 from app.utils.logger import setup_logging, get_logger
@@ -186,6 +187,7 @@ async def shutdown_event(graceful: bool = True):
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """FastAPI lifespan 컨텍스트 관리자"""
+    load_dotenv()
     await startup_event()
     try:
         yield

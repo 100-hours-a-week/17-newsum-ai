@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 import mimetypes
 
-from app.workflows.state import WorkflowState
+from app.workflows.state_v2 import WorkflowState
 from app.utils.logger import get_logger, summarize_for_logging, PROJECT_ROOT
 from app.config.settings import Settings
 from app.services.storage_service import StorageService
@@ -254,44 +254,48 @@ class N10FinalizeAndNotifyNode:
                 logger.info("N10: Closed temporary aiohttp.ClientSession for external API call.", extra=extra_log_data)
 
     async def run(self, state: WorkflowState) -> Dict[str, Any]:
+        """
+        업로드 결과, 외부 API 응답 등은 upload Section에, stage/error 등은 meta Section에 직접 할당합니다.
+        반환값은 state_v2 구조에 맞게 {"upload": ..., "meta": ...} 형태로 반환합니다.
+        """
         node_name = self.__class__.__name__
-        trace_id = state.trace_id
-        comic_id = state.comic_id
-        config = state.config or {}
-        error_log = list(state.error_log or [])
-
+        meta = state.meta
+        upload_sec = state.upload
+        report_sec = state.report
+        scenario_sec = state.scenario
+        image_sec = state.image
+        config_sec = state.config
+        trace_id = meta.trace_id
+        comic_id = meta.comic_id
+        config = config_sec.config or {}
+        error_log = list(meta.error_log or [])
         extra_log_fields = {'trace_id': trace_id, 'comic_id': comic_id, 'node_name': node_name}
-
         s3_uploaded_image_details: List[Dict[str, Optional[Any]]] = []
-        # 원본(en) 및 번역본(ko) 보고서의 최종 S3 HTTPS URL
         s3_uploaded_original_report_https_url: Optional[str] = None
         s3_uploaded_translated_report_https_url: Optional[str] = None
-
-        # 외부 API 페이로드의 sourceNews는 보고서 URL만 포함
         api_payload_source_news: List[Dict[str, str]] = []
         external_api_call_result: Optional[Dict[str, Any]] = None
-
         if not comic_id:
             error_msg = "N10 Critical: comic_id is missing."
             logger.error(error_msg, extra=extra_log_fields)
             error_log.append(
                 {"stage": node_name, "error": error_msg, "timestamp": datetime.now(timezone.utc).isoformat()})
-            return {"current_stage": "ERROR", "error_log": error_log, "error_message": error_msg}
-
+            meta.current_stage = "ERROR"
+            meta.error_log = error_log
+            meta.error_message = error_msg
+            return {"upload": upload_sec.model_dump(), "meta": meta.model_dump()}
         writer_id_str = str(config.get('writer_id', '1'))
-        extra_log_fields['writer_id'] = writer_id_str  # 로깅 필드에 writer_id 추가
+        extra_log_fields['writer_id'] = writer_id_str
         logger.info(f"Entering node {node_name}.", extra=extra_log_fields)
-
         try:
             s3_base_prefix = getattr(settings, 'S3_WEBTOON_DATA_PREFIX', "webtoon_data")
-
             # --- 1. 원본 보고서(en) S3 업로드 (N06 결과 활용) ---
             original_report_lang_code = str(
-                config.get('ORIGINAL_REPORT_LANGUAGE', DEFAULT_ORIGINAL_REPORT_LANG_FROM_N06))  # "en"
-            if state.saved_report_path:  # N06에서 저장한 원본 보고서 경로
+                config.get('ORIGINAL_REPORT_LANGUAGE', DEFAULT_ORIGINAL_REPORT_LANG_FROM_N06))
+            if report_sec.saved_report_path:
                 s3_target_orig_filename = f"report_{original_report_lang_code}.html"
                 s3_uri_orig = await self._upload_local_file_to_s3(
-                    local_file_path_str=state.saved_report_path,
+                    local_file_path_str=report_sec.saved_report_path,
                     comic_id=comic_id,
                     s3_base_prefix=s3_base_prefix,
                     target_s3_filename=s3_target_orig_filename,
@@ -301,27 +305,26 @@ class N10FinalizeAndNotifyNode:
                 if s3_uri_orig:
                     s3_uploaded_original_report_https_url = self.s3_uri_to_https_url(s3_uri_orig)
                     api_payload_source_news.append({
-                                                       "headline": f"AI Generated Report for {comic_id} (Original - {original_report_lang_code.upper()})",
-                                                       "url": s3_uploaded_original_report_https_url})
+                        "headline": f"AI Generated Report for {comic_id} (Original - {original_report_lang_code.upper()})",
+                        "url": s3_uploaded_original_report_https_url})
                     logger.info(
                         f"N10: Original report ({original_report_lang_code}) uploaded to S3: {s3_uploaded_original_report_https_url}",
                         extra=extra_log_fields)
                 else:
                     error_log.append({"stage": f"{node_name}.S3UploadOriginalReport",
-                                      "error": f"Failed to upload original report ({original_report_lang_code}) from path '{state.saved_report_path}' to S3.",
+                                      "error": f"Failed to upload original report ({original_report_lang_code}) from path '{report_sec.saved_report_path}' to S3.",
                                       "timestamp": datetime.now(timezone.utc).isoformat()})
-            else:  # N06에서 원본 경로가 안 넘어온 경우 (또는 state.report_content를 업로드하는 폴백 - 현재는 경로만 사용)
+            else:
                 logger.warning(
-                    "N10: No path for original report (state.saved_report_path) provided by N06. Original report not uploaded.",
+                    "N10: No path for original report (report_sec.saved_report_path) provided by N06. Original report not uploaded.",
                     extra=extra_log_fields)
-
             # --- 2. 번역된 보고서(ko) S3 업로드 (N06 결과 활용) ---
             translated_report_lang_code = str(
-                config.get('N06_REPORT_TRANSLATION_TARGET_LANG', DEFAULT_TRANSLATED_REPORT_LANG_FROM_N06))  # "ko"
-            if state.translated_report_path:  # N06에서 저장한 번역본 보고서 경로
-                s3_target_trans_filename = f"report_{original_report_lang_code}_Translated_{translated_report_lang_code}.html"  # N06 저장 규칙과 일치
+                config.get('N06_REPORT_TRANSLATION_TARGET_LANG', DEFAULT_TRANSLATED_REPORT_LANG_FROM_N06))
+            if report_sec.translated_report_path:
+                s3_target_trans_filename = f"report_{original_report_lang_code}_Translated_{translated_report_lang_code}.html"
                 s3_uri_trans = await self._upload_local_file_to_s3(
-                    local_file_path_str=state.translated_report_path,
+                    local_file_path_str=report_sec.translated_report_path,
                     comic_id=comic_id,
                     s3_base_prefix=s3_base_prefix,
                     target_s3_filename=s3_target_trans_filename,
@@ -331,45 +334,37 @@ class N10FinalizeAndNotifyNode:
                 if s3_uri_trans:
                     s3_uploaded_translated_report_https_url = self.s3_uri_to_https_url(s3_uri_trans)
                     api_payload_source_news.append({
-                                                       "headline": f"AI Generated Report for {comic_id} (Translated - {translated_report_lang_code.upper()})",
-                                                       "url": s3_uploaded_translated_report_https_url})
+                        "headline": f"AI Generated Report for {comic_id} (Translated - {translated_report_lang_code.upper()})",
+                        "url": s3_uploaded_translated_report_https_url})
                     logger.info(
                         f"N10: Translated report ({translated_report_lang_code}) uploaded to S3: {s3_uploaded_translated_report_https_url}",
                         extra=extra_log_fields)
                 else:
                     error_log.append({"stage": f"{node_name}.S3UploadTranslatedReport",
-                                      "error": f"Failed to upload translated report ({translated_report_lang_code}) from path '{state.translated_report_path}' to S3.",
+                                      "error": f"Failed to upload translated report ({translated_report_lang_code}) from path '{report_sec.translated_report_path}' to S3.",
                                       "timestamp": datetime.now(timezone.utc).isoformat()})
             else:
                 logger.warning(
-                    "N10: No path for translated report (state.translated_report_path) provided by N06. Translated report not uploaded.",
+                    "N10: No path for translated report (report_sec.translated_report_path) provided by N06. Translated report not uploaded.",
                     extra=extra_log_fields)
-
-            # --- N10 자체 보고서 번역 로직은 완전히 제거됨 ---
-
             # --- 3. 이미지 S3 업로드 ---
             s3_upload_tasks = []
-            if state.generated_comic_images:
-                for img_info_item in state.generated_comic_images:  # 변수명 변경
+            if image_sec.generated_comic_images:
+                for img_info_item in image_sec.generated_comic_images:
                     if isinstance(img_info_item, dict):
                         s3_upload_tasks.append(
                             self._upload_image_to_s3(img_info_item, comic_id, s3_base_prefix, trace_id,
                                                      extra_log_fields))
-
-            if s3_upload_tasks:  # <--- 이 블록 안에서 s3_image_upload_results가 할당되고 사용됨
+            if s3_upload_tasks:
                 logger.info(f"N10: Starting {len(s3_upload_tasks)} S3 image uploads (max parallel: {MAX_PARALLEL_S3_UPLOADS}).", extra=extra_log_fields)
                 semaphore = asyncio.Semaphore(MAX_PARALLEL_S3_UPLOADS)
-
                 async def _run_task_with_sema(task, sema):
                     async with sema: return await task
-                s3_image_upload_results = await asyncio.gather( *[_run_task_with_sema(task, semaphore) for task in s3_upload_tasks], return_exceptions=True)
-
+                s3_image_upload_results = await asyncio.gather(*[_run_task_with_sema(task, semaphore) for task in s3_upload_tasks], return_exceptions=True)
                 for i, img_res_item in enumerate(s3_image_upload_results):
-                    orig_img_info_for_err = state.generated_comic_images[i] if state.generated_comic_images and i < len(
-                        state.generated_comic_images) else {}
+                    orig_img_info_for_err = image_sec.generated_comic_images[i] if image_sec.generated_comic_images and i < len(image_sec.generated_comic_images) else {}
                     scene_id_for_err_log = orig_img_info_for_err.get("scene_identifier", f"ImageUploadTask_{i}")
                     is_thumb_for_err_log = orig_img_info_for_err.get("is_thumbnail", False)
-
                     if isinstance(img_res_item, Exception):
                         err_log_message = f"S3 image upload for '{scene_id_for_err_log}' (thumb: {is_thumb_for_err_log}) failed with exception: {img_res_item}"
                         logger.error(err_log_message, extra=extra_log_fields, exc_info=img_res_item)
@@ -380,8 +375,8 @@ class N10FinalizeAndNotifyNode:
                                                           "is_thumbnail": is_thumb_for_err_log,
                                                           "error": err_log_message})
                     elif isinstance(img_res_item, dict):
-                        s3_uploaded_image_details.append(img_res_item)  # _upload_image_to_s3가 이미 HTTPS URL 반환
-                        if img_res_item.get("error"):  # _upload_image_to_s3 내부에서 발생한 오류
+                        s3_uploaded_image_details.append(img_res_item)
+                        if img_res_item.get("error"):
                             error_log.append({"stage": f"{node_name}.S3ImageUploadError",
                                               "scene": img_res_item.get("scene_identifier"),
                                               "is_thumbnail": img_res_item.get("is_thumbnail"),
@@ -397,46 +392,37 @@ class N10FinalizeAndNotifyNode:
                         s3_uploaded_image_details.append({"scene_identifier": scene_id_for_err_log, "s3_url": None,
                                                           "is_thumbnail": is_thumb_for_err_log,
                                                           "error": unexpected_upload_err_msg})
-
             # --- 4. 외부 API 페이로드 구성 ---
-            # api_payload_source_news는 이미 보고서 URL들로만 채워짐. (외부 검색 링크는 포함 안 함)
             logger.debug(
                 f"N10: Final sourceNews for API payload (reports only): {summarize_for_logging(api_payload_source_news)}",
                 extra=extra_log_fields)
-
             external_api_url = settings.EXTERNAL_NOTIFICATION_API_URL
             if external_api_url:
-                # 페이로드 title
-                payload_api_title = state.selected_comic_idea_for_scenario.get(
-                    "title") if state.selected_comic_idea_for_scenario else \
+                payload_api_title = scenario_sec.selected_comic_idea_for_scenario.get(
+                    "title") if scenario_sec.selected_comic_idea_for_scenario else \
                     (state.original_query[:50] if state.original_query else f"Comic {comic_id}")
-
-                # 페이로드 content (N06 원본 보고서 내용(en)을 요약하여 사용)
                 payload_api_content = ""
                 original_report_html_from_n06_path = ""
-                if state.saved_report_path:  # N06 원본 보고서 경로가 있다면 읽기
+                if report_sec.saved_report_path:
                     try:
-                        with open(Path(state.saved_report_path), "r", encoding="utf-8") as f_orig_rpt:
+                        with open(Path(report_sec.saved_report_path), "r", encoding="utf-8") as f_orig_rpt:
                             original_report_html_from_n06_path = f_orig_rpt.read()
                     except Exception as e_read_rpt:
                         logger.warning(
-                            f"N10: Could not read original report from {state.saved_report_path} for API content summary: {e_read_rpt}",
+                            f"N10: Could not read original report from {report_sec.saved_report_path} for API content summary: {e_read_rpt}",
                             extra=extra_log_fields)
-
                 if original_report_html_from_n06_path:
                     payload_api_content = summarize_for_logging(
                         extract_text_from_html(original_report_html_from_n06_path), 200)
-                elif state.selected_comic_idea_for_scenario:  # 보고서 없으면 아이디어 요약으로 폴백
-                    idea_for_content = state.selected_comic_idea_for_scenario
+                elif scenario_sec.selected_comic_idea_for_scenario:
+                    idea_for_content = scenario_sec.selected_comic_idea_for_scenario
                     content_source_idea = idea_for_content.get("summary") or idea_for_content.get(
                         "logline") or idea_for_content.get("title")
                     payload_api_content = summarize_for_logging(content_source_idea, 200) if content_source_idea else ""
-
                 payload_api_thumbnail_url = next((img.get("s3_url") for img in s3_uploaded_image_details if
                                                   img.get("is_thumbnail") and img.get("s3_url")), "")
-
                 payload_api_slides = []
-                scenario_details_map = {sc.get("scene_identifier"): sc for sc in state.comic_scenarios or [] if
+                scenario_details_map = {sc.get("scene_identifier"): sc for sc in scenario_sec.comic_scenarios or [] if
                                         isinstance(sc, dict)}
                 current_slide_seq = 1
                 for img_detail in s3_uploaded_image_details:
@@ -449,19 +435,16 @@ class N10FinalizeAndNotifyNode:
                                 "scene_description") or "-"
                         if not current_slide_text or str(current_slide_text).strip().lower() in ["none",
                                                                                                  "none."]: current_slide_text = "-"
-
                         payload_api_slides.append({
                             "slideSeq": current_slide_seq,
-                            "imageUrl": img_detail["s3_url"],  # 이미 HTTPS
+                            "imageUrl": img_detail["s3_url"],
                             "content": summarize_for_logging(current_slide_text, 200)
                         })
                         current_slide_seq += 1
-
                 try:
                     final_api_ai_author_id = int(writer_id_str)
                 except ValueError:
                     final_api_ai_author_id = 1
-
                 final_api_payload_to_send = {
                     "aiAuthorId": final_api_ai_author_id,
                     "category": str(config.get("category", "IT")),
@@ -469,7 +452,7 @@ class N10FinalizeAndNotifyNode:
                     "content": payload_api_content,
                     "thumbnailImageUrl": payload_api_thumbnail_url,
                     "slides": payload_api_slides,
-                    "sourceNews": api_payload_source_news  # 보고서 URL만 포함
+                    "sourceNews": api_payload_source_news
                 }
                 external_api_call_result = await self._send_to_external_api(final_api_payload_to_send, external_api_url,
                                                                             trace_id, extra_log_fields)
@@ -479,44 +462,37 @@ class N10FinalizeAndNotifyNode:
                                       "timestamp": datetime.now(timezone.utc).isoformat()})
             else:
                 external_api_call_result = {"status": "skipped", "reason": "External API URL not configured"}
-
-            # --- 5. 최종 상태 결정 및 반환 ---
             workflow_final_status = "DONE"
-            if error_log or state.error_message:  # 기존 state의 error_message도 확인
+            if error_log or getattr(state, 'error_message', None):
                 workflow_final_status = "DONE_WITH_ERRORS"
-                # 외부 API 실패 시 워크플로우 상태를 ERROR로 할지 여부 (정책에 따라)
                 if external_api_call_result and external_api_call_result.get("status") == "failed" and \
                         not getattr(settings, "IGNORE_EXTERNAL_API_FAILURE_FOR_WORKFLOW_STATUS", False):
-                    # workflow_final_status = "ERROR" # 필요시 주석 해제
                     logger.error(
                         "N10: External API call failed. Workflow marked as DONE_WITH_ERRORS (or ERROR based on policy).",
                         extra=extra_log_fields)
-
-            state_update_dict = {
-                "uploaded_image_urls": s3_uploaded_image_details,  # HTTPS URL 포함
-                "uploaded_report_s3_uri": s3_uploaded_original_report_https_url,  # 원본(en) 보고서 S3 URL
-                "uploaded_translated_report_s3_uri": s3_uploaded_translated_report_https_url,  # 번역(ko) 보고서 S3 URL
-                "external_api_response": external_api_call_result,
-                "current_stage": workflow_final_status,
-                "error_log": error_log  # 최종 누적된 오류 로그
-            }
+            upload_sec.uploaded_image_urls = s3_uploaded_image_details
+            upload_sec.uploaded_report_s3_uri = s3_uploaded_original_report_https_url
+            upload_sec.uploaded_translated_report_s3_uri = s3_uploaded_translated_report_https_url
+            upload_sec.external_api_response = external_api_call_result
+            meta.current_stage = workflow_final_status
+            meta.error_log = error_log
             logger.info(
                 f"Exiting node {node_name}. Status: {workflow_final_status}. External API status: {external_api_call_result.get('status') if external_api_call_result else 'N/A'}",
                 extra=extra_log_fields)
-            return state_update_dict
-
-        except Exception as e_run_main_exc:  # 변수명 변경
-            critical_error_msg_in_run = f"N10: Unexpected critical error in run: {type(e_run_main_exc).__name__} - {e_run_main_exc}"  # 변수명 변경
+            return {"upload": upload_sec.model_dump(), "meta": meta.model_dump()}
+        except Exception as e_run_main_exc:
+            critical_error_msg_in_run = f"N10: Unexpected critical error in run: {type(e_run_main_exc).__name__} - {e_run_main_exc}"
             logger.exception(critical_error_msg_in_run, extra=extra_log_fields)
             error_log.append({"stage": node_name, "error": critical_error_msg_in_run, "detail": traceback.format_exc(),
                               "timestamp": datetime.now(timezone.utc).isoformat()})
-            return {"error_log": error_log, "current_stage": "ERROR", "error_message": critical_error_msg_in_run}
+            meta.current_stage = "ERROR"
+            meta.error_log = error_log
+            meta.error_message = critical_error_msg_in_run
+            return {"upload": upload_sec.model_dump(), "meta": meta.model_dump()}
         finally:
-            # 내부 생성 aiohttp 세션 닫기
             if hasattr(self, '_external_api_session') and self._external_api_session and \
                     self._created_external_api_session and not self._external_api_session.closed:
                 await self._external_api_session.close()
-                # 로깅 시 extra_log_fields가 정의되었는지 확인
                 log_extra = extra_log_fields if 'extra_log_fields' in locals() and isinstance(extra_log_fields,
                                                                                               dict) else None
                 logger.info(f"N10: Closed internally created aiohttp.ClientSession.", extra=log_extra)

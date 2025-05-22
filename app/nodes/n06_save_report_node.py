@@ -5,7 +5,7 @@ from typing import Dict, Any, Optional
 from datetime import datetime, timezone
 import html  # HTML 엔티티 처리를 위해 추가 (번역 서비스가 이미 처리한다면 불필요할 수 있음)
 
-from app.workflows.state import WorkflowState
+from app.workflows.state_v2 import WorkflowState
 from app.utils.logger import get_logger, PROJECT_ROOT
 from app.config.settings import Settings  # Settings 사용 가정
 # 번역 서비스 임포트 (경로는 실제 프로젝트 구조에 맞게 조정)
@@ -101,12 +101,17 @@ class N06SaveReportNode:
             return None
 
     async def run(self, state: WorkflowState) -> Dict[str, Any]:
-        """보고서 내용을 파일로 저장하고, 번역본도 저장한 후 상태 업데이트."""
+        """
+        보고서 내용을 파일로 저장하고, 번역본도 저장한 후 상태 업데이트.
+        state_v2 구조에 맞게 Section 객체를 직접 사용하며, 주석도 최대한 유지합니다.
+        """
+        meta = state.meta
+        report_sec = state.report
         node_name = self.__class__.__name__
-        trace_id = state.trace_id
-        comic_id = state.comic_id
-        report_content = state.report_content
-        error_log = list(state.error_log or [])
+        trace_id = meta.trace_id
+        comic_id = meta.comic_id
+        report_content = report_sec.report_content
+        error_log = list(meta.error_log or [])
 
         extra_log_data = {'trace_id': trace_id, 'comic_id': comic_id, 'node_name': node_name}
         logger.info(f"Entering node. Attempting to save report content.", extra=extra_log_data)
@@ -119,19 +124,19 @@ class N06SaveReportNode:
             logger.error(error_msg, extra=extra_log_data)
             error_log.append(
                 {"stage": node_name, "error": error_msg, "timestamp": datetime.now(timezone.utc).isoformat()})
-            return {"error_log": error_log, "current_stage": "ERROR", "error_message": error_msg}
+            meta.current_stage = "ERROR"
+            meta.error_log = error_log
+            meta.error_message = error_msg
+            return {"report": report_sec.model_dump(), "meta": meta.model_dump()}
 
         if not report_content or not isinstance(report_content, str):
             error_msg = "Report content is missing or not a string. Nothing to save."
             logger.warning(error_msg, extra=extra_log_data)
-            update_dict = {
-                "saved_report_path": None,
-                "translated_report_path": None,  # 번역 경로도 없음
-                "current_stage": "DONE",
-                "error_log": error_log
-            }
-            logger.info("Exiting node. No report content to save.", extra=extra_log_data)
-            return update_dict
+            meta.current_stage = "DONE"
+            meta.error_log = error_log
+            report_sec.saved_report_path = None
+            report_sec.translated_report_path = None
+            return {"report": report_sec.model_dump(), "meta": meta.model_dump()}
 
         try:
             report_dir = self.results_base_dir / comic_id
@@ -142,6 +147,7 @@ class N06SaveReportNode:
                 f.write(report_content)
             saved_path_str = str(original_report_file_path.resolve())
             logger.info(f"Original report successfully saved to: {saved_path_str}", extra=extra_log_data)
+            report_sec.saved_report_path = saved_path_str
 
             # 번역 및 저장 로직 호출
             # settings에서 번역 대상 언어 가져오기 (없으면 기본값 'en' 사용)
@@ -159,6 +165,7 @@ class N06SaveReportNode:
                 )
                 if translated_report_path_str:
                     logger.info(f"Translated report path: {translated_report_path_str}", extra=extra_log_data)
+                    report_sec.translated_report_path = translated_report_path_str
                 else:  # 번역 실패 또는 내용 없음
                     error_log.append({
                         "stage": f"{node_name}._translate_and_save_report",
@@ -173,40 +180,34 @@ class N06SaveReportNode:
                     f"N06_REPORT_TRANSLATION_TARGET_LANG not set in settings. Skipping translation of saved report.",
                     extra=extra_log_data)
 
-            update_dict = {
-                "saved_report_path": saved_path_str,
-                "translated_report_path": translated_report_path_str,  # 상태에 추가
-                "current_stage": "DONE",
-                "error_log": error_log
-            }
+            meta.current_stage = "DONE"
+            meta.error_log = error_log
             logger.info(f"Exiting node. Original report saved. Translated report path: {translated_report_path_str}",
                         extra=extra_log_data)
-            return update_dict
+            return {"report": report_sec.model_dump(), "meta": meta.model_dump()}
 
         except OSError as e:
             error_msg = f"Failed to save report to file system: {e}"
             logger.exception(error_msg, extra=extra_log_data)
             error_log.append({"stage": node_name, "error": error_msg, "detail": traceback.format_exc(),
                               "timestamp": datetime.now(timezone.utc).isoformat()})
-            return {
-                "saved_report_path": None,
-                "translated_report_path": None,
-                "current_stage": "ERROR",
-                "error_message": f"N06 File Save Error: {error_msg}",
-                "error_log": error_log
-            }
+            meta.current_stage = "ERROR"
+            meta.error_log = error_log
+            meta.error_message = f"N06 File Save Error: {error_msg}"
+            report_sec.saved_report_path = None
+            report_sec.translated_report_path = None
+            return {"report": report_sec.model_dump(), "meta": meta.model_dump()}
         except Exception as e:
             error_msg = f"Unexpected error during report saving or translation in N06: {e}"
             logger.exception(error_msg, extra=extra_log_data)
             error_log.append({"stage": node_name, "error": error_msg, "detail": traceback.format_exc(),
                               "timestamp": datetime.now(timezone.utc).isoformat()})
-            return {
-                "saved_report_path": None,
-                "translated_report_path": None,
-                "current_stage": "ERROR",
-                "error_message": f"N06 Unexpected Error: {error_msg}",
-                "error_log": error_log
-            }
+            meta.current_stage = "ERROR"
+            meta.error_log = error_log
+            meta.error_message = f"N06 Unexpected Error: {error_msg}"
+            report_sec.saved_report_path = None
+            report_sec.translated_report_path = None
+            return {"report": report_sec.model_dump(), "meta": meta.model_dump()}
 
     # TranslationService 인스턴스를 닫는 로직 (필요하다면 워크플로우 매니저에서 관리)
     # async def close_services(self):
