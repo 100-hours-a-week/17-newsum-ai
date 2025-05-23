@@ -9,6 +9,7 @@ from fastapi import FastAPI
 
 # API 라우트 정의
 from app.api.v1 import endpoints as v1_endpoints
+from app.api.v2 import process_turn_v2 as v2_endpoints
 
 # 애플리케이션 시작/종료 시 실행될 로직 (예: 모델 로딩, 워크플로우 컴파일)
 from app.lifespan import lifespan
@@ -27,13 +28,17 @@ app = FastAPI(
     title="NewSum AI Service", # 임시 값, 추후 settings.APP_NAME 등으로 대체
     description="뉴스/의견 기반 만화 생성을 위한 LangGraph 워크플로우 API", # 임시 값
     version="0.1.0", # 임시 값, 추후 settings.APP_VERSION 등으로 대체
-    lifespan=lifespan  # 애플리케이션 수명 주기 이벤트 처리기 등록
+    lifespan=lifespan, # 애플리케이션 수명 주기 이벤트 처리기 등록
+    docs_url="/swagger",        # 기본 /docs → /swagger
+    redoc_url=None,             # ReDoc 비활성화
+    openapi_url="/schema.json", # 기본 /openapi.json → /schema.json
 )
 
 # --- API 라우터 등록 ---
 # '/api/v1' 경로로 들어오는 요청을 v1_endpoints.router 가 처리하도록 설정
 app.include_router(v1_endpoints.router, prefix="/api/v1")
-# logger.info("'/api/v1' 라우터 등록 완료.") # 예시: 로깅
+# '/api/v2' 경로로 들어오는 요청을 v2_endpoints.router 가 처리하도록 설정
+app.include_router(v2_endpoints.router, prefix="/api/v2")
 
 # --- Uvicorn 서버 실행 (로컬 개발 환경용) ---
 # 이 스크립트가 직접 실행될 때만 동작
