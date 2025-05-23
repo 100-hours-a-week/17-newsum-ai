@@ -25,6 +25,12 @@ from app.services.storage_service import StorageService
 from app.services.langsmith_service import LangSmithService
 from app.tools.search.Google_Search_tool import GoogleSearchTool
 
+# --- HEMA v2 서비스 임포트 ---
+from app.services.hema_service import HEMAService
+from app.services.turn_processing_service import TurnProcessingService
+from app.services.slm_task_manager import SLMTaskManager
+from app.clients.front_backend_api_client import FrontBackendAPIClient
+
 logger = get_logger("AppLifespan") # 로깅 설정 후 로거 가져오기
 
 _service_instances = [] # 종료 시 정리할 인스턴스 목록
@@ -133,6 +139,39 @@ async def startup_event():
         )
         _shared_state['compiled_app'] = compiled_app_instance
         logger.info("LangGraph workflow compiled successfully.")
+
+        # --- HEMA v2 서비스 초기화 ---
+        logger.info("Initializing HEMA v2 services...")
+        
+        # Front Backend API Client
+        front_backend_client = FrontBackendAPIClient()
+        _shared_state['front_backend_client'] = front_backend_client
+        _service_instances.append(front_backend_client)
+        logger.info("FrontBackendAPIClient initialized.")
+        
+        # HEMA Service
+        hema_service = HEMAService(front_backend_client=front_backend_client)
+        _shared_state['hema_service'] = hema_service
+        _service_instances.append(hema_service)
+        logger.info("HEMAService initialized.")
+        
+        # SLM Task Manager (Redis 기반)
+        slm_task_manager = SLMTaskManager(database_client=db_client)
+        _shared_state['slm_task_manager'] = slm_task_manager
+        _service_instances.append(slm_task_manager)
+        logger.info("SLMTaskManager initialized.")
+        
+        # Turn Processing Service (메인 워크플로우)
+        turn_processing_service = TurnProcessingService(
+            hema_service=hema_service,
+            slm_task_manager=slm_task_manager,
+            llm_service=llm_service
+        )
+        _shared_state['turn_processing_service'] = turn_processing_service
+        _service_instances.append(turn_processing_service)
+        logger.info("TurnProcessingService initialized.")
+        
+        logger.info("HEMA v2 services initialized successfully.")
 
     except Exception as e:
         logger.error(f"Error during service/workflow initialization: {e}", exc_info=True)

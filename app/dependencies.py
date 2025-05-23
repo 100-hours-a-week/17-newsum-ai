@@ -14,6 +14,12 @@ from app.services.langsmith_service import LangSmithService
 from app.tools.search.Google_Search_tool import GoogleSearchTool
 # TODO: Naver, Reddit 등 다른 검색 도구 추가 시 임포트
 
+# --- HEMA v2 서비스 임포트 ---
+from app.services.hema_service import HEMAService
+from app.services.turn_processing_service import TurnProcessingService
+from app.services.slm_task_manager import SLMTaskManager
+from app.clients.front_backend_api_client import FrontBackendAPIClient
+
 _shared_state: Dict[str, Any] = {} # lifespan에서 관리할 공유 객체 저장소
 
 def _get_shared_object(key: str) -> Any:
@@ -61,6 +67,23 @@ def get_google_search_tool() -> GoogleSearchTool:
     """Google 검색 도구 인스턴스 반환"""
     return _get_shared_object('Google Search_tool')
 
+# --- HEMA v2 의존성 주입 함수 ---
+def get_hema_service() -> HEMAService:
+    """HEMA 서비스 인스턴스 반환"""
+    return _get_shared_object('hema_service')
+
+def get_turn_processing_service() -> TurnProcessingService:
+    """턴 처리 서비스 인스턴스 반환"""
+    return _get_shared_object('turn_processing_service')
+
+def get_slm_task_manager() -> SLMTaskManager:
+    """SLM 작업 관리자 인스턴스 반환"""
+    return _get_shared_object('slm_task_manager')
+
+def get_front_backend_client() -> FrontBackendAPIClient:
+    """앞단 백엔드 API 클라이언트 인스턴스 반환"""
+    return _get_shared_object('front_backend_client')
+
 # --- 타입 어노테이션 기반 의존성 ---
 CompiledWorkflowDep = Annotated[StateGraph, Depends(get_compiled_workflow_app)]
 DatabaseClientDep = Annotated[DatabaseClient, Depends(get_db_client)]
@@ -71,3 +94,9 @@ SpamServiceDep = Annotated[SpamService, Depends(get_spam_service)]
 StorageServiceDep = Annotated[StorageService, Depends(get_storage_service)]
 LangSmithServiceDep = Annotated[LangSmithService, Depends(get_langsmith_service)]
 GoogleSearchToolDep = Annotated[GoogleSearchTool, Depends(get_google_search_tool)]
+
+# --- HEMA v2 타입 어노테이션 기반 의존성 ---
+HEMAServiceDep = Annotated[HEMAService, Depends(get_hema_service)]
+TurnProcessingServiceDep = Annotated[TurnProcessingService, Depends(get_turn_processing_service)]
+SLMTaskManagerDep = Annotated[SLMTaskManager, Depends(get_slm_task_manager)]
+FrontBackendClientDep = Annotated[FrontBackendAPIClient, Depends(get_front_backend_client)]

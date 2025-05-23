@@ -98,6 +98,41 @@ class Settings(BaseSettings):
     ORIGINAL_REPORT_LANGUAGE: str = "en"
     N06_REPORT_TRANSLATION_TARGET_LANG: str = "ko"
 
+    # --- HEMA v2 관련 설정 ---
+    # 앞단 백엔드 서버 API 설정
+    FRONT_BACKEND_API_URL: str = "http://localhost:8081"
+    FRONT_BACKEND_API_TIMEOUT: int = 30
+    FRONT_BACKEND_API_KEY: Optional[str] = Field(None)
+    
+    # Redis 채널 설정 (SLM 작업 큐)
+    SLM_INTERACTIVE_REQUEST_CHANNEL: str = "slm:tasks:request:interactive"
+    SLM_LONG_CONTEXT_REQUEST_CHANNEL: str = "slm:tasks:request:long_context"
+    SLM_RESPONSE_CHANNEL_PREFIX: str = "slm:tasks:response:"
+    SLM_RESPONSE_TIMEOUT: int = 30
+    
+    # vLLM 최적화 설정
+    WORKER_MAX_CONCURRENT_VLLM_REQUESTS: int = 4
+    MAX_PROMPT_TOKENS: int = 2048
+    DEFAULT_MAX_TOKENS: int = 512
+    VLLM_MAX_REQUEST_BATCH_SIZE: int = 128
+    
+    # HEMA 컨텍스트 관리
+    HEMA_CONTEXT_TOKEN_BUDGET: int = 1500
+    HEMA_MAX_SNIPPETS_PER_CONTEXT: int = 5
+    HEMA_MAX_IDEAS_PER_CONTEXT: int = 3
+    HEMA_CONTEXT_RELEVANCE_THRESHOLD: float = 0.7
+    
+    # HEMA 데이터 관리
+    HEMA_MAX_INTERACTION_LOGS: int = 100
+    HEMA_MAX_SUMMARY_LENGTH: int = 1000
+    HEMA_BULK_OPERATION_BATCH_SIZE: int = 50
+    
+    # 성능 및 안정성 설정
+    TURN_PROCESSING_TIMEOUT: int = 60
+    HEMA_DATA_SYNC_TIMEOUT: int = 15
+    REQUEST_PROFILING_ENABLED: bool = True
+    DEBUG_MODE: bool = False
+
 # 설정 객체 인스턴스 생성
 settings = Settings()
 
