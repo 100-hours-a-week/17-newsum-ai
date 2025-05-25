@@ -5,13 +5,11 @@ import itertools
 import tldextract
 from typing import List
 
-from app.api.v2.schemas.nodes.query_intent import (
-    validate_query_analysis,
-    ValidationError,
-)
 from app.services.llm_service import LLMService
 from app.tools.think_parser_tool import extract_json
 from app.workflows.state_v2 import WorkflowState
+from app.api.v2.schemas.nodes.query_intent import validate_query_analysis
+from pydantic import ValidationError
 
 # ---------------------------
 # 1. 신뢰 도메인 정의
