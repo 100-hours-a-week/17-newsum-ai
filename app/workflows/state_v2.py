@@ -1,16 +1,20 @@
 from __future__ import annotations
 from pydantic import BaseModel, Field
-from datetime import datetime, timezone
-from typing import Optional, Dict
+from typing import Optional, List
+
+from app.api.v2.schemas.nodes.query_intent import FrameSchema
+from app.api.v2.schemas.nodes.search_frame import FrameSearchPlan
+
 
 class QuerySection(BaseModel):
     original_query: Optional[str] = None
     category: Optional[str] = None
     refined_intent: Optional[str] = None
-    frames: Optional[Dict[str, list]] = Field(default_factory=dict)
+    frames: List[FrameSchema] = Field(default_factory=list)
+    search_plan: List[FrameSearchPlan] = Field(default_factory=list)
+
 
 class WorkflowState(BaseModel):
-    # Only QueryIntent for now
     query: QuerySection = Field(default_factory=QuerySection)
 
     model_config = {
