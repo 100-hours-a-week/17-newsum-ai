@@ -41,11 +41,10 @@ For each frame, return a JSON object:
   "queries_ko": ["한글 키워드1", "한글 키워드2", ...],  // 2-4개, 반드시 한글
   "queries_en": ["English keyword1", "English keyword2", ...],  // 2-4개, 반드시 영어
   "tool": "news|site|community|youtube|blog|web",  // 반드시 프레임 목적에 따라 다양하게 선택
-  "domains": ["domain1.com", ...],           // choose mainly from: {domain_hint} (ex: community 프레임은 커뮤니티 도메인에서만 선택)
+  "domains": ["domain1.com", ...],           // choose mainly from: {domain_hint}
   "max_results": 5
 }}
 - For each frame, always provide both Korean and English queries (queries_ko, queries_en).
-- At least one frame should use "community" as the tool and select domains from community sites (e.g., 9gag.com, reddit.com, imgur.com, knowyourmeme.com, memedroid.com).
 Return a JSON list ONLY, NO think, NO explanation, NO comment."""
 
     @staticmethod

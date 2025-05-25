@@ -17,10 +17,10 @@ CATEGORY_DOMAINS = {
         "marketwatch.com", "cnbc.com", "hankyung.com", "mk.co.kr",
         "sedaily.com", "etoday.co.kr"
     ],
-    "Meme": [  # punchline 전용 커뮤니티
-        "reddit.com", "knowyourmeme.com", "imgur.com", "memedroid.com",
-        "9gag.com"
-    ],
+    # "Meme": [  # punchline 전용 커뮤니티
+    #     "reddit.com", "knowyourmeme.com", "imgur.com", "memedroid.com",
+    #     "9gag.com"
+    # ],
 }
 
 ALL_DOMAINS: List[str] = list(

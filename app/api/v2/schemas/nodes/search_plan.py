@@ -6,7 +6,7 @@ class FrameSearchPlan(BaseModel):
     title: str
     purpose: Literal["explanation", "conflict", "punchline"]
     queries: List[str] = Field(..., min_items=1)
-    tool: Literal["news", "site", "community", "youtube", "blog", "web"]
+    tool: Literal["news", "site", "youtube", "blog", "web"] #, "community"]
     domains: List[str] = Field(..., min_items=1)
     max_results: int = 5
 
