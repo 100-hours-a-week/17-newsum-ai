@@ -410,6 +410,52 @@ class GoogleSearchTool:
             logger.warning(f"API를 통해 YouTube 비디오 상세 정보를 찾을 수 없음: {video_id}", extra=extra_log_data)
             return None
 
+    async def dispatch(self, tool: str, queries, domains, max_results=5, trace_id=None):
+        if tool == "community":
+            return await self.search_communities_via_cse(
+                queries[0],
+                max_results=max_results,
+                trace_id=trace_id
+            )
+        elif tool == "site":
+            return await self.search_specific_sites_via_cse(
+                queries[0],
+                sites=domains,
+                max_results=max_results,
+                trace_id=trace_id
+            )
+        elif tool == "news":
+            return await self.search_news_via_cse(
+                queries[0],
+                max_results=max_results,
+                trace_id=trace_id
+            )
+        elif tool == "web":
+            return await self.search_web_via_cse(
+                queries[0],
+                max_results=max_results,
+                trace_id=trace_id
+            )
+        elif tool == "youtube":
+            return await self.search_youtube_videos(
+                queries[0],
+                max_results=max_results,
+                trace_id=trace_id
+            )
+        elif tool == "blog":
+            return await self.search_blogs_via_cse(
+                queries[0],
+                max_results=max_results,
+                trace_id=trace_id
+            )
+        else:
+            # fallback to web
+            return await self.search_web_via_cse(
+                queries[0],
+                max_results=max_results,
+                trace_id=trace_id
+            )
+
     async def close(self):
         if self._session and self._created_session and not self._session.closed:
             await self._session.close()

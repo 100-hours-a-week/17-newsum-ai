@@ -4,7 +4,7 @@ import os
 # 'tests/node_test/' 기준으로 루트 디렉토리로 경로 추가
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 
-from app.workflows.v2_workflow import full_workflow
+from app.workflows.v2_workflow import compile_full_workflow
 from app.services.llm_service import LLMService
 from app.services.image_service import ImageService
 from app.services.storage_service import StorageService
@@ -26,7 +26,7 @@ async def run_test():
     state.query.original_query = "최근 미국 중서부 지역에서 발생한 폭풍 피해 상황을 풍자 만화로 만들어주세요."
 
     # 워크플로우 실행
-    graph = await full_workflow(
+    graph = await compile_full_workflow(
         llm_service=llm,
         google_search_tool=search_tool,
         image_generation_service=image_service,
@@ -37,32 +37,33 @@ async def run_test():
 
     # 결과 꺼내기
     query = result["query"]
+    search = result["search"]
 
     # 결과 출력
     print("✅ Refined Intent:", query.refined_intent)
     print("✅ Search Plan:")
-    for plan in query.search_plan:
-        print(f" - [{plan.purpose}] {plan.title} → {plan.tool} → {plan.queries}")
+    for plan in search.search_plan:
+        print(f" - [{plan['purpose']}] {plan['title']} → {plan['tool']} → {plan['queries']}")
 
     print("✅ Search Results:")
-    for res in query.search_results:
+    for res in search.search_results:
         print("-----")
-        print(f"Frame {res.frame_index}: {res.title} ({res.purpose})")
-        print(f"Docs Returned: {len(res.result_docs)}")
-        for doc in res.result_docs:
-            print(f"- {doc.title} ({doc.site})")
-            print(f"  ↪ {doc.snippet[:200]}...")
+        print(f"Frame {res['index']}: {res['title']} ({res['purpose']})")
+        print(f"Docs Returned: {len(res['docs'])}")
+        for doc in res['docs']:
+            print(f"- {doc.get('title', '')} ({doc.get('site', '')})")
+            print(f"  ↪ {doc.get('snippet', '')[:200]}...")
 
     print("--------------------------------")
     print("🚀 Workflow State:")
     print("  - Query Original Query:", state.query.original_query)
     print("  - Query Refined Intent:", query.refined_intent)
     print("  - Search Plan:")
-    for plan in query.search_plan:
-        print(f"    - [{plan.purpose}] {plan.title} → {plan.tool} → {plan.queries}")
+    for plan in search.search_plan:
+        print(f"    - [{plan['purpose']}] {plan['title']} → {plan['tool']} → {plan['queries']}")
     print("  - Search Results:")
-    for res in query.search_results:
-        print(f"    - Frame {res.frame_index} ({res.title}): {len(res.result_docs)} docs")
+    for res in search.search_results:
+        print(f"    - Frame {res['index']} ({res['title']}): {len(res['docs'])} docs")
     
     # 세션 종료
     await search_tool._session.close()

@@ -10,48 +10,15 @@ from app.tools.think_parser_tool import extract_json
 from app.workflows.state_v2 import WorkflowState
 from app.api.v2.schemas.nodes.query_intent import validate_query_analysis
 from pydantic import ValidationError
-
-# ---------------------------
-# 1. 신뢰 도메인 정의
-# ---------------------------
-CATEGORY_DOMAINS = {
-    "Politics": [
-        "bbc.com", "cnn.com", "politico.com", "reuters.com", "nytimes.com",
-        "theguardian.com", "chosun.com", "joongang.co.kr", "hani.co.kr",
-        "khan.co.kr", "ohmynews.com"
-    ],
-    "IT": [
-        "techcrunch.com", "wired.com", "theverge.com", "zdnet.com",
-        "arstechnica.com", "zdnet.co.kr", "etnews.com", "bloter.net",
-        "itworld.co.kr"
-    ],
-    "Economy": [
-        "bloomberg.com", "ft.com", "reuters.com", "forbes.com",
-        "marketwatch.com", "cnbc.com", "hankyung.com", "mk.co.kr",
-        "sedaily.com", "etoday.co.kr"
-    ],
-    "Meme": [  # punchline 전용 커뮤니티
-        "reddit.com", "knowyourmeme.com", "imgur.com", "memedroid.com",
-        "9gag.com"
-    ],
-}
-ALL_DOMAINS: List[str] = list(
-    set(itertools.chain.from_iterable(CATEGORY_DOMAINS.values()))
-)
-
-CATEGORY_HINT = "Politics | IT | Economy"
-PURPOSE_HINT = "explanation | conflict | punchline"
+from app.nodes_v2.site_domain import CATEGORY_DOMAINS, ALL_DOMAINS, CATEGORY_HINT, PURPOSE_HINT
 
 
-# ---------------------------
-# 2. QueryIntentNode
-# ---------------------------
 class QueryIntentNode:
     def __init__(self, llm: LLMService):
         self.llm = llm
 
     # -----------------------
-    # 2-1. LLM 프롬프트 생성
+    # 1. LLM 프롬프트 생성
     # -----------------------
     def build_prompt(self, trusted_sites: list) -> str:
         schema_example = {
@@ -72,7 +39,7 @@ class QueryIntentNode:
         )
 
         return f"""당신은 뉴스 기반 풍자 만화를 기획하기 위한 '의도 분석' 에이전트입니다.
-다음 지침을 철저히 따른 **JSON** 만 반환하세요 (추가 텍스트, <think> 금지).
+Return a JSON list ONLY, NO think, NO explanation, NO comment.
 
 # 스키마 예시
 {json_example}
@@ -90,7 +57,7 @@ class QueryIntentNode:
 """
 
     # -----------------------
-    # 2-2. 도메인 유틸
+    # 2. 도메인 유틸
     # -----------------------
     @staticmethod
     def domain_from_url(url: str) -> str:
@@ -101,7 +68,7 @@ class QueryIntentNode:
         return ALL_DOMAINS
 
     # -----------------------
-    # 2-3. 메인 실행 함수
+    # 3. 메인 실행 함수
     # -----------------------
     async def run(self, state: WorkflowState) -> WorkflowState:
         user_query = state.query.original_query or ""
@@ -115,6 +82,8 @@ class QueryIntentNode:
             max_tokens=1500,
         )
         raw_txt = llm_resp.get("generated_text", "")
+        print("RAW")
+        print(raw_txt)
         parsed_json = extract_json(raw_txt)
 
         # ② 구조 검증

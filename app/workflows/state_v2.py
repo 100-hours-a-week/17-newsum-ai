@@ -1,23 +1,21 @@
 from __future__ import annotations
 from pydantic import BaseModel, Field
-from typing import Optional, List
-
-from app.api.v2.schemas.nodes.query_intent import FrameSchema
-from app.api.v2.schemas.nodes.search_frame import FrameSearchPlan
-from app.api.v2.schemas.nodes.multi_search import SearchResultSchema
-
+from typing import Optional, Dict, List, Any
 
 class QuerySection(BaseModel):
     original_query: Optional[str] = None
     category: Optional[str] = None
     refined_intent: Optional[str] = None
-    frames: List[FrameSchema] = Field(default_factory=list)
-    search_plan: List[FrameSearchPlan] = Field(default_factory=list)
-    search_results: List[SearchResultSchema] = Field(default_factory=list)
+    frames: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
 
+class SearchSection(BaseModel):
+    search_plan: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
+    search_results: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
+    user_feedback: Optional[str] = None   # 🔹 사용자 수정·추가 요청
 
 class WorkflowState(BaseModel):
     query: QuerySection = Field(default_factory=QuerySection)
+    search: SearchSection = Field(default_factory=SearchSection)
 
     model_config = {
         "validate_assignment": False,
