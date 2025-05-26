@@ -9,10 +9,17 @@ from fastapi import FastAPI
 
 # API 라우트 정의
 from app.api.v1 import endpoints as v1_endpoints
-from app.api.v2 import process_turn_v2 as v2_endpoints
+from app.api.v2 import endpoints as v2_endpoints
 
 # 애플리케이션 시작/종료 시 실행될 로직 (예: 모델 로딩, 워크플로우 컴파일)
 from app.lifespan import lifespan
+
+from app.config.settings import Settings # 변경: 중앙 설정 객체 임포트
+from app.utils.logger import get_logger
+
+# 로거 설정
+logger = get_logger(__name__)
+settings = Settings()
 
 # 로깅 설정 함수 (lifespan 등에서 호출될 수 있음)
 # from app.utils.logging_config import setup_logging, get_logger
@@ -37,7 +44,7 @@ app = FastAPI(
 # --- API 라우터 등록 ---
 # '/api/v1' 경로로 들어오는 요청을 v1_endpoints.router 가 처리하도록 설정
 app.include_router(v1_endpoints.router, prefix="/api/v1")
-# '/api/v2' 경로로 들어오는 요청을 v2_endpoints.router 가 처리하도록 설정
+# '/api/v2' 경로로 들어오는 요청을 v2_endpoints.router 가 처리하도록 설정  
 app.include_router(v2_endpoints.router, prefix="/api/v2")
 
 # --- Uvicorn 서버 실행 (로컬 개발 환경용) ---
@@ -56,11 +63,28 @@ if __name__ == "__main__":
     # state, result_dict = run_full_workflow(...)
     # if print_final_state_debug:
     #     print_final_state_debug(state, result_dict)
+    width = 50
+    line = f"+{'-' * (width - 2)}+"
 
+    # f-string을 사용하여 여러 줄의 로그 메시지 생성
+    startup_message = f"""
+    {line}
+    | {'Application Settings Initialized':^{width - 4}} |
+    {line}
+    | {'App Name:':<15} {str(settings.APP_NAME):<{width - 22}} |
+    | {'App Version:':<15} {str(settings.APP_VERSION):<{width - 22}} |
+    | {'Host:':<15} {str(settings.APP_HOST):<{width - 22}} |
+    | {'Port:':<15} {str(settings.APP_PORT):<{width - 22}} |
+    | {'Log Level:':<15} {str(settings.LOG_LEVEL):<{width - 22}} |
+    {line}
+    """
+
+    # 생성된 메시지를 logger.info로 출력
+    logger.info(startup_message)
     uvicorn.run(
-        "main:app",       # 실행할 FastAPI 앱 (main.py 파일의 app 객체)
-        host="0.0.0.0",   # 외부 접속 허용 (예: settings.APP_HOST)
-        port=8080,        # 사용할 포트 (예: settings.APP_PORT)
-        log_level="info", # 로그 레벨 (예: settings.LOG_LEVEL)
+        "main:app",      # 실행할 FastAPI 앱 (main.py 파일의 app 객체)
+        host=settings.APP_HOST,   # 외부 접속 허용 (예: settings.APP_HOST)
+        port=settings.APP_PORT,        # 사용할 포트 (예: settings.APP_PORT)
+        log_level=settings.LOG_LEVEL, # 로그 레벨 (예: settings.LOG_LEVEL)
         #reload=True       # 코드 변경 시 자동 재시작 (개발 시 유용, 예: settings.APP_RELOAD)
     )

@@ -4,7 +4,7 @@ import redis.asyncio as redis
 import json
 import asyncio
 from app.config.settings import Settings # 변경: 중앙 설정 객체 임포트
-from typing import Optional, Any, Dict, Union, Callable, Coroutine
+from typing import Optional, Any, Dict, Union, Callable, Coroutine, List
 from app.utils.logger import get_logger
 
 # 로거 설정
@@ -254,6 +254,104 @@ class DatabaseClient:
                 self.client = None
             except Exception as e:
                 logger.error(f"Error closing Redis client connection: {e}", exc_info=True)
+
+    # === Redis Queue 기능 (lpush, brpop) ===
+
+    async def lpush(self, queue_name: str, task_value: Any) -> Optional[int]:  # task -> task_value로 변경, 타입 Any
+        """
+        Redis List의 왼쪽에 작업을 추가합니다.
+        task_value가 dict 또는 list인 경우 JSON 직렬화를 수행하고,
+        이미 str인 경우 그대로 사용합니다.
+
+        Args:
+            queue_name (str): 큐 이름
+            task_value (Any): 추가할 작업 데이터 (str, dict, list 등)
+
+        Returns:
+            Optional[int]: 큐의 새로운 길이 또는 실패 시 None
+        """
+        if not self.client:
+            self.logger.error("Redis 클라이언트 미초기화 - lpush 불가.")
+            return None
+        try:
+            # task_value가 이미 문자열인지, 아니면 직렬화가 필요한 객체인지 확인
+            if isinstance(task_value, str):
+                value_to_push = task_value
+            elif isinstance(task_value, (dict, list)):
+                value_to_push = json.dumps(task_value)
+            else:
+                # 다른 타입은 문자열로 변환 시도 (또는 에러 처리)
+                try:
+                    value_to_push = json.dumps(task_value)
+                except TypeError:
+                    self.logger.error(f"Redis LPUSH 실패: 직렬화할 수 없는 타입입니다. queue='{queue_name}', type={type(task_value)}")
+                    return None
+
+            self.logger.debug(f"Redis LPUSH: queue='{queue_name}', value(preview)='{value_to_push[:150]}...'")
+            return await self.client.lpush(queue_name, value_to_push)
+        except redis.RedisError as e:
+            self.logger.error(f"Redis LPUSH 실패 (Redis 오류): queue='{queue_name}', error={e}", exc_info=True)
+            return None
+        except Exception as e:
+            self.logger.error(f"Redis LPUSH 실패 (알 수 없는 오류): queue='{queue_name}', error={e}", exc_info=True)
+            return None
+
+    async def brpop(self, queue_name: Union[str, List[str]], timeout: int = 0) -> Optional[tuple]:  # 반환 타입을 튜플로 명시
+        """
+        Redis List의 오른쪽에서 작업을 블로킹 방식으로 가져옵니다.
+        표준 redis-py와 같이 (큐 이름, 값) 튜플 또는 None을 반환합니다.
+        값은 문자열 형태입니다 (decode_responses=True 설정 시).
+
+        Args:
+            queue_name (Union[str, List[str]]): 큐 이름 또는 큐 이름의 리스트 (우선순위 큐 사용 시)
+            timeout (int): 타임아웃 (초), 0은 무한 대기
+
+        Returns:
+            Optional[tuple]: (큐 이름, 작업 데이터 문자열) 튜플 또는 타임아웃 시 None
+        """
+        if not self.client:
+            self.logger.error("Redis 클라이언트 미초기화 - brpop 불가.")
+            return None
+        try:
+            self.logger.debug(f"Redis BRPOP: 대기 시작 - queue(s)='{queue_name}', timeout={timeout}s")
+
+            # redis.Redis.brpop은 (key, value) 튜플 또는 None을 반환합니다.
+            # decode_responses=True로 초기화했으므로, key와 value는 문자열입니다.
+            result_tuple = await self.client.brpop(queue_name, timeout=timeout)  # <--- 이 결과를 그대로 반환
+
+            if result_tuple:
+                # result_tuple은 (b'queue_name', b'value') 또는 ('queue_name', 'value') 형태
+                self.logger.debug(
+                    f"Redis BRPOP: 작업 수신 - queue='{result_tuple[0]}', value(preview)='{str(result_tuple[1])[:100]}...'")
+                return result_tuple  # (큐 이름, 값) 튜플을 직접 반환
+            else:
+                self.logger.debug(f"Redis BRPOP: 타임아웃 또는 큐 비어있음 - queue(s)='{queue_name}'")
+                return None
+        except redis.RedisError as e:
+            self.logger.error(f"Redis BRPOP 실패 (Redis 오류): queue(s)='{queue_name}', error={e}", exc_info=True)
+            return None
+        except Exception as e:
+            self.logger.error(f"Redis BRPOP 실패 (알 수 없는 오류): queue(s)='{queue_name}', error={e}", exc_info=True)
+            return None
+
+    async def llen(self, queue_name: str) -> Optional[int]:
+        """
+        Redis List의 길이를 반환합니다.
+        
+        Args:
+            queue_name (str): 큐 이름
+            
+        Returns:
+            Optional[int]: 큐의 길이 또는 실패 시 None
+        """
+        if not self.client:
+            self.logger.error("Redis 클라이언트 미초기화 - llen 불가.")
+            return None
+        try:
+            return await self.client.llen(queue_name)
+        except redis.RedisError as e:
+            self.logger.error(f"Redis LLEN 실패: queue='{queue_name}', error={e}", exc_info=True)
+            return None
 
 # --- 사용 예시 ---
 # async def my_callback(message: Any):

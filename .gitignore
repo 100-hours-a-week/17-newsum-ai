@@ -7,7 +7,8 @@ venv/
 
 # Python bytecode 캐시
 __pycache__/
-**/__pycache__/
+**/__pycache__/**
+*.pyc
 *.py[cod]
 *$py.class
 
@@ -20,7 +21,26 @@ requirements.txt~
 *.iml
 
 # 환경 변수 파일
+*.env
 .env
+.idea
+
+# SSH 키 파일 및 인증 관련
+*
+!*.*
+!*/
+newsum-dev-key
+newsum-dev-key.pub
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.csr
+id_rsa
+id_rsa.pub
+id_ed25519
+id_ed25519.pub
 
 # 생성된 데이터
 data/
@@ -43,6 +63,7 @@ var/
 *.egg-info/
 .installed.cfg
 *.egg
+#pre-test/qwen3-14b-awq/
 pre-test/
 
 # 테스트 캐시
@@ -50,3 +71,5 @@ pre-test/
 
 # 테스트 기록파일
 results/
+scripts/
+.sql
