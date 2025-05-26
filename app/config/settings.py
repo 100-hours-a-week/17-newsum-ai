@@ -25,9 +25,24 @@ class Settings(BaseSettings):
     APP_HOST: str = "0.0.0.0"
     APP_PORT: int = 8090 # <<< 실행 로그에서 사용된 포트로 수정
     APP_RELOAD: bool = True
+    
+    # --- PostgreSQL 데이터베이스 ---
+    POSTGRES_HOST: str = "localhost"
+    POSTGRES_PORT: int = 5432
+    POSTGRES_USER: str = "newsum_user"
+    POSTGRES_PASSWORD: Optional[str] = Field(None)
+    POSTGRES_DB: str = "newsum"
+    POSTGRES_MIN_CONNECTIONS: int = 5
+    POSTGRES_MAX_CONNECTIONS: int = 20
+
+    # --- SSH 연결 설정 (필요시) ---
+    SSH_HOST: Optional[str] = Field(None)
+    SSH_USER: Optional[str] = Field(None)
+    SSH_KEY_PATH: Optional[str] = Field(None)
+    SSH_PORT: int = 22
 
     # --- 로깅 설정 ---
-    LOG_LEVEL: str = "INFO"
+    LOG_LEVEL: Optional[str] = Field(None)
     # <<< 수정: validation_alias 제거 (필드명과 동일하여 불필요), 기본값 명확화
     LOG_CONFIG_PATH: Optional[str] = Field(str(PROJECT_ROOT / "logging_config.yaml"))
 
@@ -72,7 +87,8 @@ class Settings(BaseSettings):
     GOOGLE_API_KEY: Optional[str] = Field(None) 
     GOOGLE_CSE_ID: Optional[str] = Field(None) 
     TARGET_COMMUNITY_DOMAINS: List[str] = Field(default_factory=list) 
-    EXTERNAL_NOTIFICATION_API_URL: Optional[str] = Field(None) 
+    EXTERNAL_NOTIFICATION_API_URL: Optional[str] = Field(None)
+    BACKEND_RECEIVE_API_URL: Optional[str] = Field(None)
     EXTERNAL_API_TIMEOUT_SECONDS: int = 30
 
     # --- 도구 공통 설정 ---
@@ -97,41 +113,6 @@ class Settings(BaseSettings):
     TRANSLATION_BATCH_CHAR_LIMIT: int = 25000
     ORIGINAL_REPORT_LANGUAGE: str = "en"
     N06_REPORT_TRANSLATION_TARGET_LANG: str = "ko"
-
-    # --- HEMA v2 관련 설정 ---
-    # 앞단 백엔드 서버 API 설정
-    FRONT_BACKEND_API_URL: str = "http://localhost:8081"
-    FRONT_BACKEND_API_TIMEOUT: int = 30
-    FRONT_BACKEND_API_KEY: Optional[str] = Field(None)
-    
-    # Redis 채널 설정 (SLM 작업 큐)
-    SLM_INTERACTIVE_REQUEST_CHANNEL: str = "slm:tasks:request:interactive"
-    SLM_LONG_CONTEXT_REQUEST_CHANNEL: str = "slm:tasks:request:long_context"
-    SLM_RESPONSE_CHANNEL_PREFIX: str = "slm:tasks:response:"
-    SLM_RESPONSE_TIMEOUT: int = 30
-    
-    # vLLM 최적화 설정
-    WORKER_MAX_CONCURRENT_VLLM_REQUESTS: int = 4
-    MAX_PROMPT_TOKENS: int = 2048
-    DEFAULT_MAX_TOKENS: int = 512
-    VLLM_MAX_REQUEST_BATCH_SIZE: int = 128
-    
-    # HEMA 컨텍스트 관리
-    HEMA_CONTEXT_TOKEN_BUDGET: int = 1500
-    HEMA_MAX_SNIPPETS_PER_CONTEXT: int = 5
-    HEMA_MAX_IDEAS_PER_CONTEXT: int = 3
-    HEMA_CONTEXT_RELEVANCE_THRESHOLD: float = 0.7
-    
-    # HEMA 데이터 관리
-    HEMA_MAX_INTERACTION_LOGS: int = 100
-    HEMA_MAX_SUMMARY_LENGTH: int = 1000
-    HEMA_BULK_OPERATION_BATCH_SIZE: int = 50
-    
-    # 성능 및 안정성 설정
-    TURN_PROCESSING_TIMEOUT: int = 60
-    HEMA_DATA_SYNC_TIMEOUT: int = 15
-    REQUEST_PROFILING_ENABLED: bool = True
-    DEBUG_MODE: bool = False
 
 # 설정 객체 인스턴스 생성
 settings = Settings()

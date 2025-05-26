@@ -11,9 +11,15 @@ from .background_tasks import trigger_workflow_task
 # 의존성 주입 관련 임포트
 from app.dependencies import CompiledWorkflowDep, DatabaseClientDep
 
+# LLM 큐 라우터 임포트
+from .llm_endpoints import router as llm_router
+
 logger = get_logger(__name__)
 
 router = APIRouter(tags=["Comics V1"])  # API 라우터 설정
+
+# LLM 큐 라우터 포함
+router.include_router(llm_router, prefix="/llm", tags=["LLM Queue"])
 
 
 @router.post(
