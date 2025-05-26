@@ -21,9 +21,9 @@ from app.nodes_v2.n04_execute_search_node import N04ExecuteSearchNode
 from app.nodes_v2.n05_report_generation_node import N05ReportGenerationNode
 # from app.nodes.n05_hitl_review_node import N05HITLReviewNode  # HITL 노드 추가
 from app.nodes_v2.n06_save_report_node import N06SaveReportNode
-# from app.nodes.n06a_contextual_summary_node import N06AContextualSummaryNode
-# from app.nodes.n07_comic_ideation_node import N07ComicIdeationNode
-# from app.nodes.n08_scenario_generation_node import N08ScenarioGenerationNode
+from app.nodes_v2.n06b_contextual_summary_node import N06BContextualSummaryNode
+from app.nodes_v2.n07_comic_ideation_node import N07ComicIdeationNode
+from app.nodes_v2.n08_scenario_generation_node import N08ScenarioGenerationNode
 # from app.nodes.n09_image_generation_node import N09ImageGenerationNode # <<< N09 임포트
 # from app.nodes.n10_finalize_and_notify_node import N10FinalizeAndNotifyNode # <<< N10 임포트
 
@@ -63,9 +63,9 @@ async def compile_workflow(
     n05_report_generation = N05ReportGenerationNode(llm_service=llm_service)
     # n05_hitl_review = N05HITLReviewNode(llm_service=llm_service)  # LLM 서비스 주입
     n06_save_report = N06SaveReportNode()
-    # n06a_contextual_summary = N06AContextualSummaryNode(llm_service=llm_service)
-    # n07_comic_ideation = N07ComicIdeationNode(llm_service=llm_service)
-    # n08_scenario_generation = N08ScenarioGenerationNode(llm_service=llm_service)
+    n06b_contextual_summary = N06BContextualSummaryNode(llm_service=llm_service)
+    n07_comic_ideation = N07ComicIdeationNode(llm_service=llm_service)
+    n08_scenario_generation = N08ScenarioGenerationNode(llm_service=llm_service)
     # n09_image_generation = N09ImageGenerationNode(image_service=image_generation_service)
     # n10_finalize_and_notify = N10FinalizeAndNotifyNode(
     #     storage_service=storage_service,
@@ -79,9 +79,9 @@ async def compile_workflow(
     workflow.add_node("n05_report_generation", n05_report_generation.run)
     # workflow.add_node("n05_hitl_review", n05_hitl_review.run)  # HITL 노드 추가
     workflow.add_node("n06_save_report", n06_save_report.run)
-    # workflow.add_node("n06a_contextual_summary", n06a_contextual_summary.run)
-    # workflow.add_node("n07_comic_ideation", n07_comic_ideation.run)
-    # workflow.add_node("n08_scenario_generation", n08_scenario_generation.run)
+    workflow.add_node("n06b_contextual_summary", n06b_contextual_summary.run)
+    workflow.add_node("n07_comic_ideation", n07_comic_ideation.run)
+    workflow.add_node("n08_scenario_generation", n08_scenario_generation.run)
     # workflow.add_node("n09_image_generation", n09_image_generation.run) # <<< N09 노드 추가
     # workflow.add_node("n10_finalize_and_notify", n10_finalize_and_notify.run)  # <<< N10 노드 추가
 
@@ -111,10 +111,10 @@ async def compile_workflow(
 
     # # HITL 이후 노드들
     workflow.add_edge("n05_report_generation", "n06_save_report")
-    workflow.add_edge("n06_save_report", END)
-    # workflow.add_edge("n06_save_report", "n06a_contextual_summary")
-    # workflow.add_edge("n06a_contextual_summary", "n07_comic_ideation")
-    # workflow.add_edge("n07_comic_ideation", "n08_scenario_generation")
+    workflow.add_edge("n06_save_report", "n06b_contextual_summary")
+    workflow.add_edge("n06b_contextual_summary", "n07_comic_ideation")
+    workflow.add_edge("n07_comic_ideation", "n08_scenario_generation")
+    workflow.add_edge("n08_scenario_generation", END)
     # workflow.add_edge("n08_scenario_generation", "n09_image_generation")
     # workflow.add_edge("n09_image_generation", "n10_finalize_and_notify")
     # workflow.add_edge("n10_finalize_and_notify", END)
