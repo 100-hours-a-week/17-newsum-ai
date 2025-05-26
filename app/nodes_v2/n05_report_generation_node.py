@@ -109,8 +109,11 @@ class N05ReportGenerationNode:
         )
         return f"""
 You are an expert research report generation agent.
-Use the following inputs to write a detailed, structured report in JSON.
-Write all text content in Korean (한국어로 작성하세요).
+Using the provided search snippets, write a detailed and structured report in JSON format.
+Write in natural Korean (한국어로 작성하세요), targeting a professional but non-specialist audience (e.g., tech readers, policymakers, advanced students).
+
+Each 'section' in the JSON should consist of 3 to 5 well-developed paragraphs (~300+ words), clearly explaining the key aspect with relevant facts, analysis, and examples.
+Avoid vague statements or generic text. Emphasize clarity and insight.
 
 # Inputs
 Original Query: "{original_query}"
@@ -118,9 +121,9 @@ Refined Core Question: "{refined_intent}"
 Context Snippets (up to {len(snippets)} items):
 {snippets_text}
 
-# Output Format
 Return ONLY valid JSON matching the schema below, NO think tags, NO explanation, NO comments.
 
+# Output Format
 {json_schema}
 """
 
@@ -163,7 +166,7 @@ Return ONLY valid JSON matching the schema below, NO think tags, NO explanation,
             system_prompt_content=system_prompt,
             prompt=refined_intent,
             temperature=0.3,
-            max_tokens=3000,
+            max_tokens=4096,
         )
         raw_txt = llm_resp.get("generated_text", "")
         logger.debug("Raw LLM response for report JSON: %s", raw_txt, extra=extra)
