@@ -59,7 +59,7 @@ Each insight should be a concise sentence or short paragraph (20~40 words).
 {report_text[:8000]}
 
 # Output Format
-Return ONLY valid JSON matching this schema, with key "contextual_summary" and an array of strings:
+Return ONLY valid JSON matching the schema and key "contextual_summary" below, NO think tags, NO explanation, NO comments.:
 {json_schema}
 """
 

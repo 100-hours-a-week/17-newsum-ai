@@ -63,7 +63,10 @@ System Prompt:
 
 Generate 3 to {MAX_INSIGHTS} key insights in JSON only.
 Write in clear Korean (한국어로 작성하세요).
-Output format (JSON only):
+
+Return ONLY valid JSON matching the schema below, NO think tags, NO explanation, NO comments.
+
+Output format:
 {schema}
 
 User Context:
@@ -78,7 +81,7 @@ Report Summary:
             system_prompt_content=prompt,
             prompt=refined_intent,
             temperature=0.3,
-            max_tokens=500
+            max_tokens=1000
         )
         raw = response.get("generated_text", "")
         logger.debug(f"Raw insights JSON: {raw}", extra=extra)
@@ -135,7 +138,7 @@ Key Insights:
             system_prompt_content=prompt,
             prompt=refined_intent,
             temperature=0.7,
-            max_tokens=1000
+            max_tokens=1500
         )
         raw = response.get("generated_text", "")
         logger.debug(f"Raw ideas JSON: {raw}", extra=extra)

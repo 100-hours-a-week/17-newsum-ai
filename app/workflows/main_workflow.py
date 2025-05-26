@@ -114,7 +114,11 @@ async def compile_workflow(
     workflow.add_edge("n06_save_report", "n06b_contextual_summary")
     workflow.add_edge("n06b_contextual_summary", "n07_comic_ideation")
     workflow.add_edge("n07_comic_ideation", "n08_scenario_generation")
-    workflow.add_edge("n08_scenario_generation", END)
+
+    from app.nodes_v2.show_state_node import ShowStateNode
+    workflow.add_node("show_state", ShowStateNode().run)
+    workflow.add_edge("n08_scenario_generation", "show_state")
+    workflow.add_edge("show_state", END)
     # workflow.add_edge("n08_scenario_generation", "n09_image_generation")
     # workflow.add_edge("n09_image_generation", "n10_finalize_and_notify")
     # workflow.add_edge("n10_finalize_and_notify", END)
