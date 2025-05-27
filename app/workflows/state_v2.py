@@ -64,6 +64,7 @@ class ScenarioSection(BaseModel):
 
 
 class ImageSection(BaseModel):
+    refined_prompts: List[Dict[str, Any]] = Field(default_factory=list) # 썸네일, 패널 프롬프트 모두 저장
     generated_comic_images: List[Dict[str, Any]] = Field(default_factory=list)
 
 
