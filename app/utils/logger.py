@@ -4,15 +4,14 @@ import logging.config
 import yaml
 from pathlib import Path
 import sys
-import json  # JSON 직렬화 위해 추가
-from typing import Any, Dict, List, Optional  # 타입 힌트 추가
+import json
+from typing import Any, Dict, List, Optional
 
 # --- 로깅 설정 파일 경로 및 로그 디렉토리 ---
-# 이 파일 기준 상위 2단계인 ai/ 디렉토리를 프로젝트 루트로 가정
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]  # ai/
 DEFAULT_LOGGING_CONFIG_PATH = PROJECT_ROOT / 'logging_config.yaml'
-# 기본 로그 디렉토리 경로도 설정 파일 로드 전에 필요할 수 있으므로 정의
-DEFAULT_LOG_DIR = PROJECT_ROOT / 'app' / 'log'
+# ⬇️ 기본 로그 디렉토리 경로를 프로젝트 루트 기준으로 변경 ⬇️
+DEFAULT_LOG_DIR = PROJECT_ROOT / 'logs'
 
 
 # --- 로깅 필터 ---
@@ -20,10 +19,8 @@ class ContextFilter(logging.Filter):
     """로그 레코드에 trace_id, node_name, retry_count를 추가하는 필터 (기본값 포함)"""
 
     def filter(self, record):
-        # LogRecord 객체에 해당 속성이 없으면 defaults 값 사용 (포매터와 연동)
         record.trace_id = getattr(record, 'trace_id', 'N/A')
         record.node_name = getattr(record, 'node_name', 'N/A')
-        # retry_count는 정수형이어야 하므로 기본값 0 사용
         record.retry_count = getattr(record, 'retry_count', 0)
         return True
 
@@ -33,140 +30,120 @@ def setup_logging(config_path: Path = DEFAULT_LOGGING_CONFIG_PATH, default_level
     """
     설정 파일(YAML)을 읽어 로깅 시스템을 설정합니다.
     파일이 없으면 기본 설정을 적용하고, 컨텍스트 필터를 핸들러에 추가합니다.
-    로그 디렉토리 생성도 시도합니다.
+    로그 디렉토리 생성도 시도합니다 (YAML 설정에 따라).
     """
-    log_config_loaded = False
-    config = None
-    log_dir_to_ensure = DEFAULT_LOG_DIR  # 기본 로그 디렉토리
+    log_config = None
+    log_dir_to_ensure = DEFAULT_LOG_DIR  # 기본값으로 초기화
 
-    # --- 설정 파일에서 로그 디렉토리 경로 읽기 시도 (선택적) ---
     if config_path.exists():
         try:
-            with open(config_path, 'rt', encoding='utf-8') as f_temp:
-                temp_config = yaml.safe_load(f_temp.read())
-                if isinstance(temp_config, dict) and 'handlers' in temp_config:
-                    # 파일 핸들러를 우선적으로 찾아 경로 설정 시도
-                    handler_configs = temp_config.get('handlers', {})
-                    found_file_handler = False
-                    for handler_config in handler_configs.values():
-                        if isinstance(handler_config, dict) and 'filename' in handler_config:
-                            log_dir_path = Path(handler_config['filename']).resolve().parent
-                            # 프로젝트 루트 내에 있는지 확인 (선택적 보안 강화)
-                            try:
-                                if log_dir_path.is_relative_to(PROJECT_ROOT):
-                                    log_dir_to_ensure = log_dir_path
-                                    found_file_handler = True
-                                    break  # 첫 번째 유효한 경로만 사용
-                                else:
-                                    print(
-                                        f"Warning: Log directory '{log_dir_path}' from config is outside project root {PROJECT_ROOT}. Using default: {DEFAULT_LOG_DIR}")
-                            except ValueError:  # Python < 3.9 에서는 is_relative_to 없음, 또는 경로 구조가 다를 때
-                                print(
-                                    f"Warning: Could not verify if log directory '{log_dir_path}' is relative to project root {PROJECT_ROOT}. Using it cautiously.")
-                                log_dir_to_ensure = log_dir_path
-                                found_file_handler = True
-                                break
-                    if not found_file_handler:
+            with open(config_path, 'rt', encoding='utf-8') as f:
+                log_config = yaml.safe_load(f.read())
+
+            if log_config and isinstance(log_config, dict):
+                # --- YAML 설정에서 file_handler의 filename 경로 처리 ---
+                file_handler_config = log_config.get('handlers', {}).get('file_handler')
+                if file_handler_config and 'filename' in file_handler_config:
+                    original_filename = Path(file_handler_config['filename'])
+                    if not original_filename.is_absolute():
+                        # 상대 경로이면 PROJECT_ROOT 기준으로 절대 경로화
+                        absolute_log_file_path = (PROJECT_ROOT / original_filename).resolve()
+                        # dictConfig에 적용하기 위해 문자열로 변환하여 설정 업데이트
+                        file_handler_config['filename'] = str(absolute_log_file_path)
+                        log_dir_to_ensure = absolute_log_file_path.parent
                         print(
-                            f"No file handler with 'filename' found in logging config. Using default log directory: {DEFAULT_LOG_DIR}")
+                            f"Log Handler: Relative filename '{original_filename}' in YAML resolved to '{absolute_log_file_path}'")
+                    else:
+                        # 절대 경로이면 해당 경로의 부모 디렉토리 사용
+                        log_dir_to_ensure = original_filename.parent
+                        print(f"Log Handler: Absolute filename '{original_filename}' found in YAML.")
+                else:
+                    print(
+                        f"Log Handler: No 'file_handler' with 'filename' found in YAML. Defaulting log directory to: {DEFAULT_LOG_DIR}")
+                    # log_dir_to_ensure는 이미 DEFAULT_LOG_DIR로 설정되어 있음
+            else:
+                print(
+                    f"Warning: Logging config file is empty or not a dictionary: {config_path}. Log directory check skipped.")
+                # log_dir_to_ensure는 이미 DEFAULT_LOG_DIR로 설정되어 있음
 
         except Exception as e:
             print(
-                f"Warning: Error reading logging config for directory check ({config_path}): {e}. Using default: {DEFAULT_LOG_DIR}")
+                f"Warning: Error reading logging config for directory check ({config_path}): {e}. Defaulting log directory to: {DEFAULT_LOG_DIR}")
+            # log_config는 None으로 유지되어 basicConfig로 폴백됨
+            log_config = None  # 명시적으로 None 처리하여 basicConfig 폴백 유도
 
     # --- 로그 디렉토리 생성 ---
     try:
         log_dir_to_ensure.mkdir(parents=True, exist_ok=True)
-        print(f"Log directory ensured: {log_dir_to_ensure}")
+        print(f"Log directory ensured/created: {log_dir_to_ensure}")
     except OSError as e:
-        print(f"Warning: Failed to create log directory {log_dir_to_ensure}: {e}")
-        # 디렉토리 생성 실패 시 파일 핸들러가 오류를 발생시킬 수 있음
+        print(f"Warning: Failed to create log directory {log_dir_to_ensure}: {e}. File logging might fail.")
 
     # --- 로깅 설정 적용 ---
-    if config_path.exists():
+    if log_config and isinstance(log_config, dict):  # 유효한 설정이 로드되었는지 확인
         try:
-            with open(config_path, 'rt', encoding='utf-8') as f:
-                config = yaml.safe_load(f.read())
-                if config and isinstance(config, dict):  # dict 타입인지 명시적 확인
-                    logging.config.dictConfig(config)
-                    log_config_loaded = True
-                    print(f"Logging configuration loaded from: {config_path}")
-                else:
-                    print(f"Logging config file is empty or not a dictionary: {config_path}. Using basic config.")
-                    logging.basicConfig(level=default_level,
-                                        format="[%(asctime)s] [%(levelname)s] [%(name)s] - %(message)s",
-                                        stream=sys.stdout)
+            logging.config.dictConfig(log_config)
+            print(f"Logging configuration successfully loaded from: {config_path}")
         except Exception as e:
-            print(f"Error loading logging config file ({config_path}): {e}", file=sys.stderr)  # 오류는 stderr로
-            print("Falling back to basic logging.", file=sys.stderr)
-            logging.basicConfig(level=default_level, format="[%(asctime)s] [%(levelname)s] [%(name)s] - %(message)s",
+            print(f"CRITICAL: Error applying logging config from '{config_path}': {e}", file=sys.stderr)
+            print("CRITICAL: Falling back to basic logging.", file=sys.stderr)
+            logging.basicConfig(level=default_level,
+                                format="[%(asctime)s] [%(levelname)s] [%(name)s] - %(message)s (BasicConfig)",
                                 stream=sys.stdout)
     else:
-        print(f"Logging config file not found: {config_path}. Using basic logging.")
-        logging.basicConfig(level=default_level, format="[%(asctime)s] [%(levelname)s] [%(name)s] - %(message)s",
+        if config_path.exists():  # 파일은 존재하나 내용이 부적절했던 경우
+            print(f"Warning: Logging config file '{config_path}' was found but could not be used. Using basic logging.")
+        else:  # 파일 자체가 없는 경우
+            print(f"Warning: Logging config file not found: {config_path}. Using basic logging.")
+        logging.basicConfig(level=default_level,
+                            format="[%(asctime)s] [%(levelname)s] [%(name)s] - %(message)s (BasicConfig)",
                             stream=sys.stdout)
 
     # --- 컨텍스트 필터를 모든 핸들러에 추가 ---
+    # (basicConfig 사용 시 루트 로거에 핸들러가 자동 추가됨)
+    # (dictConfig 사용 시 설정된 핸들러들이 존재함)
     context_filter = ContextFilter()
-    loggers_to_check = [logging.getLogger(name) for name in logging.root.manager.loggerDict if
-                        not logging.getLogger(name).propagate]
-    loggers_to_check.append(logging.root)  # 루트 로거와 propagate=False인 로거들만 직접 체크
 
-    applied_handlers = set()
-    for logger_instance in loggers_to_check:
-        for handler in logger_instance.handlers:
-            if handler not in applied_handlers:
+    # 루트 로거 및 모든 정의된 로거의 핸들러에 필터 추가
+    loggers_to_process = [logging.root] + [logging.getLogger(name) for name in logging.root.manager.loggerDict]
+
+    applied_handlers_count = 0
+    for logger_instance in loggers_to_process:
+        if hasattr(logger_instance, 'handlers'):
+            for handler in logger_instance.handlers:
                 if not any(isinstance(f, ContextFilter) for f in handler.filters):
                     try:
                         handler.addFilter(context_filter)
-                    except Exception as e:
+                        applied_handlers_count += 1
+                    except Exception as e:  # 핸들러에 필터 추가 실패 시 경고
                         print(
                             f"Warning: Could not add ContextFilter to handler {handler} for logger {logger_instance.name}: {e}")
-                applied_handlers.add(handler)
 
-    # 루트 핸들러에도 적용 (propagate=True인 로거들이 사용할 수 있도록)
-    if logging.root.handlers:
-        for handler in logging.root.handlers:
-            if handler not in applied_handlers:
-                if not any(isinstance(f, ContextFilter) for f in handler.filters):
-                    try:
-                        handler.addFilter(context_filter)
-                    except Exception as e:
-                        print(f"Warning: Could not add ContextFilter to root handler {handler}: {e}")
-                applied_handlers.add(handler)
-
-    if applied_handlers:
-        print(f"ContextFilter potentially applied to {len(applied_handlers)} unique handlers.")
+    if applied_handlers_count > 0:
+        print(f"ContextFilter applied to {applied_handlers_count} handler(s).")
     else:
-        print("No handlers found to apply ContextFilter (or configuration/basic logging did not set handlers).")
+        # BasicConfig 사용 시에도 루트 핸들러가 있으므로 이 경우는 거의 발생 안 함
+        print("Warning: No handlers found to apply ContextFilter. This might indicate a deeper logging setup issue.")
 
 
 # --- 로거 인스턴스 반환 함수 ---
-_loggers = {}  # 생성된 로거 캐시 (모듈 레벨)
+_loggers: Dict[str, logging.Logger] = {}
 
 
 def get_logger(name: str) -> logging.Logger:
     """이름별로 로거 인스턴스를 반환합니다. (캐싱 사용)"""
     global _loggers
     if name not in _loggers:
-        logger_instance = logging.getLogger(name)
-        # 기본 로거 생성 시 레벨 설정 (설정 파일 없을 때 대비)
-        if not logger_instance.hasHandlers() and not logging.root.hasHandlers():
-            # basicConfig가 호출되지 않았을 수 있는 극단적 경우 방지
-            # 또는 로거별 기본 레벨 설정 등 추가 가능
-            pass
-        _loggers[name] = logger_instance
-
+        _loggers[name] = logging.getLogger(name)
+        # get_logger 호출 시점에는 이미 setup_logging이 완료되었다고 가정.
+        # 만약 setup_logging 전에 get_logger가 호출될 가능성이 있다면,
+        # 여기서 로거 레벨 등을 기본값으로 설정하는 로직이 필요할 수 있으나,
+        # 보통은 애플리케이션 시작점(main, lifespan 등)에서 setup_logging을 먼저 호출.
     return _loggers[name]
 
 
-# --- 로깅용 데이터 요약 헬퍼 함수 ---
-# 이전 단계에서 개선된 버전 사용
+# --- 로깅용 데이터 요약 헬퍼 함수 (이전과 동일) ---
 def _safe_serialize_value(value: Any, max_len: int) -> Any:
-    """
-    로깅을 위해 값을 안전하게 직렬화합니다. 복잡한 타입은 요약하고, 문자열은 자릅니다.
-    JSON으로 직접 인코딩 가능한 기본 타입(int, float, bool, None)은 그대로 반환합니다.
-    """
     if isinstance(value, dict):
         keys_preview = list(value.keys())[:3]
         keys_str = ", ".join(map(str, keys_preview))
@@ -176,7 +153,7 @@ def _safe_serialize_value(value: Any, max_len: int) -> Any:
         items_preview = ""
         if value:
             try:
-                first_item_str = str(value[0])  # 재귀 호출 대신 str 사용
+                first_item_str = str(value[0])
                 if len(first_item_str) > 30:
                     first_item_str = first_item_str[:30] + "..."
             except Exception:
@@ -198,7 +175,7 @@ def _safe_serialize_value(value: Any, max_len: int) -> Any:
         except Exception:
             return f"<bytes len={len(value)}>"
     elif isinstance(value, (int, float, bool, type(None))):
-        return value  # 기본 타입은 그대로 반환
+        return value
     else:
         try:
             s_val = str(value)
@@ -210,35 +187,24 @@ def _safe_serialize_value(value: Any, max_len: int) -> Any:
             return f"<{type(value).__name__} object (str error: {e})>"
 
 
-# --- 메인 로깅 요약 함수 (수정됨) ---
 def summarize_for_logging(
         data: Any,
         max_len: int = 100,
         fields_to_show: Optional[List[str]] = None,
-        exclude_keys: Optional[List[str]] = None  # 특정 키 제외 기능 추가
+        exclude_keys: Optional[List[str]] = None
 ) -> str:
-    """
-    State 객체(Pydantic 모델 포함) 또는 딕셔너리를 로깅용 JSON 문자열로 요약합니다.
-    (업그레이드됨: _safe_serialize_value 헬퍼 사용, exclude_keys 추가)
-    """
     summary = {}
     target_dict: Optional[Dict] = None
 
     try:
-        if hasattr(data, 'model_dump'):  # Pydantic V2+
-            # Pydantic 모델의 경우, exclude_none=False로 하여 모든 필드를 가져오고
-            # _safe_serialize_value에서 None을 처리하는 것이 더 일관적일 수 있음
-            target_dict = data.model_dump(exclude_none=False)  # None 포함하여 가져오기
+        if hasattr(data, 'model_dump'):
+            target_dict = data.model_dump(exclude_none=False)
         elif isinstance(data, dict):
             target_dict = data.copy()
         else:
-            # 딕셔너리나 Pydantic 모델 아니면 단순 요약 시도
-            # 이 경우 str()을 직접 호출하는 것이 더 안전할 수 있음
             return str(_safe_serialize_value(data, max_len))
 
-        if target_dict is None:
-            return "{}"
-
+        if target_dict is None: return "{}"
         keys_to_exclude = set(exclude_keys) if exclude_keys else set()
 
         if fields_to_show is not None:
@@ -248,21 +214,16 @@ def summarize_for_logging(
 
         for field_name in keys_to_process:
             value = target_dict[field_name]
-            summary[field_name] = _safe_serialize_value(value, max_len)  # None 값도 처리됨
+            summary[field_name] = _safe_serialize_value(value, max_len)
 
-        # JSON 변환 (한 줄 요약, 한글 유지)
-        # default=str 추가하여 직렬화 불가능한 객체 발생 시 문자열 변환 시도
         return json.dumps(summary, indent=None, ensure_ascii=False, default=str)
-
     except Exception as e:
-        # 요약 중 오류 발생 시 안전한 반환 (오류 정보 포함)
         try:
-            # 오류 발생 시에도 최소한의 정보라도 로깅 시도
             fallback_summary = {"logging_summary_error": str(e)}
             if isinstance(data, dict):
-                fallback_summary["data_keys"] = list(data.keys())
+                fallback_summary["data_keys"] = list(data.keys())[:5]  # 최대 5개 키
             elif hasattr(data, '__dict__'):
-                fallback_summary["data_keys"] = list(data.__dict__.keys())
+                fallback_summary["data_keys"] = list(data.__dict__.keys())[:5]
             return json.dumps(fallback_summary, default=str)
-        except Exception:  # 이중 오류 방지
-            return '{ "logging_summary_error": "Failed to serialize summary error." }'
+        except Exception:
+            return '{ "logging_summary_error": "Failed to serialize summary error during fallback." }'

@@ -181,10 +181,15 @@ Initial Context Snippets:
         system_prompt = self._build_system_prompt(target_audience)
         user_prompt = self._build_user_prompt(state)
 
-        # 2) Single LLM call with system and user messages
+        # messages 리스트 생성
+        messages_for_llm = [
+            {"role": "system", "content": system_prompt},  # prompt를 system 역할로
+            {"role": "user", "content": user_prompt}  # original_query를 user 역할로
+        ]
+
+        # 수정된 방식으로 LLMService 호출
         llm_resp = await self.llm_service.generate_text(
-            system_prompt_content=system_prompt,
-            prompt=user_prompt,
+            messages=messages_for_llm,
             temperature=0.2,
             max_tokens=1200
         )

@@ -161,10 +161,16 @@ Return ONLY valid JSON matching the schema below, NO think tags, NO explanation,
 
         # 1) 한 번의 LLM 호출로 JSON 생성
         system_prompt = self._build_system_prompt(original_query, refined_intent, snippets)
-        # qwen3 사용 시 prompt 인자는 간단히 Refined Intent 정도로 활용
+
+        # messages 리스트 생성
+        messages_for_llm = [
+            {"role": "system", "content": system_prompt},  # prompt를 system 역할로
+            {"role": "user", "content": refined_intent}  # original_query를 user 역할로
+        ]
+
+        # 수정된 방식으로 LLMService 호출
         llm_resp = await self.llm_service.generate_text(
-            system_prompt_content=system_prompt,
-            prompt=refined_intent,
+            messages=messages_for_llm,
             temperature=0.3,
             max_tokens=4096,
         )

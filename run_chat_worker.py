@@ -21,7 +21,7 @@ setup_logging()
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
-from app.workers.llm_worker import worker_loop
+from app.workers.chat_worker import worker_loop
 
 if __name__ == "__main__":
     print("🚀 LLM Worker 시작...")

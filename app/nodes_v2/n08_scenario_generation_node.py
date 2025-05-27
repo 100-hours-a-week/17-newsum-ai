@@ -140,9 +140,14 @@ class N08ScenarioGenerationNode:
         max_retries = 2
         for attempt in range(max_retries + 1):
             logger.info(f"Generating scenario for {selected.get('title')}", extra={"trace_id": meta.trace_id})
+            # messages 리스트 생성
+            messages_for_llm = [
+                {"role": "system", "content": system_prompt},  # prompt를 system 역할로
+                {"role": "user", "content": user_prompt}  # original_query를 user 역할로
+            ]
+            # 수정된 방식으로 LLMService 호출
             llm_resp = await self.llm_service.generate_text(
-                system_prompt_content=system_prompt,
-                prompt=user_prompt,
+                messages=messages_for_llm,
                 max_tokens=3500,
                 temperature=0.7
             )
