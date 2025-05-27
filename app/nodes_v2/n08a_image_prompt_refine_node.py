@@ -144,7 +144,7 @@ Return only JSON, NO thinks, NO comments, NO explanations.
 
         # 2) 모드별(Flux/XL) 호출
         mode = config.get("image_mode", "flux").lower()
-        mode = "xl"   # 테스트용 모드 고정
+        mode = "flux"   # 모드테스트 고정
         logger.info(f"[n08a] 이미지 모드별 LLM 호출 시작 (mode={mode})", extra={"trace_id": trace_id})
         if mode == "flux":
             sys_mode = self._build_system_prompt_flux()

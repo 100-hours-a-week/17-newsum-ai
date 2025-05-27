@@ -64,6 +64,7 @@ class ImageService:
     # ... (generate_image, close 메소드는 이전 제공 코드와 동일하게 유지) ...
     async def generate_image(
             self,
+            mode: str,
             prompt: str,
             negative_prompt: Optional[str] = None,
             **kwargs  # 추가적인 API 파라미터를 위한 kwargs
@@ -76,7 +77,7 @@ class ImageService:
             self.logger.error("빈 프롬프트가 이미지 생성 서비스에 제공되었습니다.")
             return {"error": "Prompt cannot be empty"}
 
-        payload = {"prompt": prompt, **kwargs}
+        payload = {"mode": mode, "prompt": prompt, **kwargs}
         if negative_prompt:
             payload["negative_prompt"] = negative_prompt
 
