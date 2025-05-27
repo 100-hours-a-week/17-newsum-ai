@@ -7,6 +7,11 @@ from datetime import datetime, timezone
 from pydantic import BaseModel, Field
 
 
+# === 이미지 프롬프트 모드 base 리스트 ===
+DEFAULT_IMAGE_MODE = "ghibli-flux"
+FLUX_BASE_MODES = ["ghibli-flux"]
+XL_BASE_MODES = ["anything-xl"]
+
 #  Raw / large TypedDict types
 class RawArticle(TypedDict):
     url: str

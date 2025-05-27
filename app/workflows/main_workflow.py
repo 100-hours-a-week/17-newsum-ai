@@ -25,7 +25,7 @@ from app.nodes_v2.n06b_contextual_summary_node import N06BContextualSummaryNode
 from app.nodes_v2.n07_comic_ideation_node import N07ComicIdeationNode
 from app.nodes_v2.n08_scenario_generation_node import N08ScenarioGenerationNode
 from app.nodes_v2.n08a_image_prompt_refine_node import N08aImagePromptRefinementNode
-# from app.nodes.n09_image_generation_node import N09ImageGenerationNode # <<< N09 임포트
+from app.nodes_v2.n09_image_generation_node import N09ImageGenerationNode # <<< N09 임포트
 # from app.nodes.n10_finalize_and_notify_node import N10FinalizeAndNotifyNode # <<< N10 임포트
 
 from app.services.storage_service import StorageService # <<< StorageService 임포트
@@ -68,7 +68,7 @@ async def compile_workflow(
     n07_comic_ideation = N07ComicIdeationNode(llm_service=llm_service)
     n08_scenario_generation = N08ScenarioGenerationNode(llm_service=llm_service)
     n08a_image_prompt_refine = N08aImagePromptRefinementNode(llm_service=llm_service)
-    # n09_image_generation = N09ImageGenerationNode(image_service=image_generation_service)
+    n09_image_generation = N09ImageGenerationNode(image_service=image_generation_service)
     # n10_finalize_and_notify = N10FinalizeAndNotifyNode(
     #     storage_service=storage_service,
     #     http_session=external_api_session  # 공유 세션 전달 또는 None
@@ -85,7 +85,7 @@ async def compile_workflow(
     workflow.add_node("n07_comic_ideation", n07_comic_ideation.run)
     workflow.add_node("n08_scenario_generation", n08_scenario_generation.run)
     workflow.add_node("n08a_image_prompt_refine", n08a_image_prompt_refine.run)
-    # workflow.add_node("n09_image_generation", n09_image_generation.run) # <<< N09 노드 추가
+    workflow.add_node("n09_image_generation", n09_image_generation.run)
     # workflow.add_node("n10_finalize_and_notify", n10_finalize_and_notify.run)  # <<< N10 노드 추가
 
     # --- 엣지 정의 (Node 1 -> ... -> 8 -> 9 -> END) ---
@@ -118,12 +118,12 @@ async def compile_workflow(
     workflow.add_edge("n06b_contextual_summary", "n07_comic_ideation")
     workflow.add_edge("n07_comic_ideation", "n08_scenario_generation")
     workflow.add_edge("n08_scenario_generation", "n08a_image_prompt_refine")
+    workflow.add_edge("n08a_image_prompt_refine", "n09_image_generation")
 
     from app.nodes_v2.show_state_node import ShowStateNode
     workflow.add_node("show_state", ShowStateNode().run)
-    workflow.add_edge("n08a_image_prompt_refine", "show_state")
+    workflow.add_edge("n09_image_generation", "show_state")
     workflow.add_edge("show_state", END)
-    # workflow.add_edge("n08_scenario_generation", "n09_image_generation")
     # workflow.add_edge("n09_image_generation", "n10_finalize_and_notify")
     # workflow.add_edge("n10_finalize_and_notify", END)
 

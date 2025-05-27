@@ -1,11 +1,8 @@
-# ai/app/nodes_v2/n09_image_generation_node.py
-
-import asyncio
 import traceback
 from datetime import datetime, timezone
-from typing import Dict, Any, List, Optional
+from typing import Any, Dict, List, Optional
 
-from app.workflows.state_v2 import WorkflowState
+from app.workflows.state_v2 import WorkflowState, DEFAULT_IMAGE_MODE, FLUX_BASE_MODES, XL_BASE_MODES
 from app.utils.logger import get_logger, summarize_for_logging
 from app.config.settings import Settings
 from app.services.image_service import ImageService
@@ -13,18 +10,20 @@ from app.services.image_service import ImageService
 logger = get_logger(__name__)
 settings = Settings()
 
-MAX_PARALLEL_IMAGE_GENERATION = settings.IMAGE_MAX_PARALLEL_TASKS or 1
-
-
 class N09ImageGenerationNode:
+    """
+    Sequential image generation node. Uses prompts from state.image.refined_prompts
+    to generate images one by one, storing results in state.image.generated_comic_images.
+    """
+
     def __init__(self, image_service: ImageService):
         self.image_service = image_service
-        logger.info(f"N09 initialized. Max parallel: {MAX_PARALLEL_IMAGE_GENERATION}")
+        logger.info(f"N09 initialized.")
 
     async def _generate_single_image_entry(
         self,
         prompt: str,
-        mode: str,
+        model_name: str,
         scene_identifier: str,
         is_thumbnail: bool,
         image_style_config: Optional[Dict[str, Any]],
@@ -37,7 +36,7 @@ class N09ImageGenerationNode:
             "image_path": None,
             "image_url": None,
             "is_thumbnail": is_thumbnail,
-            "mode": mode,
+            "model_name": model_name,
             "error": None,
             "raw_service_response": None
         }
@@ -49,10 +48,12 @@ class N09ImageGenerationNode:
 
         try:
             generation_params = image_style_config or {}
-            negative_prompt = generation_params.pop("negative_prompt", settings.IMAGE_DEFAULT_NEGATIVE_PROMPT)
+            negative_prompt = generation_params.pop(
+                "negative_prompt", settings.IMAGE_DEFAULT_NEGATIVE_PROMPT
+            )
 
             api_response = await self.image_service.generate_image(
-                mode=mode,
+                model_name=model_name,
                 prompt=prompt,
                 negative_prompt=negative_prompt,
                 **generation_params
@@ -60,8 +61,10 @@ class N09ImageGenerationNode:
             result["raw_service_response"] = api_response
             if api_response.get("error"):
                 result["error"] = api_response["error"]
-                logger.warning(f"[N09] Image generation failed for {scene_identifier}: {result['error']}",
-                               extra=extra_log_data)
+                logger.warning(
+                    f"[N09] Image generation failed for {scene_identifier}: {result['error']}",
+                    extra=extra_log_data
+                )
             else:
                 result["image_path"] = api_response.get("image_path")
                 result["image_url"] = api_response.get("image_url")
@@ -77,43 +80,57 @@ class N09ImageGenerationNode:
         config = state.config.config or {}
         trace_id = meta.trace_id
         comic_id = meta.comic_id
+        node_name = self.__class__.__name__
+        extra_log = {"trace_id": trace_id, "comic_id": comic_id, "node_name": node_name}
 
-        extra_log = {"trace_id": trace_id, "comic_id": comic_id, "node": "N09"}
+        logger.info(
+            f"[{node_name}] 이미지 생성 노드 진입. trace_id={trace_id}, comic_id={comic_id}",
+            extra=extra_log
+        )
 
-        refined_prompts = image_sec.refined_prompts
+        refined_prompts = image_sec.refined_prompts or []
         if not refined_prompts:
-            msg = "[N09] No refined prompts found"
+            msg = f"[{node_name}] No refined prompts found"
             logger.error(msg, extra=extra_log)
             meta.current_stage = "ERROR"
             meta.error_message = msg
             return {"image": image_sec.model_dump(), "meta": meta.model_dump()}
 
-        tasks = []
+        results: List[Dict[str, Any]] = []
         for entry in refined_prompts:
             scene_id = entry.get("scene_identifier")
             prompt = entry.get("prompt_used", "").strip()
-            mode = entry.get("mode", "flux")
-            is_thumbnail = scene_id.lower() == "thumbnail"
-
+            model_name = entry.get("model_name") or DEFAULT_IMAGE_MODE
+            is_thumbnail = (scene_id.lower() == "thumbnail")
+            if model_name not in FLUX_BASE_MODES and model_name not in XL_BASE_MODES:
+                model_name = DEFAULT_IMAGE_MODE
             style_config = config.get("image_generation_style", {}).get(
-                scene_id, config.get("image_generation_style", {}).get("default", {})
+                scene_id,
+                config.get("image_generation_style", {}).get("default", {})
             )
-
-            tasks.append(
-                self._generate_single_image_entry(
-                    prompt=prompt,
-                    mode=mode,
-                    scene_identifier=scene_id,
-                    is_thumbnail=is_thumbnail,
-                    image_style_config=style_config,
-                    trace_id=trace_id,
-                    extra_log_data=extra_log
-                )
+            logger.debug(
+                f"[{node_name}] Generating for scene={scene_id}, model={model_name}, thumbnail={is_thumbnail}",
+                extra=extra_log
             )
+            res = await self._generate_single_image_entry(
+                prompt=prompt,
+                model_name=model_name,
+                scene_identifier=scene_id,
+                is_thumbnail=is_thumbnail,
+                image_style_config=style_config,
+                trace_id=trace_id,
+                extra_log_data=extra_log
+            )
+            logger.info(
+                f"[{node_name}] Task result: {scene_id} | error={res.get('error')}",
+                extra=extra_log
+            )
+            results.append(res)
 
-        results = await asyncio.gather(*tasks)
         image_sec.generated_comic_images = results
-        meta.current_stage = "N09_IMAGE_GENERATION_COMPLETED"
+        meta.current_stage = "N10_FINALIZE_AND_NOTIFY"
 
-        logger.info(f"[N09] Completed image generation: {len(results)} entries", extra=extra_log)
+        logger.info(
+            f"[{node_name}] 이미지 생성 완료. 총 엔트리: {len(results)}", extra=extra_log
+        )
         return {"image": image_sec.model_dump(), "meta": meta.model_dump()}

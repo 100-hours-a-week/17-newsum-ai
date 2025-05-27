@@ -13,7 +13,7 @@ import traceback
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from app.workflows.state_v2 import WorkflowState  # ✨ sectioned model
+from app.workflows.state_v2 import WorkflowState, DEFAULT_IMAGE_MODE  # ✨ sectioned model
 from app.utils.logger import get_logger, summarize_for_logging
 
 logger = get_logger(__name__)
@@ -33,13 +33,24 @@ class N01InitializeNode:
         # ------------------------------------------------------------------
         original_query: str = state.query.original_query or ""
         initial_config: Dict[str, Any] = state.config.config or {}
+        writer_id = str(initial_config.get("writer_id", "1"))
+        # writer_id에 따라 image_mode 자동 세팅
+        if writer_id == "1":
+            initial_config["image_mode"] = "ghibli-flux"
+        elif writer_id == "2":
+            initial_config["image_mode"] = "anything-xl"
+        else:
+            initial_config["image_mode"] = DEFAULT_IMAGE_MODE
+        # debug
+        print()
+        print(f"writer_id: {writer_id} | image_mode: {initial_config['image_mode']}")
+        print()
 
         # IDs might already be present in meta; if not, generate.
         comic_id: Optional[str] = state.meta.comic_id or str(uuid.uuid4())
         trace_id: Optional[str] = state.meta.trace_id or comic_id
 
         timestamp = datetime.now(timezone.utc).isoformat()
-        writer_id = initial_config.get("writer_id", "default_writer")
 
         extra_log = {
             "trace_id": trace_id,

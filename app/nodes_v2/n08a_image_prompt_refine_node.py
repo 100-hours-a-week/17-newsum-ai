@@ -3,7 +3,7 @@
 import json
 from typing import Dict, Any, List
 
-from app.workflows.state_v2 import WorkflowState
+from app.workflows.state_v2 import WorkflowState, DEFAULT_IMAGE_MODE, FLUX_BASE_MODES, XL_BASE_MODES
 from app.services.llm_service import LLMService
 from app.tools.think_parser_tool import extract_json
 from app.utils.logger import get_logger
@@ -49,7 +49,7 @@ Return only JSON, NO thinks, NO comments, NO explanations.
 """
 
     def _build_system_prompt_flux(self) -> str:
-        # 예시로 넣은 Flux-Ghibli 포맷을 few-shot 예제로 포함
+        # 예시로 넣은 Flux 포맷을 few-shot 예제로 포함
         example_prompt = (
             "A young boy with bright orange hair and a mischievous grin is riding on the back of a large, fluffy bear through the village. "
             "The bear has a thick white coat and moves gracefully through the cobbled streets. The villagers watch in surprise and amusement. "
@@ -57,7 +57,7 @@ Return only JSON, NO thinks, NO comments, NO explanations.
         )
         return f"""
 You are an expert image prompt engineer for narrative style (Flux).
-Below is a normalized thumbnail & panels. Produce for each a **fully descriptive English sentence** suitable for Flux-Ghibli–style image generation.
+Below is a normalized thumbnail & panels. Produce for each a **fully descriptive English sentence** suitable for Flux–style image generation.
 Use the same structure/order as the example:
 
 # Example (thumbnail or panel)
@@ -143,13 +143,17 @@ Return only JSON, NO thinks, NO comments, NO explanations.
         logger.debug(f"[n08a] 정규화 결과 thumbnail: {thumbnail_norm}, panels: {panels_norm}", extra={"trace_id": trace_id})
 
         # 2) 모드별(Flux/XL) 호출
-        mode = config.get("image_mode", "flux").lower()
-        mode = "flux"   # 모드테스트 고정
-        logger.info(f"[n08a] 이미지 모드별 LLM 호출 시작 (mode={mode})", extra={"trace_id": trace_id})
-        if mode == "flux":
+        # model_name은 n01에서 writer_id에 따라 자동 세팅됨
+        model_name = config.get("image_mode", DEFAULT_IMAGE_MODE).lower()
+        logger.info(f"[n08a] 이미지 모드별 LLM 호출 시작 (mode={model_name})", extra={"trace_id": trace_id})
+        if model_name in FLUX_BASE_MODES:
             sys_mode = self._build_system_prompt_flux()
-        else:
+        elif model_name in XL_BASE_MODES:
             sys_mode = self._build_system_prompt_xl()
+        else:
+            # DEFAULT_IMAGE_MODE로 처리 (현재는 flux 모드)
+            sys_mode = self._build_system_prompt_flux() # DEFAULT_IMAGE_MODE 모드 확인 필요
+            model_name = DEFAULT_IMAGE_MODE
 
         user_mode = self._build_user_prompt_mode(thumbnail_norm, panels_norm)
         resp_mode = await self.llm_service.generate_text(
@@ -173,20 +177,20 @@ Return only JSON, NO thinks, NO comments, NO explanations.
         entries: List[Dict[str, Any]] = []
 
         # 썸네일
-        if mode == "flux":
+        if model_name in FLUX_BASE_MODES:
             thumb_prompt = final.get("thumbnail_prompt", "").strip()
         else:
             thumb_prompt = ", ".join(final.get("thumbnail_tokens", []))
         entries.append({
             "scene_identifier": "thumbnail",
-            "mode": mode,
+            "model_name": model_name,
             "prompt_used": thumb_prompt
         })
 
         # 각 패널
         for idx, panel in enumerate(scenario_sec.comic_scenarios or []):
             scene_id = panel.get("scene_identifier", f"S0{idx+1}")
-            if mode == "flux":
+            if model_name in FLUX_BASE_MODES:
                 panel_prompts = final.get("panel_prompts", [])
                 prompt_text = panel_prompts[idx] if idx < len(panel_prompts) else ""
             else:
@@ -194,7 +198,7 @@ Return only JSON, NO thinks, NO comments, NO explanations.
                 prompt_text = " ".join(tokens_list[idx]) if idx < len(tokens_list) else ""
             entries.append({
                 "scene_identifier": scene_id,
-                "mode": mode,
+                "model_name": model_name,
                 "prompt_used": prompt_text
             })
 
