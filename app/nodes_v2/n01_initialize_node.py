@@ -1,4 +1,4 @@
-# ai/app/nodes/n01_initialize_node.py
+# ai/app/nodes_v2/n01_initialize_node.py
 """
 N01InitializeNode for *section-based* WorkflowState.
 - Populates `meta`, `query`, `search`, `report` … subsections instead of flat keys.

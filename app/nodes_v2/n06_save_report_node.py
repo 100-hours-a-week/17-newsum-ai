@@ -1,4 +1,4 @@
-# ai/app/nodes/n06_save_report_node.py
+# ai/app/nodes_v2/n06_save_report_node.py
 
 import traceback
 from pathlib import Path

@@ -1,4 +1,4 @@
-# ai/app/nodes/n08a_image_prompt_refinement_node.py
+# ai/app/nodes_v2/n08a_image_prompt_refinement_node.py
 
 import json
 from typing import Dict, Any, List

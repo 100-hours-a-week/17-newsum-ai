@@ -1,3 +1,4 @@
+# ai/app/nodes_v2/n07_comic_ideation_node.py
 import re
 import traceback
 from typing import Any, Dict, List, Optional
