@@ -7,6 +7,11 @@ from datetime import datetime, timezone
 from pydantic import BaseModel, Field
 
 
+# === 이미지 프롬프트 모드 base 리스트 ===
+DEFAULT_IMAGE_MODE = "ghibli-flux"
+FLUX_BASE_MODES = ["ghibli-flux"]
+XL_BASE_MODES = ["anything-xl"]
+
 #  Raw / large TypedDict types
 class RawArticle(TypedDict):
     url: str
@@ -64,6 +69,7 @@ class ScenarioSection(BaseModel):
 
 
 class ImageSection(BaseModel):
+    refined_prompts: List[Dict[str, Any]] = Field(default_factory=list) # 썸네일, 패널 프롬프트 모두 저장
     generated_comic_images: List[Dict[str, Any]] = Field(default_factory=list)
 
 
