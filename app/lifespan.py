@@ -31,6 +31,20 @@ logger = get_logger("AppLifespan") # 로깅 설정 후 로거 가져오기
 _service_instances = [] # 종료 시 정리할 인스턴스 목록
 settings = Settings()
 
+import os
+from transformers import AutoTokenizer
+TOKENIZER = None
+ # __file__은 현재 실행 중인 스크립트의 경로를 나타냄
+# chat_worker.py가 있는 디렉토리의 'handlers' 하위 'qwen_tokenizer'를 찾음
+current_script_dir = Path(__file__).resolve().parent
+print(current_script_dir)
+QWEN_TOKENIZER_PATH = current_script_dir / "workers" / "handlers"
+if QWEN_TOKENIZER_PATH.is_dir():
+    TOKENIZER = AutoTokenizer.from_pretrained(str(QWEN_TOKENIZER_PATH), trust_remote_code=True)
+    logger.info(f"ChatWorker: Tokenizer loaded successfully from {QWEN_TOKENIZER_PATH}.")
+else:
+    logger.error(f"ChatWorker: Tokenizer directory NOT found at {QWEN_TOKENIZER_PATH}. Please check the path.")
+
 async def startup_event():
     """애플리케이션 시작 시 실행될 작업들"""
     # --- 로깅 설정 적용 (가장 먼저 수행) ---
@@ -85,7 +99,7 @@ async def startup_event():
         logger.info("PostgreSQLService initialized.")
 
         # LLMService (close 메서드 유무 확인 필요)
-        llm_service = LLMService()
+        llm_service = LLMService(tokenizer=TOKENIZER)
         _shared_state['llm_service'] = llm_service
         if hasattr(llm_service, 'close') and callable(getattr(llm_service, 'close')):
              _service_instances.append(llm_service)

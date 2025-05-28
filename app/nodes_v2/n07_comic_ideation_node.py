@@ -78,9 +78,15 @@ User Context:
 Report Summary:
 {summary}
 """
+        # messages 리스트 생성
+        messages_for_llm = [
+            {"role": "system", "content": prompt},  # prompt를 system 역할로
+            {"role": "user", "content": refined_intent}  # original_query를 user 역할로
+        ]
+
+        # 수정된 방식으로 LLMService 호출
         response = await self.llm_service.generate_text(
-            system_prompt_content=prompt,
-            prompt=refined_intent,
+            messages=messages_for_llm,
             temperature=0.3,
             max_tokens=1000
         )
@@ -135,9 +141,15 @@ User Context:
 Key Insights:
 {insights_text}
 """
+        # messages 리스트 생성
+        messages_for_llm = [
+            {"role": "system", "content": prompt},  # prompt를 system 역할로
+            {"role": "user", "content": refined_intent}  # original_query를 user 역할로
+        ]
+
+        # 수정된 방식으로 LLMService 호출
         response = await self.llm_service.generate_text(
-            system_prompt_content=prompt,
-            prompt=refined_intent,
+            messages=messages_for_llm,
             temperature=0.7,
             max_tokens=1500
         )

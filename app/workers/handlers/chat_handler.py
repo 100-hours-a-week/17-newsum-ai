@@ -2,136 +2,231 @@
 
 import json
 import re
-from typing import Dict, Any, List
-from app.services.backend_client import BackendApiClient # 방금 생성한 클라이언트 임포트 (경로 확인)
-import aiohttp, asyncpg
-import uuid
+from typing import Dict, Any, List, Optional
+import asyncpg
+import uuid  # UUID 변환을 위해 임포트
 
 from app.services.llm_service import LLMService
 from app.services.postgresql_service import PostgreSQLService
 from app.services.database_client import DatabaseClient
+from app.services.backend_client import BackendApiClient
+from transformers import AutoTokenizer  # 타입 힌트
+
+from app.config.settings import Settings
 from app.utils.logger import get_logger
 
+settings = Settings()  # settings.py를 통해 설정값 로드
 logger = get_logger("ChatHandler")
 
-QUEUE_NAME = "llm_task_queue"
-AI_USER_NICKNAME = "SLM_Assistant" # AI 응답을 저장할 때 사용할 닉네임
+# chat_worker.py 에서 QUEUE_NAME을 설정에서 가져오므로, 여기서 중복 정의 제거 가능
+# QUEUE_NAME = "chat_task_queue"
+AI_USER_NICKNAME = "SLM_Assistant"  # 설정 파일로 옮기는 것 고려
+MAX_CONTEXT_TOKENS = 4096  # 설정 파일로 옮기는 것 고려
+RESPONSE_BUDGET = 512  # 설정 파일로 옮기는 것 고려
 
-SYSTEM_PROMPT_COT = """You are a highly efficient AI assistant. Your primary goal is to provide accurate and extremely concise answers. Follow these instructions precisely:
+# --- 영문 프롬프트 (안전 지침 없음) ---
+SYSTEM_PROMPT_HEADER = """You are a highly efficient AI assistant. Your primary goal is to provide accurate and extremely concise answers.
+**Context Instructions:** Use the 'Summary' for background and 'Recent History' for immediate context."""
 
-1.  **Analyze & Think:** First, understand the user's request and the conversation context. Briefly outline your step-by-step reasoning or analysis within `[THOUGHTS]` and `[/THOUGHTS]` tags. Keep your thoughts as brief as possible.
-2.  **Formulate Answer:** Based on your thoughts, construct the final answer.
-3.  **Provide Answer:** Present the final answer ONLY within `[ANSWER]` and `[/ANSWER]` tags.
-4.  **BE CONCISE:** The final answer within `[ANSWER]` tags MUST be the shortest possible response that directly and completely answers the question. Do NOT include any introductions, apologies, or extra remarks.
-5.  **STRICT FORMAT:** You MUST output in this exact format, with nothing before or after: `[THOUGHTS]Your brief thoughts.[/THOUGHTS][ANSWER]Your concise answer.[/ANSWER]`
+SYSTEM_PROMPT_COT = SYSTEM_PROMPT_HEADER + """Your primary goal is to provide accurate and extremely concise answers. Think step-by-step (the model will naturally use <think> tags if it needs to show its reasoning).
+ Provide ONLY the final, direct answer to the user without any extra conversational fluff, introductions, or self-corrections.
 """
-SYSTEM_PROMPT_SIMPLE = """You are a highly efficient AI assistant. Provide a direct and concise answer to the user's request based on the conversation context. Do not add any introductions, extra remarks, or apologies.
+
+SYSTEM_PROMPT_SIMPLE = SYSTEM_PROMPT_HEADER + """
+**Task Instructions:** Provide a direct and concise answer to the user's request based on the conversation context. Do not add any introductions, extra remarks, or apologies.
 """
 
-DEFAULT_CHAT_PARAMS = {"max_tokens": 256, "temperature": 0.7} # use_cot는 여기서 관리
-DEFAULT_SUMMARY_PARAMS_FOR_HANDLER = {"max_tokens": 512, "temperature": 0.3, "use_cot": False}
+DEFAULT_CHAT_PARAMS = {"max_tokens": 512, "temperature": 0.4}  # API가 설정한 값으로 덮어쓰여짐
+DEFAULT_SUMMARY_PARAMS_FOR_HANDLER = {"max_tokens": 512, "temperature": 0.3}
 
 
-def format_context_to_messages(context_summary: str, recent_history: list) -> list:
-    """요약본과 최근 대화를 LLM messages 형식으로 변환합니다."""
-    messages = []
-    if context_summary:
-        messages.append({"role": "system", "content": f"Summary of the previous conversation: {context_summary}"})
+def count_tokens(text: str, tokenizer: Optional[AutoTokenizer]) -> int:
+    if tokenizer and text:
+        try:
+            return len(tokenizer.encode(text, add_special_tokens=False))
+        except Exception:
+            logger.warning(f"Token count failed for text (len {len(text)}), falling back to split().")
+            return len(text.split())
+    elif text:
+        logger.warning("Tokenizer not available for token count, using split().")
+        return len(text.split())
+    return 0
 
-    for item in recent_history:
-        # PG 서비스에서 이미 'user', 'assistant'로 매핑된 role 사용
-        role = item.get('role')
-        if role in ['user', 'assistant']:
-            messages.append({"role": role, "content": item.get('content')})
-    return messages
+
+def build_and_truncate_context(
+        system_prompt: str,
+        summary: str,
+        recent_history: List[Dict[str, str]],
+        user_message: str,
+        tokenizer: Optional[AutoTokenizer]
+) -> List[Dict[str, str]]:
+    messages_for_llm = []  # 최종 LLM 메시지 목록
+
+    # 1. 시스템 프롬프트 추가
+    messages_for_llm.append({"role": "system", "content": system_prompt})
+    current_tokens = count_tokens(system_prompt, tokenizer)
+
+    # 2. 요약 추가 (있다면)
+    summary_prefix = "Summary of the previous conversation: "
+    full_summary_text = f"{summary_prefix}{summary}" if summary else ""
+    summary_tokens = count_tokens(full_summary_text, tokenizer)
+
+    # 3. 사용자 메시지 추가 (항상 포함)
+    user_message_tokens = count_tokens(user_message, tokenizer)
+
+    # 시스템, 요약, 사용자 메시지, 응답 예산을 제외한 가용 토큰 계산
+    available_for_history = MAX_CONTEXT_TOKENS - (
+                current_tokens + summary_tokens + user_message_tokens + RESPONSE_BUDGET)
+
+    added_history = []
+    if available_for_history > 0 and recent_history:
+        temp_history_tokens = 0
+        for msg in reversed(recent_history):  # 최신 메시지부터
+            msg_content = msg.get('content', '')
+            msg_role = msg.get('role')
+            if not msg_content or not msg_role:  # 유효하지 않은 메시지 스킵
+                continue
+
+            msg_tokens = count_tokens(msg_content, tokenizer)
+            if temp_history_tokens + msg_tokens <= available_for_history:
+                added_history.insert(0, {"role": msg_role, "content": msg_content})  # 시간 순서 유지를 위해 앞에 삽입
+                temp_history_tokens += msg_tokens
+            else:
+                logger.info(
+                    f"History token limit reached ({temp_history_tokens}/{available_for_history}), truncating older history.")
+                break
+
+    if summary:  # 요약은 시스템 메시지 다음에 추가
+        messages_for_llm.append({"role": "system", "content": full_summary_text})
+
+    messages_for_llm.extend(added_history)  # 절삭된 최근 대화 추가
+    messages_for_llm.append({"role": "user", "content": user_message})  # 사용자 메시지 마지막에 추가
+
+    total_estimated_tokens = count_tokens(system_prompt, tokenizer) + \
+                             count_tokens(full_summary_text, tokenizer) + \
+                             sum(count_tokens(m["content"], tokenizer) for m in added_history) + \
+                             user_message_tokens
+    logger.debug(f"Built context with ~{total_estimated_tokens} input tokens (excluding response budget).")
+    return messages_for_llm
 
 
 def parse_llm_output_for_answer(full_response: str) -> str:
-    """LLM 출력에서 [ANSWER] 태그 안의 내용을 추출합니다."""
-    answer_match = re.search(r"\[ANSWER\](.*?)\[/ANSWER\]", full_response, re.DOTALL)
-    if answer_match:
-        return answer_match.group(1).strip()
+    # 1. <think>...</think> 블록 추출 (로깅 또는 다른 용도로 활용 가능)
+    think_match = re.search(r"<think>(.*?)</think>", full_response, re.DOTALL | re.IGNORECASE)
+    if think_match:
+        thoughts = think_match.group(1).strip()
+        logger.debug(f"LLM Thoughts: {thoughts[:500]}...") # 예시 로깅
+        # <think>...</think> 블록을 전체 응답에서 제거
+        answer_part = full_response.replace(think_match.group(0), "").strip()
+        return answer_part # <think> 태그 이후의 내용을 최종 답변으로 간주
     else:
-        logger.warning(f"Could not find [ANSWER] tags. Returning full response: {full_response[:150]}...")
-        no_thoughts = re.sub(r"\[THOUGHTS\].*?\[/THOUGHTS\]", "", full_response, flags=re.DOTALL).strip()
-        return no_thoughts if no_thoughts else full_response.strip()
+        # <think> 태그가 없는 경우, 전체 응답을 그대로 반환
+        logger.debug("No <think> tags found, returning full response.")
+        return full_response.strip()
+
+
+def should_use_cot(user_message: str, params: Dict, tokenizer: Optional[AutoTokenizer]) -> bool:
+    if "use_cot" in params:  # API에서 명시적으로 지정하면 그 값을 따름
+        return params.get("use_cot", True)
+
+    # 휴리스틱: 추론 단어 포함 또는 특정 토큰 수 이상이면 CoT 사용
+    reasoning_words = {"why", "how", "explain", "describe", "what if", "tell me about"}
+    if any(word in user_message.lower() for word in reasoning_words) or \
+            count_tokens(user_message, tokenizer) > 30:  # 예: 30 토큰 이상
+        return True
+    return False
 
 
 async def handle_chat_processing(
         payload: Dict[str, Any],
-        llm: LLMService,
+        llm: LLMService,  # LLMService 인스턴스
         pg: PostgreSQLService,
-        redis: DatabaseClient
+        redis: DatabaseClient,
+        tokenizer: Optional[AutoTokenizer],  # 주입된 토크나이저
+        backend_client: BackendApiClient  # 주입된 백엔드 클라이언트
 ):
     """'process_chat' 작업을 처리합니다."""
     room_id = payload.get("room_id")
-    user_id_str = payload.get("user_id_str") # API에서 전달된 문자열 ID
+    user_id_str = payload.get("user_id_str")
     user_message = payload.get("user_message")
-    request_id = payload.get("request_id", "N/A")
+    request_id = payload.get("request_id", "N/A")  # Redis 페이로드에서 request_id 가져옴
 
-    if not all([room_id, user_id_str, user_message]):
-        logger.error(f"ChatHandler: Invalid payload (ReqID: {request_id}): {payload}")
+    if not all([room_id, user_id_str, user_message, request_id]):
+        logger.error(f"ChatHandler: Invalid payload for 'process_chat' (ReqID: {request_id}): {payload}")
         return
 
     logger.info(f"ChatHandler: Processing 'process_chat' (ReqID: {request_id}) for room: {room_id}")
 
     try:
-        # 0. 사용자 ID와 AI ID를 PG에서 조회/생성
+        # 1. 사용자 ID 조회 및 사용자 메시지 저장
         user_id_int = await pg.get_or_create_user(user_id_str)
-        ai_user_id_int = await pg.get_or_create_user(AI_USER_NICKNAME)
+        #await pg.add_message(room_id, user_id_int, user_message, 'user', request_id)
+        logger.info(f"ChatHandler: Saved User message (ReqID: {request_id}) to PG for room {room_id}.")
 
-        # A. 사용자 메시지를 PG에 저장 (DB 스키마 요구사항 반영)
-        # await pg.add_message(room_id, user_id_int, user_message, 'user', request_id)
-        logger.info(f"ChatHandler: User message check (ReqID: {request_id}) to PG.")
-
-        # 1. PG에서 문맥 조회 (사용자 메시지 저장 후 조회)
+        # 2. 문맥 조회
         summary = await pg.get_summary(room_id)
-        recent_history = await pg.get_recent_history(room_id, limit=4)
-        history_messages = format_context_to_messages(summary, recent_history)
+        recent_history = await pg.get_recent_history(room_id, limit=10)  # 토큰 절삭을 위해 충분히 가져옴
 
-        # 2. LLM 파라미터 및 CoT 설정
+        # 3. LLM 파라미터 및 CoT 설정
         llm_params_from_payload = payload.get("llm_params", {}).copy()
-        use_cot = llm_params_from_payload.pop("use_cot", True) # API에서 온 use_cot 사용, 없으면 True
-        final_llm_params = DEFAULT_CHAT_PARAMS.copy()
-        final_llm_params.update(llm_params_from_payload)
-        system_prompt_to_use = SYSTEM_PROMPT_COT if use_cot else SYSTEM_PROMPT_SIMPLE
+        use_cot_flag = should_use_cot(user_message, llm_params_from_payload, tokenizer)
+        system_prompt_to_use = SYSTEM_PROMPT_COT if use_cot_flag else SYSTEM_PROMPT_SIMPLE
 
-        messages_for_llm = [
-            {"role": "system", "content": system_prompt_to_use},
-            *history_messages,
-            {"role": "user", "content": user_message} # 최신 사용자 메시지 추가
-        ]
-        logger.debug(f"ChatHandler: Messages for LLM (ReqID: {request_id}): {messages_for_llm}")
-        logger.debug(f"ChatHandler: LLM params (ReqID: {request_id}): {final_llm_params}, CoT: {use_cot}")
+        final_llm_params = DEFAULT_CHAT_PARAMS.copy()  # 기본값으로 시작
+        final_llm_params.update(llm_params_from_payload)  # API에서 온 값으로 덮어쓰기
+        if 'use_cot' in final_llm_params:  # use_cot는 프롬프트 선택에만 사용
+            del final_llm_params['use_cot']
 
-        # 3. LLM 호출
-        llm_output_data = await llm.generate_text(messages=messages_for_llm, **final_llm_params)
-        full_response = llm_output_data.get("generated_text", "죄송합니다. 답변을 생성하지 못했습니다.")
+        # 4. 동적 컨텍스트 구축
+        messages_for_llm = build_and_truncate_context(
+            system_prompt_to_use, summary, recent_history, user_message, tokenizer
+        )
+        logger.debug(
+            f"ChatHandler: Messages for LLM (ReqID: {request_id}, Count: {len(messages_for_llm)}): {str(messages_for_llm)[:300]}...")
+        logger.debug(f"ChatHandler: LLM params for call (ReqID: {request_id}): {final_llm_params}, CoT: {use_cot_flag}")
 
-        # 4. 응답 파싱
-        final_answer = parse_llm_output_for_answer(full_response) if use_cot else full_response.strip()
+        # 5. LLMService 호출
+        llm_output_data = await llm.generate_text(
+            messages=messages_for_llm,
+            request_id=request_id,  # LLMService에 request_id 전달
+            **final_llm_params  # max_tokens 등 포함
+        )
 
-        # 5. SLM 응답을 reception_api를 통해 전송 (기존 PG 저장 주석 처리)
-        # await pg.add_message(room_id, ai_user_id_int, final_answer, 'final_ai', request_id)
-        # logger.info(f"ChatHandler: Saved AI response (ReqID: {request_id}) to PG.")
+        if "error" in llm_output_data or not llm_output_data.get("generated_text"):
+            logger.error(
+                f"ChatHandler: LLM generation failed or returned empty (ReqID: {request_id}). Response: {llm_output_data}")
+            final_answer = "Sorry, I encountered an issue generating a response."
+            # 콜백 전송 로직으로 바로 넘어감 (PG에는 저장하지 않음, 콜백 실패 시 저장 고려)
+        else:
+            full_response = llm_output_data.get("generated_text", "")
+            logger.debug(f"ChatHandler: Full LLM response (ReqID: {request_id}): {full_response[:200]}...")
+            # 6. 응답 파싱
+            final_answer = parse_llm_output_for_answer(full_response) if use_cot_flag else full_response.strip()
 
-        # --- 수정된 코드 ---
-        # Redis 작업 데이터에서 callback_url 과 request_id 를 가져와야 합니다.
-        # callback_url = task_data['payload'].get('callback_url')
-        # request_id = task_data['payload']['request_id']
+        # 7. Backend API로 응답 전송
+        try:
+            req_uuid = uuid.UUID(request_id)  # request_id를 UUID 객체로 변환
+            callback_success = await backend_client.send_ai_response(req_uuid, final_answer)
 
-        # aiohttp 세션을 생성하여 클라이언트 사용 (세션 관리는 앱 전체적으로 고려하는 것이 좋음)
-        async with aiohttp.ClientSession() as session:
-            client = BackendApiClient(session)
-            success = await client.send_ai_response(uuid.UUID(request_id), final_answer)
-
-            if success:
+            if callback_success:
                 logger.info(f"ChatHandler: AI response callback sent successfully for ReqID: {request_id}.")
+                # 콜백 성공 시, AI 메시지는 백엔드가 저장한다고 가정 (여기서 PG 저장 안 함)
             else:
-                logger.error(f"ChatHandler: Failed to send AI response callback for ReqID: {request_id}.")
-                # TODO: 콜백 전송 실패 시, 재시도 로직이나 DB에 에러 상태를 기록하는 등의 후처리 필요.
+                logger.error(
+                    f"ChatHandler: Failed to send AI response callback for ReqID: {request_id}. Saving to PG as fallback.")
+                # 콜백 실패 시, PG에 에러 상태 또는 AI 메시지 저장
+                ai_user_id_int = await pg.get_or_create_user(AI_USER_NICKNAME)
+                await pg.add_message(room_id, ai_user_id_int, f"(Callback Failed) {final_answer}", 'final_ai',
+                                     request_id)
 
-        # 6. 요약 작업 큐에 추가
+        except ValueError:  # request_id가 유효한 UUID가 아닐 경우
+            logger.error(
+                f"ChatHandler: Invalid request_id format for UUID conversion: {request_id}. Cannot send callback. Saving to PG.")
+            ai_user_id_int = await pg.get_or_create_user(AI_USER_NICKNAME)
+            await pg.add_message(room_id, ai_user_id_int, f"(Invalid ReqID for Callback) {final_answer}", 'final_ai',
+                                 request_id)
+
+        # 8. 다음 'update_summary' 작업을 Redis 큐에 추가 (콜백 성공 여부와 관계없이 수행)
         summary_llm_params = DEFAULT_SUMMARY_PARAMS_FOR_HANDLER.copy()
         summary_task_payload = {
             "room_id": room_id,
@@ -139,11 +234,15 @@ async def handle_chat_processing(
             "llm_params": summary_llm_params
         }
         summary_task = {"type": "update_summary", "payload": summary_task_payload}
-        await redis.lpush(QUEUE_NAME, json.dumps(summary_task))
-        logger.info(f"ChatHandler: Added 'update_summary' task (OrigReqID: {request_id}).")
+
+        await redis.lpush(getattr(Settings, 'CHAT_TASK_QUEUE_NAME', "chat_task_queue"),
+                          json.dumps(summary_task))
+        logger.info(f"ChatHandler: Added 'update_summary' task to queue for room {room_id} (OrigReqID: {request_id}).")
 
     except asyncpg.exceptions.ForeignKeyViolationError as fke:
-         logger.error(f"ChatHandler: Foreign Key Error (ReqID: {request_id}), Room {room_id} or User {user_id_str} might not exist: {fke}", exc_info=True)
-         # 여기서 적절한 실패 처리를 할 수 있습니다 (예: 에러 메시지 저장)
+        logger.error(
+            f"ChatHandler: Foreign Key Error (ReqID: {request_id}) for room {room_id}, user {user_id_str}: {fke}",
+            exc_info=True)
     except Exception as e:
-        logger.error(f"ChatHandler: Error processing 'process_chat' (ReqID: {request_id}): {e}", exc_info=True)
+        logger.error(f"ChatHandler: Error processing 'process_chat' (ReqID: {request_id}) for room {room_id}: {e}",
+                     exc_info=True)

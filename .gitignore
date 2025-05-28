@@ -26,9 +26,6 @@ requirements.txt~
 .idea
 
 # SSH 키 파일 및 인증 관련
-*
-!*.*
-!*/
 newsum-dev-key
 newsum-dev-key.pub
 *.pem
@@ -63,8 +60,8 @@ var/
 *.egg-info/
 .installed.cfg
 *.egg
-#pre-test/qwen3-14b-awq/
-pre-test/
+pre-test/qwen3-14b-awq/
+# pre-test/
 
 # 테스트 캐시
 .cache/
@@ -72,4 +69,4 @@ pre-test/
 # 테스트 기록파일
 results/
 scripts/
-.sql
+*.sql

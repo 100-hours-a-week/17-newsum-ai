@@ -90,11 +90,16 @@ Return ONLY valid JSON matching the schema and key "contextual_summary" below, N
             category = query_sec.query_context.get("query_category", "Other")
             audience = config_sec.config.get("target_audience", "general_public")
 
-            # 프롬프트 생성 및 LLM 호출
             prompt = self._build_summary_prompt(report_text, refined_intent, category, audience)
+            # messages 리스트 생성
+            messages_for_llm = [
+                {"role": "system", "content": prompt},  # prompt를 system 역할로
+                {"role": "user", "content": refined_intent}  # original_query를 user 역할로
+            ]
+
+            # 수정된 방식으로 LLMService 호출
             llm_resp = await self.llm_service.generate_text(
-                system_prompt_content=prompt,
-                prompt=refined_intent,
+                messages=messages_for_llm,
                 max_tokens=800,
                 temperature=0.3
             )

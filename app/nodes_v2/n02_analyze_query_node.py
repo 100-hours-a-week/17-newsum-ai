@@ -93,9 +93,16 @@ Original Query: "{query}"
 
             # 2) 프롬프트 생성 및 LLM 호출
             prompt = self._build_analysis_prompt(original_query, snippets)
+
+            # messages 리스트 생성
+            messages_for_llm = [
+                {"role": "system", "content": prompt},  # prompt를 system 역할로
+                {"role": "user", "content": original_query}  # original_query를 user 역할로
+            ]
+
+            # 수정된 방식으로 LLMService 호출
             llm_resp = await self.llm_service.generate_text(
-                system_prompt_content=prompt,
-                prompt=original_query,
+                messages=messages_for_llm,
                 temperature=0.3,
                 max_tokens=800,
             )

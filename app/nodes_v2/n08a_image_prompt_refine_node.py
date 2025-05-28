@@ -121,9 +121,15 @@ Return only JSON, NO thinks, NO comments, NO explanations.
             scenario_sec.thumbnail_image_prompt or "",
             scenario_sec.comic_scenarios or []
         )
+        # messages 리스트 생성
+        messages_for_llm = [
+            {"role": "system", "content": sys_norm},  # prompt를 system 역할로
+            {"role": "user", "content": user_norm}  # original_query를 user 역할로
+        ]
+
+        # 수정된 방식으로 LLMService 호출
         resp_norm = await self.llm_service.generate_text(
-            system_prompt_content=sys_norm,
-            prompt=user_norm,
+            messages=messages_for_llm,
             temperature=0.3,
             max_tokens=1500
         )
@@ -156,9 +162,16 @@ Return only JSON, NO thinks, NO comments, NO explanations.
             model_name = DEFAULT_IMAGE_MODE
 
         user_mode = self._build_user_prompt_mode(thumbnail_norm, panels_norm)
+
+        # messages 리스트 생성
+        messages_for_llm = [
+            {"role": "system", "content": sys_mode},  # prompt를 system 역할로
+            {"role": "user", "content": user_mode}  # original_query를 user 역할로
+        ]
+
+        # 수정된 방식으로 LLMService 호출
         resp_mode = await self.llm_service.generate_text(
-            system_prompt_content=sys_mode,
-            prompt=user_mode,
+            messages=messages_for_llm,
             temperature=0.7,
             max_tokens=1500
         )
