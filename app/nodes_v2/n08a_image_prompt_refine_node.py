@@ -3,10 +3,11 @@
 import json
 from typing import Dict, Any, List
 
-from app.workflows.state_v2 import WorkflowState, DEFAULT_IMAGE_MODE, FLUX_BASE_MODES, XL_BASE_MODES
+from app.workflows.state_v2 import WorkflowState
 from app.services.llm_service import LLMService
 from app.tools.think_parser_tool import extract_json
 from app.utils.logger import get_logger
+from app.config.image_style_config import IMAGE_STYLE_CONFIGS, DEFAULT_IMAGE_MODE
 
 logger = get_logger(__name__)
 
@@ -46,54 +47,6 @@ Return only JSON, NO thinks, NO comments, NO explanations.
 
 # Original Panel Prompts
 {panels_text}
-"""
-
-    def _build_system_prompt_flux(self) -> str:
-        # 예시로 넣은 Flux 포맷을 few-shot 예제로 포함
-        example_prompt = (
-            "A young boy with bright orange hair and a mischievous grin is riding on the back of a large, fluffy bear through the village. "
-            "The bear has a thick white coat and moves gracefully through the cobbled streets. The villagers watch in surprise and amusement. "
-            "The sky is clear, and the village is alive with activity. The camera is at eye level, capturing the joyful boy and the bear as they move through the village."
-        )
-        return f"""
-You are an expert image prompt engineer for narrative style (Flux).
-Below is a normalized thumbnail & panels. Produce for each a **fully descriptive English sentence** suitable for Flux–style image generation.
-Use the same structure/order as the example:
-
-# Example (thumbnail or panel)
-{example_prompt}
-
-# Output Schema (JSON only):
-{{
-  "thumbnail_prompt": "<string>",
-  "panel_prompts": ["<string>", "<string>", "<string>", "<string>"]
-}}
-"""
-
-    def _build_system_prompt_xl(self) -> str:
-        # 예시로 넣은 AnythingXL 단어 집합을 few-shot 예제로 포함
-        example_tokens = [
-            "masterpiece", "best quality", "1girl", "solo", "animal ears", 
-            "bow", "teeth", "jacket", "tail", "open mouth"
-        ]
-        example_line = ", ".join(example_tokens)
-        return f"""
-You are an expert image prompt engineer for token-based style (XL).
-Below is a normalized thumbnail & panels. For each, produce a **comma-separated list of keywords** in English, following the **order** and style shown:
-
-# Example Tokens:
-{example_line}
-
-# Output Schema (JSON only):
-{{
-  "thumbnail_tokens": ["<string>", ...],
-  "panel_tokens": [
-     ["<string>", ...],
-     ["<string>", ...],
-     ["<string>", ...],
-     ["<string>", ...]
-  ]
-}}
 """
 
     def _build_user_prompt_mode(self, thumbnail: str, panels: List[str]) -> str:
@@ -148,18 +101,11 @@ Return only JSON, NO thinks, NO comments, NO explanations.
         panels_norm = norm.get("panels", [])
         logger.debug(f"[n08a] 정규화 결과 thumbnail: {thumbnail_norm}, panels: {panels_norm}", extra={"trace_id": trace_id})
 
-        # 2) 모드별(Flux/XL) 호출
-        # model_name은 n01에서 writer_id에 따라 자동 세팅됨
+        # 2) 모드별 프롬프트 빌더 호출 (image_style_config에서 관리)
         model_name = config.get("image_mode", DEFAULT_IMAGE_MODE).lower()
-        logger.info(f"[n08a] 이미지 모드별 LLM 호출 시작 (mode={model_name})", extra={"trace_id": trace_id})
-        if model_name in FLUX_BASE_MODES:
-            sys_mode = self._build_system_prompt_flux()
-        elif model_name in XL_BASE_MODES:
-            sys_mode = self._build_system_prompt_xl()
-        else:
-            # DEFAULT_IMAGE_MODE로 처리 (현재는 flux 모드)
-            sys_mode = self._build_system_prompt_flux() # DEFAULT_IMAGE_MODE 모드 확인 필요
-            model_name = DEFAULT_IMAGE_MODE
+        style_conf = IMAGE_STYLE_CONFIGS.get(model_name, IMAGE_STYLE_CONFIGS[DEFAULT_IMAGE_MODE])
+        prompt_builder = style_conf["prompt_builder"]
+        sys_mode = prompt_builder()  # 실제 인자 필요시 맞게 전달
 
         user_mode = self._build_user_prompt_mode(thumbnail_norm, panels_norm)
 
@@ -189,26 +135,28 @@ Return only JSON, NO thinks, NO comments, NO explanations.
         # 3) ImageSection 에 최종 프롬프트 저장
         entries: List[Dict[str, Any]] = []
 
-        # 썸네일
-        if model_name in FLUX_BASE_MODES:
+        # 스타일 타입에 따라 key 결정 (확장성)
+        prompt_type = style_conf.get("type", "flux")
+        if prompt_type == "flux":
             thumb_prompt = final.get("thumbnail_prompt", "").strip()
-        else:
+            panel_prompts = final.get("panel_prompts", [])
+        elif prompt_type == "xl":
             thumb_prompt = ", ".join(final.get("thumbnail_tokens", []))
+            panel_prompts = [", ".join(tokens) for tokens in final.get("panel_tokens", [])]
+        else:
+            # 기본 fallback (확장성)
+            thumb_prompt = final.get("thumbnail_prompt", "").strip()
+            panel_prompts = final.get("panel_prompts", [])
+
         entries.append({
             "scene_identifier": "thumbnail",
             "model_name": model_name,
             "prompt_used": thumb_prompt
         })
 
-        # 각 패널
         for idx, panel in enumerate(scenario_sec.comic_scenarios or []):
             scene_id = panel.get("scene_identifier", f"S0{idx+1}")
-            if model_name in FLUX_BASE_MODES:
-                panel_prompts = final.get("panel_prompts", [])
-                prompt_text = panel_prompts[idx] if idx < len(panel_prompts) else ""
-            else:
-                tokens_list = final.get("panel_tokens", [])
-                prompt_text = " ".join(tokens_list[idx]) if idx < len(tokens_list) else ""
+            prompt_text = panel_prompts[idx] if idx < len(panel_prompts) else ""
             entries.append({
                 "scene_identifier": scene_id,
                 "model_name": model_name,
