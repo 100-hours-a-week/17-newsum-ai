@@ -13,8 +13,9 @@ import traceback
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from app.workflows.state_v2 import WorkflowState, DEFAULT_IMAGE_MODE  # ✨ sectioned model
+from app.workflows.state_v2 import WorkflowState  # ✨ sectioned model
 from app.utils.logger import get_logger, summarize_for_logging
+from app.config.image_style_config import get_image_mode_for_writer
 
 logger = get_logger(__name__)
 
@@ -34,13 +35,7 @@ class N01InitializeNode:
         original_query: str = state.query.original_query or ""
         initial_config: Dict[str, Any] = state.config.config or {}
         writer_id = str(initial_config.get("writer_id", "1"))
-        # writer_id에 따라 image_mode 자동 세팅
-        if writer_id == "1":
-            initial_config["image_mode"] = "ghibli-flux"
-        elif writer_id == "2":
-            initial_config["image_mode"] = "anything-xl"
-        else:
-            initial_config["image_mode"] = DEFAULT_IMAGE_MODE
+        initial_config["image_mode"] = get_image_mode_for_writer(writer_id)
         # debug
         print()
         print(f"writer_id: {writer_id} | image_mode: {initial_config['image_mode']}")

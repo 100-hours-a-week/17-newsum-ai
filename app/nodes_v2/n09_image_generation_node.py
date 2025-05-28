@@ -2,10 +2,11 @@ import traceback
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from app.workflows.state_v2 import WorkflowState, DEFAULT_IMAGE_MODE, FLUX_BASE_MODES, XL_BASE_MODES
+from app.workflows.state_v2 import WorkflowState
 from app.utils.logger import get_logger, summarize_for_logging
 from app.config.settings import Settings
 from app.services.image_service import ImageService
+from app.config.image_style_config import IMAGE_STYLE_CONFIGS, DEFAULT_IMAGE_MODE
 
 logger = get_logger(__name__)
 settings = Settings()
@@ -47,16 +48,12 @@ class N09ImageGenerationNode:
             return result
 
         try:
-            generation_params = image_style_config or {}
-            negative_prompt = generation_params.pop(
-                "negative_prompt", settings.IMAGE_DEFAULT_NEGATIVE_PROMPT
-            )
+            negative_prompt = image_style_config.get("negative_prompt", settings.IMAGE_DEFAULT_NEGATIVE_PROMPT)
 
             api_response = await self.image_service.generate_image(
                 model_name=model_name,
                 prompt=prompt,
-                negative_prompt=negative_prompt,
-                **generation_params
+                negative_prompt=negative_prompt
             )
             result["raw_service_response"] = api_response
             if api_response.get("error"):
@@ -102,12 +99,7 @@ class N09ImageGenerationNode:
             prompt = entry.get("prompt_used", "").strip()
             model_name = entry.get("model_name") or DEFAULT_IMAGE_MODE
             is_thumbnail = (scene_id.lower() == "thumbnail")
-            if model_name not in FLUX_BASE_MODES and model_name not in XL_BASE_MODES:
-                model_name = DEFAULT_IMAGE_MODE
-            style_config = config.get("image_generation_style", {}).get(
-                scene_id,
-                config.get("image_generation_style", {}).get("default", {})
-            )
+            style_conf = IMAGE_STYLE_CONFIGS.get(model_name, IMAGE_STYLE_CONFIGS[DEFAULT_IMAGE_MODE])
             logger.debug(
                 f"[{node_name}] Generating for scene={scene_id}, model={model_name}, thumbnail={is_thumbnail}",
                 extra=extra_log
@@ -117,7 +109,7 @@ class N09ImageGenerationNode:
                 model_name=model_name,
                 scene_identifier=scene_id,
                 is_thumbnail=is_thumbnail,
-                image_style_config=style_config,
+                image_style_config=style_conf,
                 trace_id=trace_id,
                 extra_log_data=extra_log
             )
