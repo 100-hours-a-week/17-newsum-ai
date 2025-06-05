@@ -56,7 +56,8 @@ jobs:
           ssh ${{ secrets.DEV_USER }}@${{ secrets.DEV_HOST }} "cd /home/${{ secrets.DEV_USER }}/newsum-ai && \
             python3 -m venv venv && \
             source venv/bin/activate && \
-            pip install -r brief_requirements.txt"
+            pip install --no-cache-dir -r brief_requirements.txt"
+
           
           # Restart the service
           ssh ${{ secrets.DEV_USER }}@${{ secrets.DEV_HOST }} "sudo systemctl restart newsum-ai"
