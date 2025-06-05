@@ -1,0 +1,92 @@
+name: Main CD
+
+on:
+  push:
+    branches: main
+
+jobs:
+  deploy-production:
+    runs-on: ubuntu-latest
+    environment: production
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          
+      - name: Install Infisical CLI from CloudFront
+        run: |
+          curl -L https://${{secrets.AWS_CLOUDFRONT_URL}}/tools/infisical-linux-amd64 -o infisical
+          chmod +x infisical
+          sudo mv infisical /usr/local/bin/infisical
+          
+      - name: Fetch .env from Infisical
+        run: |
+          infisical export \
+            --env=${{ secrets.INFISICAL_ENV_PROD }} \
+            --projectId=${{ secrets.INFISICAL_PROJECT_ID }} \
+            --token=${{ secrets.INFISICAL_TOKEN_PROD }} \
+            --format=dotenv \
+            --domain=${{ secrets.INFISICAL_API_URL }} \
+            > $GITHUB_WORKSPACE/.env
+      
+      - name: Set up SSH
+        uses: webfactory/ssh-agent@v0.8.0
+        with:
+          ssh-private-key: ${{ secrets.PROD_SSH_PRIVATE_KEY }}
+          
+      - name: Add host key
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ secrets.PROD_HOST }} >> ~/.ssh/known_hosts
+          
+      - name: Deploy to VM
+        run: |
+          # Create deployment directory
+          ssh ${{ secrets.PROD_USER }}@${{ secrets.PROD_HOST }} "mkdir -p /home/${{ secrets.PROD_USER }}/ai"
+          
+          # Copy files to VM
+          rsync -avz --exclude '.git' --exclude 'venv' --exclude '__pycache__' \
+            ./ ${{ secrets.PROD_USER }}@${{ secrets.PROD_HOST }}:/home/${{ secrets.PROD_USER }}/ai/
+          
+          # Setup Python environment and install dependencies
+          ssh ${{ secrets.PROD_USER }}@${{ secrets.PROD_HOST }} "cd /home/${{ secrets.PROD_USER }}/ai && \
+            python3 -m venv venv && \
+            source venv/bin/activate && \
+            pip install -r requirements.txt"
+          
+          # Restart the service
+          ssh ${{ secrets.PROD_USER }}@${{ secrets.PROD_HOST }} "sudo systemctl restart ai"
+          
+      - name: Notify deployment status
+        if: always()
+        run: |
+          curl -X POST ${{ secrets.DISCORD_WEBHOOK_URL }} \
+            -H "Content-Type: application/json" \
+            -d '{
+              "embeds": [{
+                "title": "Deployment to Production Environment",
+                "color": ${{ job.status == 'success' && '65280' || '16711680' }},
+                "fields": [
+                  {
+                    "name": "Status",
+                    "value": "${{ job.status }}",
+                    "inline": true
+                  },
+                  {
+                    "name": "Commit",
+                    "value": "${{ github.sha }}",
+                    "inline": true
+                  },
+                  {
+                    "name": "Triggered by",
+                    "value": "${{ github.actor }}",
+                    "inline": true
+                  }
+                ],
+                "timestamp": "${{ github.event.repository.updated_at }}"
+              }]
+            }' 
