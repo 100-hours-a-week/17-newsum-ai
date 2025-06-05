@@ -1,29 +1,28 @@
-#1
 name: Development CD
 
 on:
   push:
-    branches: dev
+    branches: [dev]
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     environment: development
-    
+
     steps:
       - uses: actions/checkout@v3
-      
+
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.12'
-          
+
       - name: Install Infisical CLI from CloudFront
         run: |
-          curl -L https://${{secrets.AWS_CLOUDFRONT_URL}}/tools/infisical-linux-amd64 -o infisical
+          curl -L https://${{ secrets.AWS_CLOUDFRONT_URL }}/tools/infisical-linux-amd64 -o infisical
           chmod +x infisical
           sudo mv infisical /usr/local/bin/infisical
-          
+
       - name: Fetch .env from Infisical
         run: |
           infisical export \
@@ -32,37 +31,45 @@ jobs:
             --token=${{ secrets.INFISICAL_TOKEN_DEV }} \
             --format=dotenv \
             --domain=${{ secrets.INFISICAL_API_URL }} \
-            > $GITHUB_WORKSPACE/.env
-      
+            > .env
+
       - name: Set up SSH
         uses: webfactory/ssh-agent@v0.8.0
         with:
           ssh-private-key: ${{ secrets.DEV_SSH_PRIVATE_KEY }}
-          
+
       - name: Add host key
         run: |
           mkdir -p ~/.ssh
           ssh-keyscan -H ${{ secrets.DEV_HOST }} >> ~/.ssh/known_hosts
-          
-      - name: Deploy to VM
+
+      - name: Deploy FastAPI code to VM
         run: |
-          # Create deployment directory
-          ssh ${{ secrets.DEV_USER }}@${{ secrets.DEV_HOST }} "mkdir -p /home/${{ secrets.DEV_USER }}/newsum-ai"
-          
-          # Copy files to VM
-          scp -r ./ ${{ secrets.DEV_USER }}@${{ secrets.DEV_HOST }}:/home/${{ secrets.DEV_USER }}/newsum-ai/
+          ssh ${{ secrets.DEV_USER }}@${{ secrets.DEV_HOST }} "
+            sudo apt update &&
+            sudo apt install -y rsync python3-venv
+            mkdir -p /home/${{ secrets.DEV_USER }}/fastapi-app
+          "
 
-          
-          # Setup Python environment and install dependencies
-          ssh ${{ secrets.DEV_USER }}@${{ secrets.DEV_HOST }} "cd /home/${{ secrets.DEV_USER }}/newsum-ai && \
-            python3 -m venv venv && \
-            source venv/bin/activate && \
-            pip install --no-cache-dir -r brief_requirements.txt"
+          # exclude .git and venv
+          rsync -avz --exclude='.git' --exclude='venv' --exclude='__pycache__' \
+            ./ ${{ secrets.DEV_USER }}@${{ secrets.DEV_HOST }}:/home/${{ secrets.DEV_USER }}/fastapi-app/
 
-          
-          # Restart the service
-          ssh ${{ secrets.DEV_USER }}@${{ secrets.DEV_HOST }} "sudo systemctl restart newsum-ai"
-          
+          # Transfer .env separately
+          scp .env ${{ secrets.DEV_USER }}@${{ secrets.DEV_HOST }}:/home/${{ secrets.DEV_USER }}/fastapi-app/.env
+
+      - name: Setup & Run FastAPI on VM
+        run: |
+          ssh ${{ secrets.DEV_USER }}@${{ secrets.DEV_HOST }} "
+            cd /home/${{ secrets.DEV_USER }}/fastapi-app &&
+            python3 -m venv venv &&
+            source venv/bin/activate &&
+            pip install --upgrade pip &&
+            pip install -r requirements.txt &&
+            pkill -f 'uvicorn' || true &&
+            nohup venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000 > fastapi.log 2>&1 &
+          "
+
       - name: Notify deployment status
         if: always()
         run: |
@@ -70,8 +77,8 @@ jobs:
             -H "Content-Type: application/json" \
             -d '{
               "embeds": [{
-                "title": "Deployment to Development Environment",
-                "color": ${{ job.status == 'success' && '65280' || '16711680' }},
+                "title": "Deployment to Development Environment (FastAPI)",
+                "color": '"${{ job.status == 'success' && '65280' || '16711680' }}"',
                 "fields": [
                   {
                     "name": "Status",
@@ -91,4 +98,4 @@ jobs:
                 ],
                 "timestamp": "${{ github.event.repository.updated_at }}"
               }]
-            }' 
+            }'
