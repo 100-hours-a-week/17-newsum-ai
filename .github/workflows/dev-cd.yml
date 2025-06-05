@@ -50,8 +50,8 @@ jobs:
           ssh ${{ secrets.DEV_USER }}@${{ secrets.DEV_HOST }} "mkdir -p /home/${{ secrets.DEV_USER }}/newsum-ai"
           
           # Copy files to VM
-          rsync -avz --exclude '.git' --exclude 'venv' --exclude '__pycache__' \
-            ./ ${{ secrets.DEV_USER }}@${{ secrets.DEV_HOST }}:/home/${{ secrets.DEV_USER }}/newsum-ai/
+          scp -r ./ ${{ secrets.DEV_USER }}@${{ secrets.DEV_HOST }}:/home/${{ secrets.DEV_USER }}/newsum-ai/
+
           
           # Setup Python environment and install dependencies
           ssh ${{ secrets.DEV_USER }}@${{ secrets.DEV_HOST }} "cd /home/${{ secrets.DEV_USER }}/newsum-ai && \
