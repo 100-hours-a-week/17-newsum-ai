@@ -24,7 +24,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install flake8 black isort
-          pip install -r requirements.txt
+          pip install -r brief_requirements.txt
           
       - name: Lint check
         run: |
@@ -47,7 +47,7 @@ jobs:
         run: |
           python -m venv venv
           source venv/bin/activate
-          pip install -r requirements.txt
+          pip install -r brief_requirements.txt
           
       - name: Verify imports
         run: |
