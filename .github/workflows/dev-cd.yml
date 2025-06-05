@@ -1,0 +1,92 @@
+name: Development CD
+
+on:
+  push:
+    branches: dev
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: development
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+          
+      - name: Install Infisical CLI from CloudFront
+        run: |
+          curl -L https://${{secrets.AWS_CLOUDFRONT_URL}}/tools/infisical-linux-amd64 -o infisical
+          chmod +x infisical
+          sudo mv infisical /usr/local/bin/infisical
+          
+      - name: Fetch .env from Infisical
+        run: |
+          infisical export \
+            --env=${{ secrets.INFISICAL_ENV_DEV }} \
+            --projectId=${{ secrets.INFISICAL_PROJECT_ID }} \
+            --token=${{ secrets.INFISICAL_TOKEN_DEV }} \
+            --format=dotenv \
+            --domain=${{ secrets.INFISICAL_API_URL }} \
+            > $GITHUB_WORKSPACE/.env
+      
+      - name: Set up SSH
+        uses: webfactory/ssh-agent@v0.8.0
+        with:
+          ssh-private-key: ${{ secrets.DEV_SSH_PRIVATE_KEY }}
+          
+      - name: Add host key
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ secrets.DEV_HOST }} >> ~/.ssh/known_hosts
+          
+      - name: Deploy to VM
+        run: |
+          # Create deployment directory
+          ssh ${{ secrets.DEV_USER }}@${{ secrets.DEV_HOST }} "mkdir -p /home/${{ secrets.DEV_USER }}/newsum-ai"
+          
+          # Copy files to VM
+          rsync -avz --exclude '.git' --exclude 'venv' --exclude '__pycache__' \
+            ./ ${{ secrets.DEV_USER }}@${{ secrets.DEV_HOST }}:/home/${{ secrets.DEV_USER }}/newsum-ai/
+          
+          # Setup Python environment and install dependencies
+          ssh ${{ secrets.DEV_USER }}@${{ secrets.DEV_HOST }} "cd /home/${{ secrets.DEV_USER }}/newsum-ai && \
+            python3 -m venv venv && \
+            source venv/bin/activate && \
+            pip install -r requirements.txt"
+          
+          # Restart the service
+          ssh ${{ secrets.DEV_USER }}@${{ secrets.DEV_HOST }} "sudo systemctl restart newsum-ai"
+          
+      - name: Notify deployment status
+        if: always()
+        run: |
+          curl -X POST ${{ secrets.DISCORD_WEBHOOK_URL }} \
+            -H "Content-Type: application/json" \
+            -d '{
+              "embeds": [{
+                "title": "Deployment to Development Environment",
+                "color": ${{ job.status == 'success' && '65280' || '16711680' }},
+                "fields": [
+                  {
+                    "name": "Status",
+                    "value": "${{ job.status }}",
+                    "inline": true
+                  },
+                  {
+                    "name": "Commit",
+                    "value": "${{ github.sha }}",
+                    "inline": true
+                  },
+                  {
+                    "name": "Triggered by",
+                    "value": "${{ github.actor }}",
+                    "inline": true
+                  }
+                ],
+                "timestamp": "${{ github.event.repository.updated_at }}"
+              }]
+            }' 
