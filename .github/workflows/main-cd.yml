@@ -56,7 +56,7 @@ jobs:
           ssh ${{ secrets.PROD_USER }}@${{ secrets.PROD_HOST }} "cd /home/${{ secrets.PROD_USER }}/ai && \
             python3 -m venv venv && \
             source venv/bin/activate && \
-            pip install -r brief_requirements.txt
+            pip install -r brief_requirements.txt"
           
           # Restart the service
           ssh ${{ secrets.PROD_USER }}@${{ secrets.PROD_HOST }} "sudo systemctl restart ai"
