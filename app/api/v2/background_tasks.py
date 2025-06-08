@@ -1,131 +1,108 @@
-# ai/app/api/v2/background_tasks.py (Trace ID 일관성 및 최종 상태 처리 수정)
-
-# version 2.2 (2025-05-27)
+# ai/app/api/v2/background_tasks.py (수정 예시)
 import uuid
-import traceback
 from typing import Dict, Any, Optional
-from fastapi import BackgroundTasks, HTTPException
-from datetime import datetime, timezone
+from app.utils.logger import get_logger
+from app.config.settings import Settings  # Settings 임포트
+from app.api.v2.schemas import ChatResponse
 
-from app.utils.logger import get_logger, summarize_for_logging
-from app.dependencies import CompiledWorkflowDep, DatabaseClientDep
+# 서비스 및 워크플로우 구성 요소 타입 임포트
+from app.services.postgresql_service import PostgreSQLService
+from app.services.llm_service import LLMService
+from app.services.database_client import DatabaseClient
+from app.tools.search.Google_Search_tool import GoogleSearchTool  # 임포트 추가
+from langgraph.graph import StateGraph
+from langgraph.checkpoint.memory import MemorySaver  # 체크포인터 예시
+# WorkflowControllerV3 임포트 경로 수정
+from app.workflows.workflow_controller import WorkflowControllerV3
+# ChatRequestPayload 임포트
+from app.services.backend_client import BackendApiClient
+from app.api.v2.schemas import ChatRequestPayload
 
 logger = get_logger(__name__)
 
 
-# Helper shortcuts to safely pull nested keys
-def _g(d: Dict[str, Any], *path, default=None):
-    cur = d
-    for p in path:
-        if cur is None:
-            return default
-        cur = cur.get(p)
-    return cur if cur is not None else default
+async def run_workflow_step_in_background(
+        user_id: str,
+        initial_work_id_str: Optional[str],
+        chat_message: Optional[str],
+        controller_payload: Dict[str, Any],
+        pg_service: PostgreSQLService,
+        llm_service: LLMService,
+        redis_client: DatabaseClient,
+        backend_client: BackendApiClient,
+        google_search_tool: GoogleSearchTool,
+        settings_obj: Settings,
+        compiled_graph_from_lifespan: StateGraph,
+        checkpointer_from_lifespan: MemorySaver
+):
+    target_status = controller_payload.get("target_status")
+    request_id_from_payload = controller_payload.get("request_id", "N/A_BG_TASK")
+    room_id_from_payload = controller_payload.get("room_id")
 
-
-async def trigger_workflow_task(
-    query: str,
-    config: Dict[str, Any],
-    background_tasks: BackgroundTasks,
-    compiled_app: CompiledWorkflowDep,
-    db_client: DatabaseClientDep,
-) -> str:
-    master_comic_id = str(uuid.uuid4())
-    master_trace_id = master_comic_id
-    langgraph_thread_id = master_comic_id
-
-    extra_log = {"trace_id": master_trace_id, "comic_id": master_comic_id}
-    logger.info("BG workflow trigger", extra=extra_log)
-
-    # --- DB PENDING 상태 기록 ---
-    initial_db_state = {
-        "comic_id": master_comic_id,
-        "status": "PENDING",
-        "timestamp_accepted": datetime.now(timezone.utc).isoformat(),
-        "query": query,
+    log_work_id = initial_work_id_str or "NEW_WORKFLOW_PENDING"
+    extra_log = {
+        "work_id_initial": log_work_id, "target_status": target_status,
+        "bg_task_id": request_id_from_payload, "user_id": user_id,
     }
-    await db_client.set(master_comic_id, initial_db_state)
+    logger.info(f"백그라운드 작업 시작: 사용자 '{user_id}', 목표 상태 '{target_status}'.", extra=extra_log)
 
-    # 내부 실행 함수 -------------------------------------------------
-    async def workflow_runner(job_id: str, raw_query: str, cfg: Dict[str, Any], trace_id: str):
-        start_ts = datetime.now(timezone.utc)
-        runner_log = {"trace_id": trace_id, "comic_id": job_id}
+    controller = WorkflowControllerV3(
+        pg_service=pg_service,
+        backend_client=backend_client,
+        compiled_graph=compiled_graph_from_lifespan,
+        checkpointer=checkpointer_from_lifespan
+    )
 
-        try:
-            await db_client.set(job_id, {**initial_db_state, "status": "STARTED", "timestamp_start": start_ts.isoformat()})
+    payload_for_controller = ChatRequestPayload(
+        request_id=request_id_from_payload,
+        room_id=str(room_id_from_payload),
+        user_id=user_id,
+        message=chat_message,
+        target_status=target_status,
+        work_id=initial_work_id_str
+    )
 
-            init_input = {
-                "query": {"original_query": raw_query},  # section 경로에 맞춰 배치
-                "config": {"config": cfg},
-                "meta": {"comic_id": job_id, "trace_id": trace_id},
-            }
+    try:
+        # ▼▼▼ 핵심 변경 부분 ▼▼▼
+        # 1. 컨트롤러 실행 결과를 chat_response 변수에 저장
+        chat_response: Optional[ChatResponse] = await controller.process_chat_interaction(
+            payload=payload_for_controller)
 
-            final_output: Optional[Dict[str, Any]] = await compiled_app.ainvoke(
-                init_input, config={"configurable": {"thread_id": langgraph_thread_id}}
-            )
+        # 2. chat_response에 보낼 메시지가 있는지 확인 후 콜백 전송
+        if chat_response and chat_response.message:
+            callback_id_to_send = chat_response.request_id
+            try:
+                # request_id를 UUID 객체로 변환
+                callback_id_uuid = uuid.UUID(chat_response.request_id)
+                callback_id_to_send = callback_id_uuid
+            except (ValueError, TypeError):
+                logger.warning(f"콜백 request_id '{chat_response.request_id}'가 유효한 UUID가 아닙니다.", extra=extra_log)
 
-            end_ts = datetime.now(timezone.utc)
-            duration = (end_ts - start_ts).total_seconds()
+            try:
+                logger.info(f"백그라운드 작업 결과 콜백 전송 시도. ID: {callback_id_to_send}, Msg: '{chat_response.message[:100]}...'",
+                            extra=extra_log)
 
-            # ----- 결과 요약 -----
-            final_status = "FAILED"
-            final_msg = "Unexpected result"
-            error_details = None
-            result_summary = None
+                # backend_client를 사용하여 직접 응답 메시지 전송
+                callback_success = await backend_client.send_ai_response(
+                    request_id=callback_id_to_send,
+                    content=chat_response.message
+                )
 
-            if isinstance(final_output, dict):
-                err_msg = _g(final_output, "meta", "error_message")
-                is_ok = err_msg is None
-                final_status = "DONE" if is_ok else "FAILED"
-                final_msg = "성공" if is_ok else err_msg
-                error_details = None if is_ok else err_msg
+                if callback_success:
+                    logger.info(f"백그라운드 작업 콜백 전송 성공 (ReqID: {request_id_from_payload}).", extra=extra_log)
+                else:
+                    # PG 저장은 컨트롤러의 fallback 로직이 아닌, 여기서 직접 처리하거나 별도 정책 수립 가능
+                    logger.error(f"백그라운드 작업 콜백 전송 실패 (False 반환) (ReqID: {request_id_from_payload}).", extra=extra_log)
 
-                # report, idea, scenario, image 등 Section별로 dict를 저장할 때, raw_search_results 등 dict 리스트에 rank 필드가 누락되지 않도록 보완
-                report_content = _g(final_output, "report", "report_content", default="")
-                saved_report_path = _g(final_output, "report", "saved_report_path")
-                comic_ideas = _g(final_output, "idea", "comic_ideas", default=[])
-                comic_scenarios = _g(final_output, "scenario", "comic_scenarios", default=[])
-                generated_comic_images = _g(final_output, "image", "generated_comic_images", default=[])
-                raw_search_results = _g(final_output, "search", "raw_search_results", default=[])
-                if isinstance(raw_search_results, list):
-                    for idx, item in enumerate(raw_search_results):
-                        if isinstance(item, dict) and 'rank' not in item:
-                            item['rank'] = idx + 1
+            except Exception as e_callback:
+                logger.error(f"백그라운드 작업 콜백 전송 중 예외 발생 (ReqID: {request_id_from_payload}): {e_callback}", exc_info=True,
+                             extra=extra_log)
 
-                result_summary = {
-                    "trace_id": _g(final_output, "meta", "trace_id"),
-                    "comic_id": _g(final_output, "meta", "comic_id"),
-                    "final_stage": _g(final_output, "meta", "current_stage"),
-                    # report
-                    "report_len": len(report_content),
-                    "saved_report_path": saved_report_path,
-                    # idea
-                    "ideas_cnt": len(comic_ideas),
-                    # scenario
-                    "scenarios_cnt": len(comic_scenarios),
-                    # images
-                    "images_cnt": len(generated_comic_images),
-                }
-            else:
-                error_details = f"Output type: {type(final_output)}"
+        logger.info(f"백그라운드 작업 성공적으로 완료됨 (ReqID: {request_id_from_payload}).", extra=extra_log)
+        # ▲▲▲ 핵심 변경 부분 ▲▲▲
 
-            await db_client.set(job_id, {
-                **initial_db_state,
-                "status": final_status,
-                "message": final_msg,
-                "result": result_summary,
-                "error_details": error_details,
-                "timestamp_start": start_ts.isoformat(),
-                "timestamp_end": end_ts.isoformat(),
-                "duration_seconds": round(duration, 2),
-            })
-            logger.info(f"Workflow {final_status}", extra=runner_log)
-
-        except Exception as e:
-            logger.exception("Workflow fatal", extra=runner_log)
-            await db_client.set(job_id, {**initial_db_state, "status": "FAILED", "message": str(e)})
-
-    # FastAPI Background task 등록
-    background_tasks.add_task(workflow_runner, master_comic_id, query, config, master_trace_id)
-    return master_comic_id
-
+    except Exception as e:
+        logger.critical(
+            f"백그라운드 작업 실행 중 심각한 예외 발생 (ReqID: {request_id_from_payload}): {e}",
+            exc_info=True, extra=extra_log,
+        )

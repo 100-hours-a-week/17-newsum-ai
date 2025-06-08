@@ -8,14 +8,14 @@ from fastapi import FastAPI
 # from app.config.settings import settings
 
 # API 라우트 정의
-from app.api.v1 import endpoints as v1_endpoints
+# from app.api.v1 import endpoints as v1_endpoints
 from app.api.v2 import endpoints as v2_endpoints
 
 # 애플리케이션 시작/종료 시 실행될 로직 (예: 모델 로딩, 워크플로우 컴파일)
 from app.lifespan import lifespan
 
 from app.config.settings import Settings # 변경: 중앙 설정 객체 임포트
-from app.utils.logger import get_logger
+from app.utils.logger import setup_logging, get_logger
 
 # 로거 설정
 logger = get_logger(__name__)
@@ -25,7 +25,7 @@ settings = Settings()
 # from app.utils.logging_config import setup_logging, get_logger
 
 # --- 로깅 설정 (실제 설정은 lifespan 또는 별도 config에서 진행) ---
-# setup_logging() # 예시: 로깅 설정 함수 호출
+setup_logging() # 예시: 로깅 설정 함수 호출
 # logger = get_logger(__name__) # 예시: 로거 가져오기
 
 # --- FastAPI 애플리케이션 인스턴스 생성 ---
@@ -43,7 +43,7 @@ app = FastAPI(
 
 # --- API 라우터 등록 ---
 # '/api/v1' 경로로 들어오는 요청을 v1_endpoints.router 가 처리하도록 설정
-app.include_router(v1_endpoints.router, prefix="/api/v1")
+# app.include_router(v1_endpoints.router, prefix="/api/v1")
 # '/api/v2' 경로로 들어오는 요청을 v2_endpoints.router 가 처리하도록 설정  
 app.include_router(v2_endpoints.router, prefix="/api/v2")
 

@@ -2,21 +2,19 @@
 import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Any, List, Optional
 from pathlib import Path
-import aiohttp # 외부 API 호출용 세션 생성 위해 추가
+import aiohttp
 from dotenv import load_dotenv
 
-# --- 로깅 및 설정 임포트 ---
-from app.utils.logger import setup_logging, get_logger
+from app.utils.logger import get_logger
 from app.config.settings import Settings
 
-# --- 워크플로우 및 공유 상태 ---
+# 워크플로우 컴파일 함수 임포트
 from app.workflows.main_workflow import compile_workflow
-from app.dependencies import _shared_state # 공유 상태 딕셔너리
+from app.dependencies import _shared_state
 
-# --- 서비스 및 도구 클래스 임포트 ---
-from app.services.database_client import DatabaseClient # <<< DatabaseClient 임포트
+from app.services.database_client import DatabaseClient
 from app.services.postgresql_service import PostgreSQLService
 from app.services.llm_service import LLMService
 from app.services.image_service import ImageService
@@ -25,193 +23,196 @@ from app.services.spam_service import SpamService
 from app.services.storage_service import StorageService
 from app.services.langsmith_service import LangSmithService
 from app.tools.search.Google_Search_tool import GoogleSearchTool
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.base import BaseCheckpointSaver
 
-logger = get_logger("AppLifespan") # 로깅 설정 후 로거 가져오기
+logger_lifespan = get_logger("AppLifespan")
 
-_service_instances = [] # 종료 시 정리할 인스턴스 목록
-settings = Settings()
+_service_instances_lifespan: List[Any] = []
+settings_lifespan = Settings()  # Settings 객체 생성
 
-import os
 from transformers import AutoTokenizer
-TOKENIZER = None
- # __file__은 현재 실행 중인 스크립트의 경로를 나타냄
-# chat_worker.py가 있는 디렉토리의 'handlers' 하위 'qwen_tokenizer'를 찾음
-current_script_dir = Path(__file__).resolve().parent
-print(current_script_dir)
-QWEN_TOKENIZER_PATH = current_script_dir / "workers" / "handlers"
-if QWEN_TOKENIZER_PATH.is_dir():
-    TOKENIZER = AutoTokenizer.from_pretrained(str(QWEN_TOKENIZER_PATH), trust_remote_code=True)
-    logger.info(f"ChatWorker: Tokenizer loaded successfully from {QWEN_TOKENIZER_PATH}.")
-else:
-    logger.error(f"ChatWorker: Tokenizer directory NOT found at {QWEN_TOKENIZER_PATH}. Please check the path.")
+
+TOKENIZER_LIFESPAN: Optional[AutoTokenizer] = None
+
 
 async def startup_event():
     """애플리케이션 시작 시 실행될 작업들"""
-    # --- 로깅 설정 적용 (가장 먼저 수행) ---
+    global logger_lifespan, TOKENIZER_LIFESPAN, settings_lifespan
+
+    logger_lifespan.info("Application startup process initiated...")
+
+    global _service_instances_lifespan
+    _service_instances_lifespan = []
+    shared_aiohttp_session = None
+
     try:
-        log_config_path_str = settings.LOG_CONFIG_PATH or 'logging_config.yaml'
-        config_path_obj = Path(log_config_path_str)
-        setup_logging(config_path=config_path_obj)
-        global logger
-        logger = get_logger("AppLifespan")
-        logger.info(f"Logging setup complete using config: {config_path_obj.resolve()}")
-    except Exception as e:
-        import logging
-        logging.basicConfig(level=logging.INFO)
-        logger = logging.getLogger("AppLifespanFallback")
-        logger.critical(f"!!! FATAL ERROR during logging setup: {e}", exc_info=True)
-        print(f"!!! FATAL ERROR during logging setup: {e}")
-        raise RuntimeError(f"Logging setup failed: {e}") from e
-
-    logger.info("Application startup process initiated...")
-
-    # --- 서비스 및 도구 초기화 ---
-    global _service_instances
-    _service_instances = []
-
-    # --- 외부 API 호출 및 번역용 공유 aiohttp 세션 (선택적) ---
-    shared_aiohttp_session = None # 기본값 None
-    try:
-        timeout = aiohttp.ClientTimeout(total=settings.EXTERNAL_API_TIMEOUT_SECONDS or 30)
+        timeout = aiohttp.ClientTimeout(total=settings_lifespan.EXTERNAL_API_TIMEOUT_SECONDS or 30)
         shared_aiohttp_session = aiohttp.ClientSession(timeout=timeout)
-        logger.info("Shared aiohttp session created for external/translation calls.")
-        _service_instances.append(shared_aiohttp_session) # 종료 시 닫기 위해 추가
+        _service_instances_lifespan.append(shared_aiohttp_session)
+        logger_lifespan.info("Shared aiohttp session created.")
     except Exception as e:
-        logger.error(f"Failed to create shared aiohttp session: {e}", exc_info=True)
-        # 공유 세션 생성 실패 시에도 일단 진행 (개별 서비스/노드가 자체 관리하도록)
-
+        logger_lifespan.error(f"Failed to create shared aiohttp session: {e}", exc_info=True)
 
     try:
-        # DatabaseClient
-        db_client = DatabaseClient() # 설정은 내부적으로 settings 사용 가정
-        # <<< 수정: DatabaseClient에 connect 메서드가 없으므로 호출 제거 >>>
-        # await db_client.connect() # connect 메서드가 없으므로 제거 또는 실제 초기화 메서드로 변경
-        # Redis 클라이언트는 __init__에서 이미 연결 시도/생성됨
+        # --- Settings 객체를 _shared_state에 저장 ---
+        _shared_state['settings'] = settings_lifespan  # <<< 이 줄 추가됨
+        logger_lifespan.info("Settings object stored in shared state.")
+
+        PROJECT_ROOT = Path(__file__).resolve().parent  # 경로 수정: nodes_v3 -> nodes -> app -> project_root
+        # --- 토크나이저 로드 ---
+        TOKENIZER_PATH_FROM_SETTINGS = PROJECT_ROOT / "workers" / "handlers" # settings_lifespan.QWEN_TOKENIZER_PATH
+        if TOKENIZER_PATH_FROM_SETTINGS:
+            qwen_tokenizer_actual_path = Path(TOKENIZER_PATH_FROM_SETTINGS)
+            if qwen_tokenizer_actual_path.is_dir():
+                try:
+                    TOKENIZER_LIFESPAN = AutoTokenizer.from_pretrained(str(qwen_tokenizer_actual_path),
+                                                                       trust_remote_code=True)
+                    logger_lifespan.info(f"Tokenizer loaded successfully from {qwen_tokenizer_actual_path}.")
+                except Exception as e_tok:
+                    logger_lifespan.error(f"Tokenizer FAILED to load from {qwen_tokenizer_actual_path}: {e_tok}",
+                                          exc_info=True)
+                    # 토크나이저 로드 실패 시 LLMService 초기화가 문제될 수 있으므로, 여기서 애플리케이션 중단 고려 가능
+                    # raise RuntimeError(f"Critical error: Tokenizer failed to load from {qwen_tokenizer_actual_path}") from e_tok
+            else:
+                logger_lifespan.error(
+                    f"Tokenizer directory NOT found at {qwen_tokenizer_actual_path} (from settings). Please check the path.")
+        else:
+            logger_lifespan.warning(
+                "QWEN_TOKENIZER_PATH not set in settings. Tokenizer not loaded. LLMService might fail.")
+        _shared_state['tokenizer'] = TOKENIZER_LIFESPAN  # 로드된 토크나이저(또는 None)도 공유 상태에 저장
+
+        # --- 서비스 초기화 (순서 중요할 수 있음) ---
+        db_client = DatabaseClient()
         _shared_state['db_client'] = db_client
-        _service_instances.append(db_client) # disconnect/close 메서드가 있다고 가정
-        logger.info("DatabaseClient initialized.") # 메시지 수정
+        _service_instances_lifespan.append(db_client)
+        logger_lifespan.info("DatabaseClient (Redis) initialized.")
 
-        # PostgreSQLService
-        postgresql_service = PostgreSQLService()
-        await postgresql_service.connect()
-        _shared_state['postgresql_service'] = postgresql_service
-        _service_instances.append(postgresql_service)
-        logger.info("PostgreSQLService initialized.")
+        pg_service = PostgreSQLService()
+        await pg_service.connect()
+        _shared_state['postgresql_service'] = pg_service
+        _service_instances_lifespan.append(pg_service)
+        logger_lifespan.info("PostgreSQLService initialized and connected.")
 
-        # LLMService (close 메서드 유무 확인 필요)
-        llm_service = LLMService(tokenizer=TOKENIZER)
+        # LLMService 초기화 시 토크나이저 전달
+        if TOKENIZER_LIFESPAN is None:
+            # 토크나이저 로드 실패에 대한 더 강력한 처리 (예: 애플리케이션 시작 중단)
+            logger_lifespan.critical(
+                "Tokenizer is None, LLMService cannot be initialized. Application startup will fail or be unstable.")
+            # raise RuntimeError("LLMService cannot be initialized without a valid tokenizer.") # 여기서 중단하는 것이 안전할 수 있음
+        llm_service = LLMService(tokenizer=TOKENIZER_LIFESPAN)  # settings는 내부적으로 사용
         _shared_state['llm_service'] = llm_service
         if hasattr(llm_service, 'close') and callable(getattr(llm_service, 'close')):
-             _service_instances.append(llm_service)
-        logger.info("LLMService initialized.")
+            _service_instances_lifespan.append(llm_service)
+        logger_lifespan.info("LLMService initialized.")
 
-        # ImageService (close 메서드 있음 - httpx client)
+        Google_Search_tool = GoogleSearchTool()
+        _shared_state['Google Search_tool'] = Google_Search_tool
+        _service_instances_lifespan.append(Google_Search_tool)
+        logger_lifespan.info("GoogleSearchTool initialized.")
+
         image_service = ImageService()
         _shared_state['image_service'] = image_service
-        _service_instances.append(image_service)
-        logger.info("ImageService initialized.")
+        _service_instances_lifespan.append(image_service)
+        logger_lifespan.info("ImageService initialized.")
 
-        # TranslationService (close 메서드 없음, 외부 세션 필요 가능성)
         translation_service = TranslationService()
-        # 필요 시 생성자 또는 별도 메서드로 공유 세션 주입 가능
-        # translation_service.set_session(shared_aiohttp_session)
         _shared_state['translation_service'] = translation_service
-        logger.info("TranslationService initialized.")
+        logger_lifespan.info("TranslationService initialized.")
 
-        # SpamService (close 메서드 없다고 가정)
         spam_service = SpamService()
         _shared_state['spam_service'] = spam_service
-        logger.info("SpamService initialized.")
+        logger_lifespan.info("SpamService initialized.")
 
-        # StorageService (boto3 사용, 명시적 close 불필요)
         storage_service = StorageService()
         _shared_state['storage_service'] = storage_service
-        logger.info("StorageService initialized.")
+        logger_lifespan.info("StorageService initialized.")
 
-        # LangSmithService (close 메서드 있다고 가정)
         langsmith_service = LangSmithService()
         _shared_state['langsmith_service'] = langsmith_service
-        _service_instances.append(langsmith_service)
-        logger.info("LangSmithService initialized.")
+        if hasattr(langsmith_service, 'close') and callable(getattr(langsmith_service, 'close')):
+            _service_instances_lifespan.append(langsmith_service)
+        logger_lifespan.info("LangSmithService initialized.")
 
-        # GoogleSearchTool (close 메서드 있음 - aiohttp session)
-        # Google_Search_tool = GoogleSearchTool(session=shared_aiohttp_session) # 공유 세션 사용 시
-        Google_Search_tool = GoogleSearchTool() # 내부 세션 사용 시
-        _shared_state['Google_Search_tool'] = Google_Search_tool # 키 이름 일관성 유지
-        _service_instances.append(Google_Search_tool)
-        logger.info("GoogleSearchTool initialized.")
+        logger_lifespan.info("Compiling LangGraph v3 workflow...")
+        checkpointer: BaseCheckpointSaver = MemorySaver()
+        _shared_state['checkpointer'] = checkpointer
 
-
-        # --- 워크플로우 컴파일 ---
-        logger.info("Compiling LangGraph workflow...")
         compiled_app_instance = await compile_workflow(
+            redis_client=db_client,
             llm_service=llm_service,
-            Google_Search_tool=Google_Search_tool,
-            image_generation_service=image_service,
-            storage_service=storage_service,
-            translation_service=translation_service,
-            # N10에 공유 세션 전달 시 필요
-            # external_api_session=shared_aiohttp_session
+            pg_service=pg_service,
+            google_search_tool_instance = Google_Search_tool,
+            settings_obj = settings_lifespan,
+            checkpointer = checkpointer
         )
         _shared_state['compiled_app'] = compiled_app_instance
-        logger.info("LangGraph workflow compiled successfully.")
+        logger_lifespan.info("LangGraph v3 workflow compiled and stored in shared state.")
 
     except Exception as e:
-        logger.error(f"Error during service/workflow initialization: {e}", exc_info=True)
+        logger_lifespan.error(f"Error during service/workflow initialization: {e}", exc_info=True)
         await shutdown_event(graceful=False)
-        raise RuntimeError(f"Application startup failed during service initialization: {e}") from e
+        raise RuntimeError(f"Application startup failed: {e}") from e
 
-    logger.info("Application startup complete. Ready to accept requests.")
+    logger_lifespan.info("Application startup complete.")
+
 
 async def shutdown_event(graceful: bool = True):
-    """애플리케이션 종료 시 실행될 작업들"""
+    global logger_lifespan
     try:
-        logger = get_logger("AppLifespan")
+        logger_lifespan = get_logger("AppLifespan")
     except Exception:
         import logging
-        logger = logging.getLogger("AppLifespanFallback")
+        logger_lifespan = logging.getLogger("AppLifespanFallbackShutdown")
 
     if graceful:
-        logger.info("Application shutdown process initiated...")
+        logger_lifespan.info("Application shutdown process initiated...")
     else:
-        logger.warning("Attempting partial cleanup after startup failure...")
+        logger_lifespan.warning("Attempting partial cleanup after startup failure...")
 
-    global _service_instances
-    for instance in reversed(_service_instances):
+    global _service_instances_lifespan
+    for instance in reversed(_service_instances_lifespan):
         instance_name = type(instance).__name__
-        # close 또는 disconnect 메서드 찾기
-        # aiohttp.ClientSession도 close() 메서드를 가짐
-        close_method = getattr(instance, 'close', None) or getattr(instance, 'disconnect', None)
+        close_method = None
+        if hasattr(instance, 'close') and callable(getattr(instance, 'close')):
+            close_method = getattr(instance, 'close')
+        elif hasattr(instance, 'disconnect') and callable(getattr(instance, 'disconnect')):
+            close_method = getattr(instance, 'disconnect')
 
-        if close_method and callable(close_method):
+        if close_method:
             try:
                 import inspect
                 if inspect.iscoroutinefunction(close_method):
-                    logger.debug(f"Closing {instance_name} (async)...")
+                    logger_lifespan.debug(f"Closing {instance_name} (async)...")
                     await close_method()
                 else:
-                    logger.debug(f"Closing {instance_name} (sync)...")
-                    # 동기 메서드는 이벤트 루프에서 직접 호출 시 블로킹될 수 있으므로 주의
-                    await asyncio.to_thread(close_method) # 비동기로 실행 시도
-                logger.info(f"{instance_name} closed/disconnected successfully.")
+                    logger_lifespan.debug(f"Closing {instance_name} (sync)...")
+                    await asyncio.to_thread(close_method)
+                logger_lifespan.info(f"{instance_name} closed/disconnected successfully.")
             except Exception as e:
-                logger.error(f"Error during {instance_name} shutdown: {e}", exc_info=True)
+                logger_lifespan.error(f"Error during {instance_name} shutdown: {e}", exc_info=True)
 
-    # 공유 상태 정리
     if graceful:
         _shared_state.clear()
-        logger.info("Shared state cleared.")
-        logger.info("Application shutdown complete.")
+        logger_lifespan.info("Shared state cleared.")
+        logger_lifespan.info("Application shutdown complete.")
     else:
-        logger.warning("Partial cleanup finished.")
+        logger_lifespan.warning("Partial cleanup finished.")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """FastAPI lifespan 컨텍스트 관리자"""
-    load_dotenv()
+    env_path = Path(".env")  # .env 파일 경로
+    if env_path.exists():
+        load_dotenv(dotenv_path=env_path, verbose=True)
+        logger_lifespan.info(f".env file loaded from: {env_path.resolve()}")
+    else:
+        logger_lifespan.info(".env file not found, relying on environment variables or default settings.")
+
     await startup_event()
     try:
         yield
     finally:
         await shutdown_event()
+

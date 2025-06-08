@@ -1,11 +1,12 @@
 import psycopg2
-import psycopg2.extras # <--- Add this import
-import os, json
+import psycopg2.extras
+import os
+import json
 from dotenv import load_dotenv
+import uuid  # <--- UUID 모듈 추가
 
 load_dotenv()
-psycopg2.extras.register_uuid() # <--- Add this line to register UUID adapter globally
-
+psycopg2.extras.register_uuid()
 
 def get_db_connection():
     """데이터베이스 연결을 생성하고 반환합니다."""
@@ -41,53 +42,35 @@ def get_or_create_user(nickname):
         print(f"Error getting or creating user: {e}")
         conn.rollback()
     finally:
-        conn.close()
+        if conn: conn.close()
     return user_id, nickname
 
 def create_chatroom(user_id, room_name):
     """
-    새로운 채팅방을 생성하고, 해당 채팅방의 초기 워크플로우 상태 레코드('IDLE')도 생성합니다.
+    새로운 채팅방을 생성합니다. (워크플로우 상태는 별도로 생성/관리됩니다)
     성공 시 새로운 room_id, 실패 시 None을 반환합니다.
     """
     conn = get_db_connection()
-    if not conn:
-        return None
-
+    if not conn: return None
     new_room_id = None
     try:
         with conn.cursor() as cur:
-            # 1. 채팅방 생성
             cur.execute(
                 "INSERT INTO ai_test_chatrooms (room_name, user_id) VALUES (%s, %s) RETURNING room_id",
                 (room_name, user_id)
             )
             result = cur.fetchone()
-
             if result:
                 new_room_id = result[0]
-                # 2. 해당 채팅방의 초기 워크플로우 상태 레코드 생성
-                #    PostgreSQL 함수 ensure_workflow_status_exists(room_id) 호출
-                cur.execute("SELECT ensure_workflow_status_exists(%s);", (new_room_id,))
-                # 또는, 직접 INSERT (ensure_workflow_status_exists 함수가 없다면)
-                # cur.execute(
-                #    "INSERT INTO ai_test_room_workflow_status (room_id, status) VALUES (%s, %s) ON CONFLICT (room_id) DO NOTHING",
-                #    (new_room_id, 'IDLE') # room_workflow_id는 SERIAL이므로 자동 생성됨
-                # )
-                conn.commit() # 모든 변경사항 커밋
+                conn.commit()
             else:
-                # 채팅방 생성 실패 시 롤백 (특별한 오류가 없으면 이 부분은 실행되지 않을 수 있음)
                 conn.rollback()
-                new_room_id = None # 명시적으로 None 처리
-
     except psycopg2.Error as e:
-        print(f"Error creating chatroom or initial workflow status for room '{room_name}': {e}")
-        if conn:
-            conn.rollback() # 오류 발생 시 롤백
-        new_room_id = None # 오류 시 None 반환 보장
+        print(f"Error creating chatroom '{room_name}': {e}")
+        if conn: conn.rollback()
+        new_room_id = None
     finally:
-        if conn:
-            conn.close()
-
+        if conn: conn.close()
     return new_room_id
 
 def get_user_chatrooms(user_id):
@@ -102,7 +85,7 @@ def get_user_chatrooms(user_id):
     except psycopg2.Error as e:
         print(f"Error getting chatrooms: {e}")
     finally:
-        conn.close()
+        if conn: conn.close()
     return chatrooms
 
 def get_messages(room_id):
@@ -123,7 +106,7 @@ def get_messages(room_id):
     except psycopg2.Error as e:
         print(f"Error getting messages: {e}")
     finally:
-        conn.close()
+        if conn: conn.close()
     return messages
 
 def add_message(room_id, user_id, content, message_type, request_id=None):
@@ -143,7 +126,7 @@ def add_message(room_id, user_id, content, message_type, request_id=None):
         print(f"Error adding message: {e}")
         conn.rollback()
     finally:
-        conn.close()
+        if conn: conn.close()
     return message_id
 
 def update_loading_message(request_id, content):
@@ -164,7 +147,7 @@ def update_loading_message(request_id, content):
         print(f"Error updating loading message: {e}")
         conn.rollback()
     finally:
-        conn.close()
+        if conn: conn.close()
     return updated
 
 def check_ai_processing(room_id):
@@ -179,51 +162,34 @@ def check_ai_processing(room_id):
     except psycopg2.Error as e:
         print(f"Error checking AI processing: {e}")
     finally:
-        conn.close()
+        if conn: conn.close()
     return processing
 
 def delete_chatroom(room_id, user_id):
-    """
-    특정 사용자가 소유한 채팅방을 삭제합니다.
-    성공적으로 삭제되면 True, 실패하면 False를 반환합니다.
-    """
+    """특정 사용자가 소유한 채팅방을 삭제합니다."""
     conn = get_db_connection()
-    if not conn:
-        print(f"Database connection failed. Cannot delete chatroom {room_id}.")
-        return False
-
+    if not conn: return False
     deleted = False
     try:
         with conn.cursor() as cur:
-            # DELETE 쿼리 실행: room_id와 user_id가 모두 일치하는 경우에만 삭제
             cur.execute(
                 "DELETE FROM ai_test_chatrooms WHERE room_id = %s AND user_id = %s",
                 (room_id, user_id)
             )
-
-            # cur.rowcount는 영향을 받은 행의 수를 반환합니다.
-            # 1 이상이면 성공적으로 삭제된 것입니다.
             if cur.rowcount > 0:
-                conn.commit()  # 변경 사항을 DB에 최종 반영
+                conn.commit()
                 deleted = True
-                print(f"Chatroom {room_id} deleted successfully by user {user_id}.")
             else:
-                # 삭제된 행이 없으면, room_id가 없거나 user_id가 일치하지 않는 경우입니다.
-                conn.rollback() # 혹시 모를 변경 사항 롤백
-                print(f"Failed to delete chatroom {room_id}: Not found or not owned by user {user_id}.")
-                deleted = False
-
+                conn.rollback()
     except psycopg2.Error as e:
         print(f"Error deleting chatroom {room_id}: {e}")
-        conn.rollback() # 오류 발생 시 롤백
-        deleted = False
+        conn.rollback()
     finally:
-        conn.close() # DB 연결 종료
-
+        if conn: conn.close()
     return deleted
 
 def get_chatroom_canvas(room_id):
-    """특정 채팅방의 캔버스(노트패드) 내용을 조회합니다."""
+    """특정 채팅방의 캔버스(노트패드) 내용을 조회합니다. (주의: 스키마에 canvas_content 컬럼 필요)"""
     conn = get_db_connection()
     if not conn: return None
     content = None
@@ -234,13 +200,13 @@ def get_chatroom_canvas(room_id):
             if result:
                 content = result[0]
     except psycopg2.Error as e:
-        print(f"Error getting chatroom canvas: {e}")
+        print(f"Error getting chatroom canvas (check if 'canvas_content' column exists): {e}")
     finally:
-        conn.close()
+        if conn: conn.close()
     return content
 
 def update_chatroom_canvas(room_id, content):
-    """특정 채팅방의 캔버스(노트패드) 내용을 업데이트합니다."""
+    """특정 채팅방의 캔버스(노트패드) 내용을 업데이트합니다. (주의: 스키마에 canvas_content 컬럼 필요)"""
     conn = get_db_connection()
     if not conn: return False
     updated = False
@@ -253,89 +219,105 @@ def update_chatroom_canvas(room_id, content):
             conn.commit()
             updated = cur.rowcount > 0
     except psycopg2.Error as e:
-        print(f"Error updating chatroom canvas: {e}")
+        print(f"Error updating chatroom canvas (check if 'canvas_content' column exists): {e}")
         conn.rollback()
     finally:
-        conn.close()
+        if conn: conn.close()
     return updated
-def ensure_workflow_status_exists(room_id):
-    """ai_test_room_workflow_status 테이블에 해당 room_id의 행이 있는지 확인하고 없으면 생성합니다."""
+
+# --- New/Modified Workflow Functions ---
+
+def get_or_create_workflow(room_id):
+    """
+    지정된 room_id에 대한 가장 최근의 work_id를 가져오거나,
+    없으면 새로 생성하여 반환합니다.
+    """
     conn = get_db_connection()
-    if not conn: return
+    if not conn: return None
+    work_id = None
     try:
         with conn.cursor() as cur:
-            # PostgreSQL 함수 호출
-            cur.execute("SELECT ensure_workflow_status_exists(%s);", (room_id,))
-            conn.commit()
+            cur.execute("""
+                SELECT work_id FROM ai_test_room_workflow_status
+                WHERE room_id = %s ORDER BY created_at DESC LIMIT 1
+            """, (room_id,))
+            result = cur.fetchone()
+
+            if result:
+                work_id = result[0]
+            else:
+                work_id = uuid.uuid4()
+                cur.execute("""
+                    INSERT INTO ai_test_room_workflow_status (work_id, room_id, status)
+                    VALUES (%s, %s, %s)
+                """, (work_id, room_id, 'STARTED'))
+                conn.commit()
+                print(f"Created new workflow {work_id} for room {room_id}.")
     except psycopg2.Error as e:
-        print(f"Error ensuring workflow status exists for room {room_id}: {e}")
+        print(f"Error getting or creating workflow for room {room_id}: {e}")
         conn.rollback()
     finally:
-        conn.close()
+        if conn: conn.close()
+    return work_id
 
-def get_state_status(room_id):
-    """특정 채팅방의 'status' 값을 가져옵니다."""
-    ensure_workflow_status_exists(room_id) # 먼저 행 존재 확인/생성
+def get_state_status(work_id):
+    """특정 워크플로우(work_id)의 'status' 값을 가져옵니다."""
     conn = get_db_connection()
-    if not conn: return 'IDLE'
-    status = 'IDLE' # 기본값
+    if not conn or not work_id: return 'UNKNOWN'
+    status = 'UNKNOWN'
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT status FROM ai_test_room_workflow_status WHERE room_id = %s", (room_id,))
+            cur.execute("SELECT status FROM ai_test_room_workflow_status WHERE work_id = %s", (work_id,))
             result = cur.fetchone()
             if result:
                 status = result[0]
     except psycopg2.Error as e:
-        print(f"Error getting state status for room {room_id}: {e}")
-        status = 'ERROR' # 오류 발생 시 상태
+        print(f"Error getting state status for comic {work_id}: {e}")
+        status = 'ERROR'
     finally:
-        conn.close()
+        if conn: conn.close()
     return status
 
-def get_state(room_id):
-    """특정 채팅방의 'task_details'(JSONB) 값을 Python 딕셔너리로 가져옵니다."""
-    ensure_workflow_status_exists(room_id)
+def get_state(work_id):
+    """특정 워크플로우(work_id)의 'task_details'(JSONB) 값을 Python 딕셔너리로 가져옵니다."""
     conn = get_db_connection()
-    if not conn: return None
+    if not conn or not work_id: return None
     state_data = None
     try:
-        # DictCursor와 register_json 사용
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            psycopg2.extras.register_json(cur) # JSON 자동 변환 등록
-            cur.execute("SELECT task_details FROM ai_test_room_workflow_status WHERE room_id = %s", (room_id,))
+            psycopg2.extras.register_json(cur)
+            cur.execute("SELECT task_details FROM ai_test_room_workflow_status WHERE work_id = %s", (work_id,))
             result = cur.fetchone()
             if result and result['task_details']:
                 state_data = result['task_details']
     except psycopg2.Error as e:
-        print(f"Error getting state details for room {room_id}: {e}")
+        print(f"Error getting state details for comic {work_id}: {e}")
     finally:
-        conn.close()
+        if conn: conn.close()
     return state_data
 
-def update_workflow_status(room_id, new_status, task_details_dict=None):
-    """특정 채팅방의 'status'와 선택적으로 'task_details'를 업데이트합니다."""
-    ensure_workflow_status_exists(room_id)
+def update_workflow_status(work_id, new_status, task_details_dict=None):
+    """특정 워크플로우(work_id)의 'status'와 'task_details'를 업데이트합니다."""
     conn = get_db_connection()
-    if not conn: return False
+    if not conn or not work_id: return False
     updated = False
     try:
         with conn.cursor() as cur:
             if task_details_dict is not None:
-                # Python 딕셔너리를 JSON 문자열로 변환하여 저장
                 cur.execute(
-                    "UPDATE ai_test_room_workflow_status SET status = %s, task_details = %s WHERE room_id = %s",
-                    (new_status, json.dumps(task_details_dict), room_id)
+                    "UPDATE ai_test_room_workflow_status SET status = %s, task_details = %s WHERE work_id = %s",
+                    (new_status, json.dumps(task_details_dict), work_id)
                 )
             else:
                 cur.execute(
-                    "UPDATE ai_test_room_workflow_status SET status = %s WHERE room_id = %s",
-                    (new_status, room_id)
+                    "UPDATE ai_test_room_workflow_status SET status = %s WHERE work_id = %s",
+                    (new_status, work_id)
                 )
             conn.commit()
             updated = cur.rowcount > 0
     except psycopg2.Error as e:
-        print(f"Error updating workflow status for room {room_id}: {e}")
+        print(f"Error updating workflow status for comic {work_id}: {e}")
         conn.rollback()
     finally:
-        conn.close()
+        if conn: conn.close()
     return updated

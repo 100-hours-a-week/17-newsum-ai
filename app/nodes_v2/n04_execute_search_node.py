@@ -1,337 +1,597 @@
 # ai/app/nodes_v2/n04_execute_search_node.py
 import asyncio
-import traceback
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Coroutine
 from datetime import datetime, timezone
 from urllib.parse import urlparse
+import re
 
 from app.workflows.state_v2 import WorkflowState
 from app.utils.logger import get_logger, summarize_for_logging
 from app.tools.search.Google_Search_tool import GoogleSearchTool
+from app.services.postgresql_service import PostgreSQLService
 
 logger = get_logger(__name__)
 
+NODE_ORDER = 4
+MIN_DOMAINS_TO_FETCH_N04 = 30  # N04용 DB 조회 최소 개수
+
+# 도구별 폴백 카테고리
+DEFAULT_FALLBACK_CATEGORIES = {
+    "search_communities_via_cse": ["community", "forum"],
+    "search_news_via_cse": ["mainstream_news", "news_agency", "broadcast_news"],
+    "search_specific_sites_via_cse": []  # SiteSearch는 카테고리 없음
+}
+
+# 한국 도메인 판단용 대표 키워드
+CORE_KOREAN_DOMAIN_NAMES = [
+    "yna", "kbs", "sbs", "chosun", "joongang", "donga", "hankyoreh",
+    "mk", "hankyung", "naver", "daum", "nate", "zum"
+]
+
 
 class N04ExecuteSearchNode:
-    """
-    N03에서 수립된 검색 전략에 따라 실제 검색을 수행하고 결과를 수집하는 노드.
-    Google 일반 검색과 YouTube 비디오/자막 검색을 병렬적으로 수행하여 데이터 보강.
-    """
-
-    def __init__(self, search_tool: GoogleSearchTool):
+    def __init__(
+        self,
+        search_tool: GoogleSearchTool,
+        postgresql_service: Optional[PostgreSQLService] = None
+    ):
         self.search_tool = search_tool
-        self.default_site_preferences = {
-            "tech_expert_3": {
-                "code_related": ["stackoverflow.com", "github.com"],
-                "research_paper": ["arxiv.org", "semanticscholar.org"],
-            },
-            "community_search_defaults": ["reddit.com"]
-        }
-        self.query_keyword_to_site_category_map = {
-            "code_related": ["code", "python", "javascript", "error", "github", "stack overflow", "programming", "develop"],
-            "research_paper": ["paper", "research", "study", "arxiv", "publication", "citation", "preprint"],
-            "deep_dive_tech": ["deep dive", "technical analysis", "tutorial", "how it works", "internals"],
-            "community": ["review", "opinion", "forum", "discussion", "vs", "recommendation", "advice"],
-            "news": ["news", "latest update", "announcement"]
-        }
-        # YouTube 검색 도구 식별자 정의 (클래스 또는 모듈 레벨)
-        self.youtube_tool_identifier = "YouTubeSearch"
+        self.postgresql_service = postgresql_service
+        self.youtube_tool_identifier = "search_youtube_videos"
 
+    async def _fetch_domains_from_db_generic_n04(
+        self,
+        work_id_log: str,
+        country_code: Optional[str] = None,
+        categories: Optional[List[str]] = None,
+        keywords: Optional[List[str]] = None,
+        limit: int = MIN_DOMAINS_TO_FETCH_N04
+    ) -> List[str]:
+        """
+        ai_test_seed_domains 테이블에서 조건에 맞는 도메인을 조회 (N04용).
+        DB 접속 실패 시 빈 리스트 반환.
+        """
+        if not self.postgresql_service:
+            logger.error(f"[N04 DomainFetch] PostgreSQLService not injected. Cannot fetch domains.",
+                         extra={"work_id": work_id_log})
+            return []
 
-    def _get_relevant_user_sites(self, user_preferences: Dict[str, List[str]], query_text: str) -> List[str]:
-        relevant_sites = []
-        query_lower = query_text.lower()
-        for category, keywords in self.query_keyword_to_site_category_map.items():
-            if any(kw in query_lower for kw in keywords):
-                sites_in_category = user_preferences.get(category)
-                if isinstance(sites_in_category, list):
-                    relevant_sites.extend(sites_in_category)
-        return list(set(relevant_sites))
+        query_parts: List[str] = []
+        params: List[Any] = []
 
-    def _determine_target_sites(
-            self, writer_concept: dict, config: dict, tool_name: str, query_text: str
-    ) -> Optional[List[str]]:
-        sites = []
-        writer_id = config.get("writer_id", "default_writer")
+        if country_code:
+            query_parts.append("country = %s")
+            params.append(country_code.upper())
 
-        user_preferences = config.get("user_site_preferences")
-        if isinstance(user_preferences, dict):
-            logger.debug(f"Using user site preferences: {user_preferences}")
-            user_relevant_sites = self._get_relevant_user_sites(user_preferences, query_text)
-            if user_relevant_sites:
-                logger.info(f"Applying user-defined sites for query '{query_text}': {user_relevant_sites}")
-                return user_relevant_sites
+        if categories:
+            valid_categories = [
+                cat for cat in categories
+                if cat and cat.strip() and cat.lower() not in ['other', 'unknown', 'ambiguous']
+            ]
+            if valid_categories:
+                query_parts.append("category = ANY(%s)")
+                params.append(valid_categories)
+
+        if keywords:
+            processed_keywords = [kw.lower() for kw in keywords if kw]
+            if processed_keywords:
+                query_parts.append("tags && %s")
+                params.append(processed_keywords)
+
+        sql_where_clause = " AND ".join(query_parts) if query_parts else "TRUE"
+        sql_query = f"""
+            SELECT domain
+            FROM ai_test_seed_domains
+            WHERE {sql_where_clause}
+            ORDER BY relevance_score DESC NULLS LAST, last_crawled_at DESC NULLS LAST
+            LIMIT %s;
+        """
+        current_params = tuple(params + [limit])
+
+        try:
+            logger.debug(
+                f"[N04 DomainFetch] Executing generic domain DB query: {sql_query} | Params: {current_params}",
+                extra={"work_id": work_id_log}
+            )
+            results = await self.postgresql_service.fetch_all(sql_query, current_params)
+            domains = [row[0] for row in results if row and row[0]]
+            if domains:
+                logger.info(f"[N04 DomainFetch] Fetched {len(domains)} domains: {domains}",
+                            extra={"work_id": work_id_log})
             else:
-                logger.debug("User site preferences found but no matching category for this query. Falling back.")
+                logger.info(f"[N04 DomainFetch] No domains found for criteria. Returning empty list.",
+                            extra={"work_id": work_id_log})
+            return domains
+        except Exception as e:
+            logger.error(
+                f"[N04 DomainFetch] Error fetching domains: {e}. Returning empty list.",
+                extra={"work_id": work_id_log, "sql_query": sql_query}
+            )
+            return []
 
-        if writer_id in self.default_site_preferences:
-            default_prefs = self.default_site_preferences[writer_id]
-            query_lower = query_text.lower()
-            for category, keywords in self.query_keyword_to_site_category_map.items():
-                if category in default_prefs and any(kw in query_lower for kw in keywords):
-                    sites.extend(default_prefs[category])
+    async def _determine_fallback_target_sites(
+        self,
+        writer_concept: Dict[str, Any],
+        config_from_state: Dict[str, Any],
+        tool_name: str,
+        query_text: str,
+        work_id_log: str
+    ) -> Optional[List[str]]:
+        """
+        도구별 DB 기반 폴백 사이트 목록 결정.
+        """
+        logger.debug(
+            f"[N04 Fallback] Tool: {tool_name}, Query: '{summarize_for_logging(query_text, 30)}'",
+            extra={"work_id": work_id_log}
+        )
+        if not self.postgresql_service:
+            logger.warning(
+                f"[N04 Fallback] PostgreSQLService not available.",
+                extra={"work_id": work_id_log}
+            )
+            return None
 
-        if tool_name == "GoogleCSE_CommunitySearch" and "site:" not in query_text.lower():
-            sites.extend(self.default_site_preferences.get("community_search_defaults", []))
+        fallback_categories = DEFAULT_FALLBACK_CATEGORIES.get(tool_name)
+        if fallback_categories is not None or tool_name == "search_specific_sites_via_cse":
+            is_kr_query = self._is_korean_query(query_text)
+            country_code_filter = 'KR' if is_kr_query else None
+            categories_to_use = fallback_categories if fallback_categories else None
 
-        final_sites = list(set(sites)) if sites else None
-        if final_sites:
-            logger.debug(f"Applying fallback/default sites for query '{query_text}': {final_sites}")
-        return final_sites
+            logger.info(
+                f"[N04 Fallback] Fetching DB fallback sites for '{tool_name}', "
+                f"categories={categories_to_use}, country={country_code_filter}",
+                extra={"work_id": work_id_log}
+            )
 
-    def _prepare_advanced_search_options(
-            self, writer_concept: dict, tool_name: str, query_text: str
-    ) -> Dict[str, Any]:
-        options: Dict[str, Any] = {}
-        depth = writer_concept.get("depth", "medium")
-        trend_sensitivity = writer_concept.get("trend_sensitivity", "medium")
+            db_sites = await self._fetch_domains_from_db_generic_n04(
+                work_id_log=work_id_log,
+                country_code=country_code_filter,
+                categories=categories_to_use,
+                keywords=None,
+                limit=MIN_DOMAINS_TO_FETCH_N04
+            )
+            if db_sites:
+                return db_sites
+            else:
+                logger.info(
+                    f"[N04 Fallback] No fallback sites found for '{tool_name}'.",
+                    extra={"work_id": work_id_log}
+                )
+        return None
 
-        if tool_name == "GoogleCSE_NewsSearch":
-            if trend_sensitivity == "high": options["dateRestrict"] = "m1"
-            elif trend_sensitivity == "medium": options["dateRestrict"] = "m3"
-        elif trend_sensitivity == "high" and "latest" in query_text.lower():
-            options["dateRestrict"] = "m3"
+    def _prepare_tone_modified_query(self, base_query: str, tool_name: str, tone: str) -> str:
+        """
+        풍자 톤(tone_suggestion)에 따라 키워드에 간단한 수식어를 덧붙인다.
+        """
+        tone_lower = tone.lower() if isinstance(tone, str) else ""
+        modified_query = base_query
 
-        if depth == "high" and any(kw in query_text.lower() for kw in self.query_keyword_to_site_category_map.get("research_paper", [])):
-            options["fileType"] = "pdf"
+        # 유머/반어적 풍자(irony, humor) -> 블로그나 웹 검색 시 "유머" 추가
+        if tool_name in ["search_web_via_cse", "search_blogs_via_cse"]:
+            if "irony" in tone_lower or "humor" in tone_lower:
+                modified_query = f"{base_query} 유머"
+        # 냉소적 풍자(sarcasm, satire) -> 커뮤니티 검색 시 "비판" 추가
+        if tool_name in ["search_communities_via_cse", "search_specific_sites_via_cse"]:
+            if "sarcasm" in tone_lower or "satire" in tone_lower:
+                modified_query = f"{base_query} 비판"
 
-        if tool_name == self.youtube_tool_identifier: # self.youtube_tool_identifier 사용
-            if writer_concept.get("Youtube_order"):
-                 options["order"] = writer_concept["Youtube_order"]
-            if writer_concept.get("youtube_video_duration"):
-                 options["videoDuration"] = writer_concept["youtube_video_duration"]
+        return modified_query
 
-        if options:
-            logger.debug(f"Prepared advanced search options for {tool_name}: {options}")
-        return options
+    async def _create_search_task_wrapper(
+        self,
+        coro_to_await: Coroutine[Any, Any, List[Dict[str, Any]]],
+        tool_name_val: str,
+        query_text_val: str,
+        log_ctx_val: dict
+    ) -> List[Dict[str, Any]]:
+        """
+        실제 검색 코루틴 실행 후, 메타 정보를 각 결과에 붙여 반환.
+        """
+        items: List[Dict[str, Any]] = []
+        try:
+            results_list = await coro_to_await
+            if results_list:
+                for res_item in results_list:
+                    if isinstance(res_item, dict):
+                        res_item['query_source'] = query_text_val
+                        res_item['tool_used'] = tool_name_val
+                        res_item['retrieved_at'] = datetime.now(timezone.utc).isoformat()
+                        res_item.setdefault('source_domain',
+                                            urlparse(res_item.get("url", "")).netloc or 'N/A')
+                        items.append(res_item)
+                logger.debug(
+                    f"[N04 Result] Tool '{tool_name_val}', Query '{summarize_for_logging(query_text_val, 30)}' -> {len(items)} items",
+                    extra=log_ctx_val
+                )
+        except Exception as e_search:
+            logger.error(
+                f"[N04 Error] Search task error (Query: '{query_text_val}', Tool: {tool_name_val}): {e_search}",
+                extra=log_ctx_val, exc_info=True
+            )
+        return items
+
+    async def _run_Youtube_and_transcripts(
+        self,
+        query_text: str,
+        max_videos: int,
+        search_params: Dict[str, Any],
+        trace_id: str,
+        config_from_state: Dict[str, Any],
+        log_ctx: dict
+    ) -> List[Dict[str, Any]]:
+        """
+        YouTube 검색 후, 해당 비디오들의 자막을 병렬로 가져와 결과에 추가.
+        """
+        video_items_with_transcripts: List[Dict[str, Any]] = []
+        try:
+            logger.info(f"[N04 YouTube] Searching videos: '{query_text}' (max {max_videos})", extra=log_ctx)
+            videos = await self.search_tool.search_youtube_videos(
+                keyword=query_text, max_results=max_videos, trace_id=trace_id, **search_params
+            )
+
+            if not videos:
+                logger.info(f"[N04 YouTube] No videos found for '{query_text}'", extra=log_ctx)
+                return []
+
+            logger.info(f"[N04 YouTube] Found {len(videos)} videos for '{query_text}'. Fetching transcripts...", extra=log_ctx)
+
+            transcript_tasks = []
+            for video_info in videos:
+                video_id = video_info.get("video_id")
+                if video_id:
+                    preferred_languages = config_from_state.get("youtube_transcript_languages", ['ko', 'en'])
+                    translate_to_lang = config_from_state.get("youtube_transcript_translate_to", 'ko')
+                    transcript_tasks.append(
+                        self.search_tool.get_youtube_transcript(
+                            video_id,
+                            languages=preferred_languages,
+                            translate_to_language=translate_to_lang,
+                            trace_id=trace_id
+                        )
+                    )
+                else:
+                    async def dummy_none():
+                        return None
+                    transcript_tasks.append(dummy_none())
+
+            transcript_results = await asyncio.gather(*transcript_tasks, return_exceptions=True)
+
+            for idx, video_data in enumerate(videos):
+                full_item = {**video_data}
+                full_item['query_source'] = query_text
+                full_item['tool_used'] = self.youtube_tool_identifier
+                full_item['retrieved_at'] = datetime.now(timezone.utc).isoformat()
+                full_item.setdefault('source_domain', urlparse(video_data.get("url", "")).netloc or 'youtube.com')
+
+                outcome = transcript_results[idx]
+                if isinstance(outcome, dict) and outcome.get("text"):
+                    full_item['transcript'] = outcome["text"]
+                    full_item['transcript_language'] = outcome["language"]
+                    logger.debug(
+                        f"[N04 YouTube] Transcript added for video_id '{video_data.get('video_id')}', lang: {outcome['language']}",
+                        extra=log_ctx
+                    )
+                elif isinstance(outcome, Exception):
+                    logger.warning(
+                        f"[N04 YouTube] Transcript fetch error for video_id '{video_data.get('video_id')}': {outcome}",
+                        extra=log_ctx
+                    )
+                    full_item['transcript_error'] = str(outcome)
+                else:
+                    full_item['transcript'] = None
+                    logger.debug(
+                        f"[N04 YouTube] No transcript available for video_id '{video_data.get('video_id')}'",
+                        extra=log_ctx
+                    )
+
+                video_items_with_transcripts.append(full_item)
+
+        except Exception as e_youtube:
+            logger.error(
+                f"[N04 YouTube] Main error during search/transcript for '{query_text}': {e_youtube}",
+                extra=log_ctx, exc_info=True
+            )
+        return video_items_with_transcripts
 
     async def run(self, state: WorkflowState) -> Dict[str, Any]:
-        meta = state.meta
+        meta_sec = state.meta
         search_sec = state.search
-        config_sec = state.config
+        config_from_state = state.config.config or {}
+
         node_name = self.__class__.__name__
-        trace_id = meta.trace_id
-        comic_id = meta.comic_id
-        config = config_sec.config
-        writer_id = config.get('writer_id', 'default_writer')
-        extra_log_data = {'trace_id': trace_id, 'comic_id': comic_id, 'writer_id': writer_id, 'node_name': node_name}
-        logger.info(f"Entering node. Executing searches based on strategy.", extra=extra_log_data)
-        raw_search_results_accumulator: List[Dict[str, Any]] = []
-        error_log = list(meta.error_log or [])
-        search_strategy = search_sec.search_strategy
-        if not search_strategy or not isinstance(search_strategy, dict) or not search_strategy.get("queries"):
-            msg = "Search strategy or queries missing in state. Skipping search execution."
-            logger.warning(msg, extra=extra_log_data)
-            error_log.append({"stage": node_name, "error": msg, "timestamp": datetime.now(timezone.utc).isoformat()})
-            meta.current_stage = "n05_report_generation"
-            meta.error_log = error_log
+        work_id = meta_sec.work_id
+        writer_id_from_config = config_from_state.get('writer_id', 'default_writer')
+        extra_log_base = {
+            'work_id': work_id,
+            'writer_id': writer_id_from_config,
+            'node_name': node_name,
+            'node_order': NODE_ORDER
+        }
+
+        meta_sec.workflow_status[NODE_ORDER] = "PROCESSING"
+        logger.info("N04 노드 진입: 검색 전략 기반 실제 검색 실행 시작.", extra=extra_log_base)
+
+        accumulated_raw_results: List[Dict[str, Any]] = []
+        search_strategy = search_sec.search_strategy or {}
+
+        if not isinstance(search_strategy, dict) or not search_strategy:
+            logger.warning("검색 전략이 정의되지 않아 검색을 수행할 수 없습니다.", extra=extra_log_base)
+            meta_sec.workflow_status[NODE_ORDER] = "COMPLETED"
             search_sec.raw_search_results = []
-            return {
-                "search": search_sec.model_dump(),
-                "meta": meta.model_dump(),
-            }
-        queries_from_n03: List[str] = search_strategy.get("queries", [])
-        selected_tools: List[str] = search_strategy.get("selected_tools", ["GoogleCSE_WebSearch"])
+            return {"search": search_sec.model_dump(), "meta": meta_sec.model_dump()}
+
+        general_queries: List[str] = search_strategy.get("queries", [])
+        target_seed_domains: Optional[List[str]] = search_strategy.get("target_seed_domains")
+        selected_tools_from_strategy: List[str] = search_strategy.get(
+            "selected_tools", ["search_web_via_cse"]
+        )
         writer_concept: Dict[str, Any] = search_strategy.get("writer_concept", {})
-        base_search_params: Dict[str, Any] = search_strategy.get("parameters", {"max_results_per_query": 5})
-        logger.info(f"Search plan: {len(queries_from_n03)} queries using tools: {selected_tools}", extra=extra_log_data)
-        for query_text in queries_from_n03:
-            query_extra_log = {**extra_log_data, "current_query": query_text}
-            if not query_text or not isinstance(query_text, str) or query_text.strip().upper() == "N/A":
-                logger.warning(f"Skipping invalid query: '{query_text}'", extra=query_extra_log)
-                continue
-            search_tasks_for_current_query = []
-            for tool_name_iter in selected_tools:
-                if tool_name_iter == self.youtube_tool_identifier: # self.youtube_tool_identifier 사용
+        tool_parameters: Dict[str, Dict[str, Any]] = search_strategy.get("tool_parameters", {})
+        # N03에서 query_context에 저장된 tone_suggestion
+        tone_suggestion: str = state.query.query_context.get("tone_suggestion", "")
+
+        logger.info(
+            f"[N04 Strategy] Queries: {general_queries}, Seed domains: {len(target_seed_domains) if target_seed_domains else 0}, Tools: {selected_tools_from_strategy}",
+            extra=extra_log_base
+        )
+        if target_seed_domains:
+            logger.debug(f"[N04 Strategy] Seed domains sample: {target_seed_domains[:5]}", extra=extra_log_base)
+
+        all_search_coroutines: List[Coroutine[Any, Any, List[Dict[str, Any]]]] = []
+
+        # --- 1. Seed domain 기반 검색 ---
+        if target_seed_domains and general_queries:
+            logger.info("[N04] Seed domain 기반 검색 작업 생성 중...", extra=extra_log_base)
+            for q_text_seed in general_queries:
+                if not q_text_seed.strip():
                     continue
-                tool_extra_log_iter = {**query_extra_log, "search_tool": tool_name_iter}
-                current_tool_params = base_search_params.copy()
-                target_sites_for_tool = self._determine_target_sites(writer_concept, config, tool_name_iter, query_text)
-                advanced_options_for_tool = self._prepare_advanced_search_options(writer_concept, tool_name_iter, query_text)
-                current_tool_params.update(advanced_options_for_tool)
-                max_results_for_tool = current_tool_params.pop("max_results_per_query", 5)
-                api_call_coroutine = None
-                if target_sites_for_tool:
-                    api_call_coroutine = self.search_tool.search_specific_sites_via_cse(
-                        keyword=query_text, sites=target_sites_for_tool, max_results=max_results_for_tool,
-                        trace_id=trace_id, **current_tool_params
-                    )
-                elif tool_name_iter == "GoogleCSE_WebSearch":
-                    api_call_coroutine = self.search_tool.search_web_via_cse(
-                        keyword=query_text, max_results=max_results_for_tool, trace_id=trace_id, **current_tool_params
-                    )
-                elif tool_name_iter == "GoogleCSE_NewsSearch":
-                    api_call_coroutine = self.search_tool.search_news_via_cse(
-                        keyword=query_text, max_results=max_results_for_tool, trace_id=trace_id, **current_tool_params
-                    )
-                elif tool_name_iter == "GoogleCSE_CommunitySearch":
-                     api_call_coroutine = self.search_tool.search_communities_via_cse(
-                        keyword=query_text, max_results=max_results_for_tool, trace_id=trace_id, **current_tool_params
-                    )
-                if api_call_coroutine:
-                    async def search_wrapper(coroutine_to_await, tool_name_val, query_text_val, log_ctx_val): # Renamed log_ctx
-                        task_error_log_wrapper = []
-                        try:
-                            logger.info(f"Executing {tool_name_val} for query '{query_text_val}'", extra=log_ctx_val)
-                            results = await coroutine_to_await
-                            processed_items = []
-                            if results:
-                                for idx, res_item in enumerate(results):
-                                    if isinstance(res_item, dict):
-                                        res_item['query_source'] = query_text_val
-                                        res_item['tool_used'] = tool_name_val
-                                        res_item['retrieved_at'] = datetime.now(timezone.utc).isoformat()
-                                        res_item.setdefault('source_domain', urlparse(res_item.get("url", "")).netloc)
-                                        # rank 필드 추가 (1부터 시작)
-                                        res_item['rank'] = idx + 1
-                                        processed_items.append(res_item)
-                                logger.info(f"Found {len(processed_items)} results using {tool_name_val} for '{query_text_val}'.", extra=log_ctx_val)
-                            else:
-                                logger.info(f"No results found using {tool_name_val} for '{query_text_val}'.", extra=log_ctx_val)
-                            return processed_items # Return results list
-                        except Exception as e:
-                            error_msg = f"Search execution failed for query '{query_text_val}' using {tool_name_val}: {e}"
-                            logger.exception(error_msg, extra=log_ctx_val)
-                            task_error_log_wrapper.append({
-                                "stage": f"{node_name}.{tool_name_val}", "query": query_text_val, "error": str(e),
-                                "detail": traceback.format_exc(), "timestamp": datetime.now(timezone.utc).isoformat()
-                            })
-                            return task_error_log_wrapper # Return error log list
-                    search_tasks_for_current_query.append(search_wrapper(api_call_coroutine, tool_name_iter, query_text, tool_extra_log_iter))
-            if self.youtube_tool_identifier in selected_tools: # self.youtube_tool_identifier 사용
-                async def Youtube_and_transcript_task_runner(current_query_text, yt_trace_id):
-                    yt_task_results = []
-                    yt_task_error_log = []
-                    yt_tool_name = self.youtube_tool_identifier # self.youtube_tool_identifier 사용
-                    yt_log_ctx = {**query_extra_log, "search_tool": yt_tool_name}
+                log_ctx_seed = {
+                    **extra_log_base,
+                    "query": summarize_for_logging(q_text_seed, 50),
+                    "search_mode": "seed_domains_primary"
+                }
+                # 파라미터 가져오기
+                params_seed = tool_parameters.get("search_specific_sites_via_cse", {}).copy()
+                adv_opts_seed = {}  # N03에서 미리 준비된 옵션 적용
+                params_seed.update(adv_opts_seed)
+                max_res_seed = params_seed.pop("max_results", 2)
+                modified_query = self._prepare_tone_modified_query(q_text_seed, "search_specific_sites_via_cse", tone_suggestion)
 
-                    try:
-                        yt_params = base_search_params.copy()
-                        yt_advanced = self._prepare_advanced_search_options(writer_concept, yt_tool_name, current_query_text)
-                        yt_params.update(yt_advanced)
-                        yt_max_videos = yt_params.pop("max_results_per_query", config.get("youtube_max_videos", 3))
+                coro = self.search_tool.search_specific_sites_via_cse(
+                    keyword=modified_query,
+                    sites=target_seed_domains,
+                    max_results=max_res_seed,
+                    trace_id=work_id,
+                    **params_seed
+                )
+                all_search_coroutines.append(
+                    self._create_search_task_wrapper(
+                        coro, "search_specific_sites_via_cse", modified_query, log_ctx_seed
+                    )
+                )
 
-                        logger.info(f"Executing YouTube Video Search for query '{current_query_text}' (max: {yt_max_videos})", extra=yt_log_ctx)
-                        videos = await self.search_tool.search_youtube_videos(
-                            keyword=current_query_text, max_results=yt_max_videos, trace_id=yt_trace_id, **yt_params
+        # --- 2. 일반 검색 작업 ---
+        if general_queries:
+            logger.info("[N04] 일반 검색 작업 생성 중...", extra=extra_log_base)
+            for q_text_general in general_queries:
+                if not q_text_general.strip():
+                    continue
+                log_ctx_general_query = {
+                    **extra_log_base,
+                    "query": summarize_for_logging(q_text_general, 50),
+                    "search_mode": "general_search_selected_tools"
+                }
+                for tool_name in selected_tools_from_strategy:
+                    log_ctx_tool = {**log_ctx_general_query, "search_tool": tool_name}
+                    params_general = tool_parameters.get(tool_name, {}).copy()
+                    adv_opts_general = {}  # 이미 N03에서 적용된 고급 옵션
+                    params_general.update(adv_opts_general)
+                    max_res_general = params_general.pop("max_results", 3)
+
+                    # 풍자 톤 반영해서 쿼리 수정
+                    modified_query = self._prepare_tone_modified_query(q_text_general, tool_name, tone_suggestion)
+
+                    coroutine_for_tool: Optional[Coroutine[Any, Any, List[Dict[str, Any]]]] = None
+
+                    # YouTube
+                    if tool_name == self.youtube_tool_identifier:
+                        coroutine_for_tool = self._run_Youtube_and_transcripts(
+                            modified_query, max_res_general, params_general, work_id, config_from_state, log_ctx_tool
                         )
 
-                        if videos:
-                            logger.info(f"Found {len(videos)} YouTube videos for '{current_query_text}'. Fetching transcripts...", extra=yt_log_ctx)
-                            transcript_fetch_coros = []
-                            for video_info_item in videos:
-                                video_id_val = video_info_item.get("video_id")
-                                if video_id_val:
-                                    transcript_langs = config.get("youtube_transcript_languages", ['en', 'ko'])
-                                    translate_to_lang = config.get("youtube_transcript_translate_to", 'en')
-                                    transcript_fetch_coros.append(
-                                        self.search_tool.get_youtube_transcript(
-                                            video_id_val, languages=transcript_langs,
-                                            translate_to_language=translate_to_lang, trace_id=yt_trace_id
-                                        )
-                                    )
-                                else:
-                                    async def _dummy_none_coro(): return None
-                                    transcript_fetch_coros.append(_dummy_none_coro())
-
-                            transcripts_or_errors = await asyncio.gather(*transcript_fetch_coros, return_exceptions=True)
-
-                            for idx, video_data_item in enumerate(videos):
-                                full_video_item = {**video_data_item}
-                                full_video_item['query_source'] = current_query_text
-                                full_video_item['tool_used'] = yt_tool_name
-                                full_video_item['retrieved_at'] = datetime.now(timezone.utc).isoformat()
-                                full_video_item.setdefault('source', 'YouTube')
-                                full_video_item.setdefault('source_domain', 'youtube.com') # 일관성을 위해 유지 또는 실제 도메인
-
-                                transcript_content = transcripts_or_errors[idx]
-                                if isinstance(transcript_content, dict) and transcript_content.get("text") is not None: # text가 None이 아닌지 명시적 확인
-                                    full_video_item['transcript'] = transcript_content["text"]
-                                    full_video_item['transcript_language'] = transcript_content["language"]
-                                    logger.debug(f"Transcript added for video {video_data_item.get('video_id')}", extra=yt_log_ctx)
-                                elif isinstance(transcript_content, Exception):
-                                    logger.warning(f"Failed to fetch transcript for video {video_data_item.get('video_id')}: {transcript_content}", extra=yt_log_ctx)
-                                    full_video_item['transcript_error'] = str(transcript_content)
-                                elif transcript_content is None:
-                                    logger.debug(f"No transcript found or fetch returned None for video {video_data_item.get('video_id')}", extra=yt_log_ctx)
-                                    full_video_item['transcript'] = "" # 또는 None, 일관성 유지
-                                    full_video_item['transcript_language'] = None
-
-                                yt_task_results.append(full_video_item)
+                    # 특정 사이트 검색
+                    elif tool_name == "search_specific_sites_via_cse":
+                        if target_seed_domains:
+                            coroutine_for_tool = self.search_tool.search_specific_sites_via_cse(
+                                keyword=modified_query,
+                                sites=target_seed_domains,
+                                max_results=max_res_general,
+                                trace_id=work_id,
+                                **params_general
+                            )
                         else:
-                             logger.info(f"No YouTube videos found for '{current_query_text}'.", extra=yt_log_ctx)
+                            logger.info(f"[N04] No seed domains for '{tool_name}'. Attempting fallback...", extra=log_ctx_tool)
+                            fallback_sites = await self._determine_fallback_target_sites(
+                                writer_concept, config_from_state, tool_name, modified_query, work_id
+                            )
+                            if fallback_sites:
+                                coroutine_for_tool = self.search_tool.search_specific_sites_via_cse(
+                                    keyword=modified_query,
+                                    sites=fallback_sites,
+                                    max_results=max_res_general,
+                                    trace_id=work_id,
+                                    **params_general
+                                )
 
-                    except Exception as e_main_yt:
-                        error_msg_yt_task = f"Youtube & transcript task failed for query '{current_query_text}': {e_main_yt}"
-                        logger.exception(error_msg_yt_task, extra=yt_log_ctx)
-                        yt_task_error_log.append({
-                            "stage": f"{node_name}.{yt_tool_name}_Task", "query": current_query_text, "error": str(e_main_yt),
-                            "detail": traceback.format_exc(), "timestamp": datetime.now(timezone.utc).isoformat()
-                        })
+                    # 일반 웹 검색
+                    elif tool_name == "search_web_via_cse":
+                        coroutine_for_tool = self.search_tool.search_web_via_cse(
+                            keyword=modified_query,
+                            max_results=max_res_general,
+                            trace_id=work_id,
+                            **params_general
+                        )
 
-                    if yt_task_error_log:
-                        return yt_task_error_log # Return error log list
-                    return yt_task_results # Return results list
+                    # 뉴스 검색
+                    elif tool_name == "search_news_via_cse":
+                        coroutine_for_tool = self.search_tool.search_news_via_cse(
+                            keyword=modified_query,
+                            max_results=max_res_general,
+                            trace_id=work_id,
+                            **params_general
+                        )
 
-                search_tasks_for_current_query.append(Youtube_and_transcript_task_runner(query_text, trace_id))
+                    # 커뮤니티 검색
+                    elif tool_name == "search_communities_via_cse":
+                        fallback_sites = await self._determine_fallback_target_sites(
+                            writer_concept, config_from_state, tool_name, modified_query, work_id
+                        )
+                        if fallback_sites:
+                            coroutine_for_tool = self.search_tool.search_specific_sites_via_cse(
+                                keyword=modified_query,
+                                sites=fallback_sites,
+                                max_results=max_res_general,
+                                trace_id=work_id,
+                                **params_general
+                            )
+                        else:
+                            if hasattr(self.search_tool, 'search_communities_via_cse'):
+                                coroutine_for_tool = self.search_tool.search_communities_via_cse(
+                                    keyword=modified_query,
+                                    max_results=max_res_general,
+                                    trace_id=work_id,
+                                    **params_general
+                                )
+                            else:
+                                logger.warning(
+                                    f"[N04] Method search_communities_via_cse missing. Falling back to web search.",
+                                    extra=log_ctx_tool
+                                )
+                                community_keywords = " OR ".join([
+                                    f"site:{s}" for s in
+                                    ["dcinside.com", "fmkorea.com", "ruliweb.com",
+                                     "clien.net", "todayhumor.co.kr"]
+                                ])
+                                coroutine_for_tool = self.search_tool.search_web_via_cse(
+                                    keyword=f"{modified_query} ({community_keywords})",
+                                    max_results=max_res_general,
+                                    trace_id=work_id,
+                                    **params_general
+                                )
 
-            if search_tasks_for_current_query:
-                logger.info(f"Executing {len(search_tasks_for_current_query)} search tasks in parallel for query: '{query_text}'", extra=query_extra_log)
-                results_from_all_tasks = await asyncio.gather(*search_tasks_for_current_query, return_exceptions=True)
+                    # 블로그/리뷰 검색
+                    elif tool_name == "search_blogs_via_cse":
+                        coroutine_for_tool = self.search_tool.search_blogs_via_cse(
+                            keyword=modified_query,
+                            max_results=max_res_general,
+                            trace_id=work_id,
+                            **params_general
+                        )
 
-                for single_task_outcome in results_from_all_tasks:
-                    if isinstance(single_task_outcome, list):
-                        # 결과 리스트이거나 오류 로그 리스트일 수 있음
-                        if single_task_outcome and isinstance(single_task_outcome[0], dict) and "stage" in single_task_outcome[0] and "error" in single_task_outcome[0]:
-                            error_log.extend(single_task_outcome) # 오류 로그 리스트인 경우
-                        else: # 실제 검색 결과인 경우
-                            raw_search_results_accumulator.extend(item for item in single_task_outcome if isinstance(item, dict))
-                    elif isinstance(single_task_outcome, Exception):
-                        logger.error(f"A top-level task aggregation failed for query '{query_text}': {single_task_outcome}", extra=query_extra_log)
-                        error_log.append({
-                            "stage": f"{node_name}.gather_exception", "query": query_text, "error": str(single_task_outcome),
-                            "detail": traceback.format_exc(), "timestamp": datetime.now(timezone.utc).isoformat()
-                        })
+                    if coroutine_for_tool:
+                        all_search_coroutines.append(
+                            self._create_search_task_wrapper(
+                                coroutine_for_tool, tool_name, modified_query, log_ctx_tool
+                            )
+                        )
+
+        # --- 3. 모든 검색 작업 병렬 실행 및 결과 수집 ---
+        if all_search_coroutines:
+            logger.info(f"[N04] Running {len(all_search_coroutines)} search tasks in parallel.", extra=extra_log_base)
+            gathered = await asyncio.gather(*all_search_coroutines, return_exceptions=True)
+            for result_or_exc in gathered:
+                if isinstance(result_or_exc, list):
+                    accumulated_raw_results.extend(
+                        item for item in result_or_exc if isinstance(item, dict)
+                    )
+                elif isinstance(result_or_exc, Exception):
+                    logger.error(f"[N04] Exception during parallel search: {result_or_exc}", extra=extra_log_base, exc_info=True)
+        else:
+            logger.info("[N04] No search tasks to execute.", extra=extra_log_base)
+
+        # --- 4. 한국 결과 우선순위 적용 및 중복 제거 ---
+        unique_final_results = self._prioritize_and_deduplicate_korean_first(
+            accumulated_raw_results, work_id
+        )
+
+        logger.info(
+            f"[N04] Search completed. Collected: {len(accumulated_raw_results)}, Unique: {len(unique_final_results)}.",
+            extra=extra_log_base
+        )
+
+        search_sec.raw_search_results = unique_final_results
+        meta_sec.workflow_status[NODE_ORDER] = "COMPLETED"
+        logger.info("[N04] 검색 실행 완료. 다음 단계로 이동합니다.", extra=extra_log_base)
+
+        return {"search": search_sec.model_dump(), "meta": meta_sec.model_dump()}
+
+    def _is_korean_query(self, query: str) -> bool:
+        """
+        쿼리 내 한글 비율 30% 이상이면 한국어 쿼리로 판단.
+        """
+        korean_chars = len(re.findall(r'[가-힣]', query))
+        total_chars = len(query.replace(' ', ''))
+        return (korean_chars / max(total_chars, 1)) > 0.3
+
+    def _prioritize_and_deduplicate_korean_first(
+        self,
+        results: List[Dict[str, Any]],
+        work_id_log: str
+    ) -> List[Dict[str, Any]]:
+        """
+        한국 도메인 결과를 먼저 모으고, 나머지 뒤에 붙인 뒤 URL/Video ID로 중복 제거.
+        """
+        korean_results = []
+        other_results = []
+
+        KNOWN_KOREAN_TLDS = [
+            ".kr", ".co.kr", ".ne.kr", ".or.kr", ".re.kr", ".go.kr",
+            ".ac.kr", ".pe.kr", ".ms.kr", ".hs.kr", ".es.kr", ".kro.kr"
+        ]
+
+        for item in results:
+            domain = item.get('source_domain', '').lower()
+            title = item.get('title', '')
+            snippet = item.get('snippet', '')
+
+            is_korean_priority = False
+            if any(tld in domain for tld in KNOWN_KOREAN_TLDS):
+                is_korean_priority = True
+            elif any(name_part in domain for name_part in CORE_KOREAN_DOMAIN_NAMES):
+                is_korean_priority = True
             else:
-                logger.info(f"No search tasks to execute for query: '{query_text}'", extra=query_extra_log)
+                if self._is_korean_query(title + " " + snippet):
+                    is_korean_priority = True
 
-        unique_results = []
-        seen_identifiers = set()
+            if is_korean_priority:
+                korean_results.append(item)
+            else:
+                other_results.append(item)
 
-        for idx, item in enumerate(raw_search_results_accumulator):
-            identifier = None
-            # self.youtube_tool_identifier를 여기서 사용 (오류 1 수정)
-            if item.get('tool_used') == self.youtube_tool_identifier and item.get('video_id'):
-                identifier = f"youtube_{item['video_id']}"
-            elif item.get('url'):
-                identifier = item['url']
+        prioritized_list = korean_results + other_results
 
-            if identifier and identifier not in seen_identifiers:
-                # rank 필드 보장 (unique_results 내에서 1부터)
-                item['rank'] = len(unique_results) + 1
-                unique_results.append(item)
-                seen_identifiers.add(identifier)
-            elif not identifier:
-                item['rank'] = len(unique_results) + 1
-                unique_results.append(item)
+        unique_final_results: List[Dict[str, Any]] = []
+        seen_identifiers_for_dedup = set()
+        current_rank = 1
+        for item_data in prioritized_list:
+            item_identifier = None
+            if item_data.get('tool_used') == self.youtube_tool_identifier and item_data.get('video_id'):
+                item_identifier = f"youtube_{item_data['video_id']}"
+            elif item_data.get('url'):
+                item_identifier = item_data['url']
 
-        logger.info(
-            f"Total raw search results collected across all queries: {len(raw_search_results_accumulator)}, Unique results after final processing: {len(unique_results)}",
-            extra=extra_log_data)
+            if item_identifier and item_identifier not in seen_identifiers_for_dedup:
+                item_data['rank'] = current_rank
+                unique_final_results.append(item_data)
+                seen_identifiers_for_dedup.add(item_identifier)
+                current_rank += 1
+            elif not item_identifier:
+                item_data['rank'] = current_rank
+                unique_final_results.append(item_data)
+                current_rank += 1
+                logger.warning(
+                    f"[N04 Dedup] Item without identifier added (possible duplicate): {summarize_for_logging(item_data, 100)}",
+                    extra={'work_id': work_id_log}
+                )
 
-        search_sec.raw_search_results = unique_results
-        meta.current_stage = "n05_report_generation"
-        meta.error_log = error_log
-        update_dict_summary_for_log = {
-            'raw_search_results_count': len(unique_results),
-            'current_stage': meta.current_stage,
-            'error_log': error_log
-        }
-        logger.info(
-            f"Exiting node. Search execution complete. Output Update Summary: {summarize_for_logging(update_dict_summary_for_log, fields_to_show=['current_stage', 'raw_search_results_count', 'error_log'])}", # 수정된 요약 사용
-            extra=extra_log_data)
-
-        return {
-            "search": search_sec.model_dump(),
-            "meta": meta.model_dump(),
-        }
+        return unique_final_results
