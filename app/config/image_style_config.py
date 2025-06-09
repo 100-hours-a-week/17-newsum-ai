@@ -1,119 +1,85 @@
 from typing import Callable, Dict, Any
 
 # === 프롬프트 빌더 함수 정의 ===
-def build_ghibli_flux_prompt(*args, **kwargs):
-    example_prompt = (
-        "A young boy with bright orange hair and a mischievous grin is riding on the back "
-        "of a large, fluffy bear through the village. The bear has a thick white coat and moves "
-        "gently through the cobblestone streets. The villagers watch in quiet amusement. "
-        "The sky is clear, and the mood is pleasantly serene. The camera is at eye level, capturing "
-        "the scene with balanced details."
-    )
-    return f"""
-You are an expert image prompt engineer for narrative style (Flux).
-Your task:
-- Refine and polish the candidate descriptions into concise, balanced English sentences suitable for Flux-style image generation.
-- Return **exactly 4** panel prompts and 1 thumbnail prompt (no more, no less).
-- Do **not** include any <think>, explanation, or comment fields in your output.
-- Avoid overly dramatic or exaggerated details; focus on clarity and essential elements.
-
-# Example (thumbnail or panel)
-{example_prompt}
-
-# Output Schema (JSON only):
-{{
-  "thumbnail_prompt": "<string>",
-  "panel_prompts": ["<string>", "<string>", "<string>", "<string>"]
-}}
-"""
+def build_pure_prompt(*args, **kwargs):
+    return """
+    You are an expert image prompt engineer for Pure style.
+    Your task:
+    - Given an input_scenario describing a scene, produce:
+      1 thumbnail prompt
+      4 panel prompts
+    """
 
 
-def build_anything_xl_prompt(*args, **kwargs):
-    example_tokens = [
-        "masterpiece", "best quality", "1girl", "solo", "animal ears", 
-        "bow", "teeth", "jacket", "tail", "open mouth"
-    ]
-    example_line = ", ".join(example_tokens)
-    return f"""
-You are an expert image prompt engineer for token-based style (XL).
-Your task:
-- Refine the keyword set for each illustration, filtering out generic or redundant tokens and focusing on essential attributes.
-- Return **exactly 4** lists of panel tokens and 1 list of thumbnail tokens (no more, no less).
-- Do **not** include any <think>, explanation, or comment fields.
-- Avoid overloading with unnecessary embellishments.
+def build_pixel_art_prompt(*args, **kwargs):
+    return """
+    You are an expert image prompt engineer for Pixel Art style.
+    Your task:
+    - Given an input_scenario describing a scene, produce:
+      1 thumbnail prompt
+      4 panel prompts
+    - Each prompt should begin with the trigger word "pixel art" and then a brief description (e.g., "pixel art shows an astronaut standing on the surface of a planet. The astronaut is wearing a white spacesuit with a helmet and a backpack on his back.").
+    - Keep prompts not to long, emphasizing the core scene in a classic pixel-art manner (simple backgrounds, clear shapes).
+    - Return **exactly 4** panel prompts and 1 thumbnail prompt in JSON format, without any <think>, explanation, or comment fields.
 
-# Example Tokens:
-{example_line}
+    # Input Scenario
+    {input_scenario}
 
-# Output Schema (JSON only):
-{{
-  "thumbnail_tokens": ["<string>", ...],
-  "panel_tokens": [
-     ["<string>", ...],
-     ["<string>", ...],
-     ["<string>", ...],
-     ["<string>", ...]
-  ]
-}}
-"""
+    # Output Schema (JSON only):
+    {
+      "thumbnail_prompt": "<string>",
+      "panel_prompts": ["<string>", "<string>", "<string>", "<string>"]
+    }
+    """
 
+def build_ghibli_prompt(*args, **kwargs):
+    return """
+    You are an expert image prompt engineer for Ghibli style (Flux).
+    Your task:
+    - Given an input_scenario describing a scene, produce:
+      1 thumbnail prompt
+      4 panel prompts
+    - Each prompt should begin with the trigger word "sgbl artstlye" followed by a concise description of the scene (e.g., "sgbl artstlye large beautiful castle on a hill above a forest").
+    - Avoid overly dramatic or exaggerated details; focus on clarity and essential elements.
+    - Return **exactly 4** panel prompts and 1 thumbnail prompt in JSON format, without any <think>, explanation, or comment fields.
 
-def build_cute_line_cat_flux_prompt(*args, **kwargs):
-    example_prompts = [
-        "miao cat play computer game, cartoon, simple background",
-        "miao cat reading book, cartoon, simple background"
-    ]
-    return f"""
-You are an expert image prompt engineer for Cute-Line-Cat style.
-Your task:
-- Given a detailed input_scenario (possibly lengthy), transform it into:
-  1 thumbnail prompt
-  4 panel prompts
-- Each prompt should start with “miao cat”, use "cartoon" in the prompt, be short, playful, and highlight the core action in a light, cartoonish manner.
-- Return **exactly 4** panel prompts and 1 thumbnail prompt (no more, no less).
-- Do **not** include any <think>, explanation, or comment fields.
+    # Input Scenario
+    {input_scenario}
 
-# Example Prompts:
-- Panel 1: {example_prompts[0]}
-- Panel 2: {example_prompts[1]}
-
-# Input Scenario
-{{input_scenario}}
-
-# Output Schema (JSON only):
-{{
-  "thumbnail_prompt": "<string>",
-  "panel_prompts": ["<string>", "<string>", "<string>", "<string>"]
-}}
-"""
+    # Output Schema (JSON only):
+    {
+      "thumbnail_prompt": "<string>",
+      "panel_prompts": ["<string>", "<string>", "<string>", "<string>"]
+    }
+    """
 
 
 # === 이미지 스타일 모드별 config ===
 IMAGE_STYLE_CONFIGS: Dict[str, Dict[str, Any]] = {
-    "ghibli-flux": {
+    "pure": {
+        "type": "pure",
+        "prompt_builder": build_pure_prompt,
+        "negative_prompt": "blurry, deformed, signature, worst quality, low quality",
+    },
+    "ghibli": {
         "type": "flux",
-        "prompt_builder": build_ghibli_flux_prompt,
-        "negative_prompt": "(worst quality, low quality, normal quality:1.2), deformed, blurry, text, signature",
+        "prompt_builder": build_ghibli_prompt,
+        "negative_prompt": "blurry, deformed, signature, worst quality, low quality",
     },
-    "anything-xl": {
-        "type": "xl",
-        "prompt_builder": build_anything_xl_prompt,
-        "negative_prompt": "bad anatomy, bad hands, text, error, missing fingers",
-    },
-    "cute-line-cat-flux": {
+    "pixel_art": {
         "type": "flux",
-        "prompt_builder": build_cute_line_cat_flux_prompt,
-        "negative_prompt": ",nsfw",
-    },
+        "prompt_builder": build_pixel_art_prompt,
+        "negative_prompt": "blurry, deformed, signature, worst quality, low quality",
+    }
 }
 
-DEFAULT_IMAGE_MODE = "ghibli-flux"
+DEFAULT_IMAGE_MODE = "pure"
 
 # writer_id → image_mode 매핑
 def get_image_mode_for_writer(writer_id: str) -> str:
     mapping = {
-        "1": "ghibli-flux",
-        "2": "anything-xl",
-        "3": "cute-line-cat-flux",
+        "1": "pure",
+        "2": "ghibli",
+        "3": "pixel_art",
     }
     return mapping.get(str(writer_id), DEFAULT_IMAGE_MODE)

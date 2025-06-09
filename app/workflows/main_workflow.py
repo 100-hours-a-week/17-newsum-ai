@@ -12,7 +12,82 @@ from app.utils.logger import get_logger
 from app.services.llm_service import LLMService
 from app.tools.search.Google_Search_tool import GoogleSearchTool
 from app.services.image_service import ImageService # <<< 이미지 서비스 임포트
+from app.services.storage_service import StorageService # <<< StorageService 임포트
+from app.services.translation_service import TranslationService # <<< TranslationService 임포트
 
+from app.nodes_v2.n01_initialize_node import N01InitializeNode
+from app.nodes_v2.n02_analyze_query_node import N02AnalyzeQueryNode
+from app.nodes_v2.n03_understand_and_plan_node import N03UnderstandAndPlanNode
+from app.nodes_v2.n04_execute_search_node import N04ExecuteSearchNode
+from app.nodes_v2.n05_report_generation_node import N05ReportGenerationNode
+from app.nodes_v2.n06_save_report_node import N06SaveReportNode
+# nodes test
+from app.nodes_test.n06a_report_summary_node import N06aReportSummaryNode
+from app.nodes_test.n07_simple_scenario_node import N07SimpleScenarioNode
+from app.nodes_test.n08_scenario_generation_node import N08ScenarioGenerationNode
+from app.nodes_test.n08a_image_prompt_refine_node import N08aImagePromptRefinementNode
+from app.nodes_test.n09_image_generation_node import N09ImageGenerationNode
+
+logger = get_logger(__name__)
+
+async def compile_workflow(
+    llm_service: LLMService,
+    Google_Search_tool: GoogleSearchTool,
+    image_generation_service: ImageService,
+    storage_service: StorageService,
+    translation_service: TranslationService,
+    external_api_session: Optional[aiohttp.ClientSession] = None
+) -> StateGraph:
+    workflow = StateGraph(WorkflowState)
+
+    n01_initialize = N01InitializeNode()
+    n02_analyze_query = N02AnalyzeQueryNode(llm_service=llm_service)
+    n03_understand_and_plan = N03UnderstandAndPlanNode(llm_service=llm_service)
+    n04_execute_search = N04ExecuteSearchNode(search_tool=Google_Search_tool)
+    n05_report_generation = N05ReportGenerationNode(llm_service=llm_service)
+    n06_save_report = N06SaveReportNode()
+    # nodes test
+    n06a_report_summary = N06aReportSummaryNode(llm_service=llm_service)
+    n07_simple_scenario = N07SimpleScenarioNode(llm_service=llm_service)
+    n08_scenario_generation = N08ScenarioGenerationNode(llm_service=llm_service)
+    n08a_image_prompt_refine = N08aImagePromptRefinementNode(llm_service=llm_service)
+    n09_image_generation = N09ImageGenerationNode(image_service=image_generation_service)
+
+    workflow.add_node("n01_initialize", n01_initialize.run)
+    workflow.add_node("n02_analyze_query", n02_analyze_query.run)
+    workflow.add_node("n03_understand_and_plan", n03_understand_and_plan.run)
+    workflow.add_node("n04_execute_search", n04_execute_search.run)
+    workflow.add_node("n05_report_generation", n05_report_generation.run)
+    workflow.add_node("n06_save_report", n06_save_report.run)
+    # nodes test
+    workflow.add_node("n06a_report_summary", n06a_report_summary.run)
+    workflow.add_node("n07_simple_scenario", n07_simple_scenario.run)
+    workflow.add_node("n08_scenario_generation", n08_scenario_generation.run)
+    workflow.add_node("n08a_image_prompt_refine", n08a_image_prompt_refine.run)
+    workflow.add_node("n09_image_generation", n09_image_generation.run)
+
+    workflow.set_entry_point("n01_initialize")
+    workflow.add_edge("n01_initialize", "n02_analyze_query")
+    workflow.add_edge("n02_analyze_query", "n03_understand_and_plan")
+    workflow.add_edge("n03_understand_and_plan", "n04_execute_search")
+    workflow.add_edge("n04_execute_search", "n05_report_generation")
+    workflow.add_edge("n05_report_generation", "n06_save_report")
+    workflow.add_edge("n06_save_report", "n06a_report_summary")
+    workflow.add_edge("n06a_report_summary", "n07_simple_scenario")
+    workflow.add_edge("n07_simple_scenario", "n08_scenario_generation")
+    workflow.add_edge("n08_scenario_generation", "n08a_image_prompt_refine")
+    workflow.add_edge("n08a_image_prompt_refine", "n09_image_generation")
+
+    from app.nodes_v2.show_state_node import ShowStateNode
+    workflow.add_node("show_state", ShowStateNode().run)
+    workflow.add_edge("n09_image_generation", "show_state")
+    workflow.add_edge("show_state", END)
+
+    compiled_app = workflow.compile()
+    logger.info("Main workflow compiled successfully.")
+    return compiled_app
+
+'''
 # --- 노드 클래스 임포트 (N01 ~ N09) ---
 from app.nodes_v2.n01_initialize_node import N01InitializeNode
 from app.nodes_v2.n02_analyze_query_node import N02AnalyzeQueryNode
@@ -27,9 +102,6 @@ from app.nodes_v2.n08_scenario_generation_node import N08ScenarioGenerationNode
 from app.nodes_v2.n08a_image_prompt_refine_node import N08aImagePromptRefinementNode
 from app.nodes_v2.n09_image_generation_node import N09ImageGenerationNode # <<< N09 임포트
 # from app.nodes.n10_finalize_and_notify_node import N10FinalizeAndNotifyNode # <<< N10 임포트
-
-from app.services.storage_service import StorageService # <<< StorageService 임포트
-from app.services.translation_service import TranslationService # <<< TranslationService 임포트
 
 
 
@@ -132,3 +204,4 @@ async def compile_workflow(
 
     logger.info("Main workflow compiled successfully with HITL review node.") # 로그 메시지 업데이트
     return compiled_app
+'''

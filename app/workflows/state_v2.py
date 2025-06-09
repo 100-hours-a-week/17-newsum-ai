@@ -61,11 +61,16 @@ class ScenarioSection(BaseModel):
     selected_comic_idea_for_scenario: Optional[Dict[str, Any]] = None
     comic_scenarios: List[Dict[str, Any]] = Field(default_factory=list)
     thumbnail_image_prompt: Optional[str] = None
+    # test
+    simple_scenario: Optional[Dict[str, Any]] = None
+    thumbnail_details: Optional[Dict[str, Any]] = None
+    panel_details: Optional[List[Dict[str, Any]]] = None
 
 
 class ImageSection(BaseModel):
     refined_prompts: List[Dict[str, Any]] = Field(default_factory=list) # 썸네일, 패널 프롬프트 모두 저장
     generated_comic_images: List[Dict[str, Any]] = Field(default_factory=list)
+    # test
 
 
 class UploadSection(BaseModel):
