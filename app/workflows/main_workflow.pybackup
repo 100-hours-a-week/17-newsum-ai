@@ -1,0 +1,167 @@
+# ai/app/workflows/main_workflow.py
+
+from langgraph.graph import StateGraph, END
+
+# --- 상태, 로거, 서비스, 노드 임포트 ---
+# from .state_v2 import WorkflowState
+from .state_v3 import WorkflowState
+from app.utils.logger import get_logger
+from app.services.llm_service import LLMService
+from app.tools.search.Google_Search_tool import GoogleSearchTool
+from app.services.image_service import ImageService
+from app.services.storage_service import StorageService
+from app.services.translation_service import TranslationService
+from app.services.postgresql_service import PostgreSQLService
+
+# 노드 임포트 업데이트
+# from app.nodes_v2.n01_initialize_node import N01InitializeNode
+# from app.nodes_v2.n02_analyze_query_node import N02AnalyzeQueryNode
+# from app.nodes_v2.n03_understand_and_plan_node import N03UnderstandAndPlanNode
+# from app.nodes_v2.n04_execute_search_node import N04ExecuteSearchNode
+# from app.nodes_v2.n05_generate_and_finalize_report_node import N05GenerateAndFinalizeReportNode  # 통합 N05
+# # 신규 N06 시리즈
+# from app.nodes_v2.n06_issue_analysis_node import N06IssueAnalysisNode
+# from app.nodes_v2.n06a_community_reaction_scraping_node import N06ACommunityReactionScrapingNode
+# from app.nodes_v2.n06b_community_reaction_analysis_node import N06BCommunityReactionAnalysisNode
+# from app.nodes_v2.n06c_satirical_reaction_generation_node import N06CSatiricalReactionGenerationNode
+# # 업그레이드된 N07
+# from app.nodes_v2.n07_satire_ideation_and_finalization_node import N07SatireIdeationAndFinalizationNode
+# # 기존 N08, N08a, N09
+# from app.nodes_v2.n08_scenario_generation_node import N08ScenarioGenerationNode
+# from app.nodes_v2.n08a_image_prompt_refine_node import N08aImagePromptRefinementNode
+# from app.nodes_v2.n09_schedule_node import N09ScheduleNode
+
+from app.nodes_v3.n_01_topic_clarification_node import N01TopicClarificationNode
+from app.nodes_v3.n_02_report_search_planning_node import N02ReportSearchPlanningNode
+from app.nodes_v3.n_03_search_execution_node import N03SearchExecutionNode
+from app.nodes_v3.n_04_report_synthesis_node import N04ReportSynthesisNode
+from app.nodes_v3.n_05_community_search_planning_node import N05CommunitySearchPlanningNode
+from app.nodes_v3.n_06_community_search_execution_node import N06CommunitySearchExecutionNode
+from app.nodes_v3.n_07_community_analysis_node import N07CommunityAnalysisNode
+from app.nodes_v3.n_08_comic_outline_node import N08ComicOutlineNode
+from app.nodes_v3.n_09_panel_detail_node import N09PanelDetailNode
+from app.nodes_v3.n_10_image_prompt_node import N10ImagePromptNode
+
+logger = get_logger(__name__)
+
+# --- 새로운 라우터 키 정의 (예시) ---
+# 워크플로우 컨트롤러의 target_status 값과 일치해야 함
+INITIAL_PROCESSING_TARGET = "INITIAL_PROCESSING_UPTO_N03"
+SEARCH_AND_REPORT_TARGET = "SEARCH_AND_REPORT_UPTO_N05"
+SATIRE_PREP_TARGET = "SATIRE_PREPARATION_UPTO_N06C"  # N06 시리즈 통합
+COMIC_IDEATION_TARGET = "COMIC_IDEATION_N07"
+SCENARIO_GENERATION_TARGET = "SCENARIO_GENERATION_N08"
+PROMPT_REFINEMENT_TARGET = "PROMPT_REFINEMENT_N08A"
+IMAGE_SCHEDULING_TARGET = "IMAGE_SCHEDULING_N09"
+
+
+# --- 라우터 함수 수정 ---
+def workflow_router(state: WorkflowState) -> str:  # Literal 타입 구체화
+    """ state.meta.next_action 값에 따라 다음 실행할 노드를 결정합니다. """
+    # next_action은 WorkflowController에서 설정한 target_status 값을 가짐
+    next_node_key = state.meta.next_action
+    logger.info(f"Router: next_action 키 수신 = {next_node_key}")
+
+    # 중요: 라우터 진입 시 next_action을 초기화하여 무한 루프 방지 (컨트롤러에서도 할 수 있음)
+    # state.meta.next_action = None # 이 부분은 컨트롤러의 _run_graph에서 처리하는 것이 더 적절할 수 있음
+
+    if next_node_key == INITIAL_PROCESSING_TARGET:
+        return "n01_initialize"  # N01 -> N02 -> N03 순차 진행
+    elif next_node_key == SEARCH_AND_REPORT_TARGET:
+        return "n04_execute_search"  # N04 -> N05(통합) 순차 진행
+    elif next_node_key == SATIRE_PREP_TARGET:
+        return "n06_issue_analysis"  # N06 -> N06A -> N06B -> N06C 순차 진행
+    elif next_node_key == COMIC_IDEATION_TARGET:
+        return "n07_ideation_finalization"
+    elif next_node_key == SCENARIO_GENERATION_TARGET:
+        return "n08_scenario_generation"
+    elif next_node_key == PROMPT_REFINEMENT_TARGET:
+        return "n08a_image_prompt_refine"
+    elif next_node_key == IMAGE_SCHEDULING_TARGET:
+        return "n09_schedule_node"
+    else:
+        logger.warning(f"Router: 알 수 없는 next_action 값 '{next_node_key}'. 워크플로우 종료.__end__로 라우팅.")
+        return "__end__"
+
+
+async def compile_workflow(
+        llm_service: LLMService,
+            google_search_tool: GoogleSearchTool,  # 파라미터명 소문자로 변경 (일관성)
+            image_service: ImageService,  # 파라미터명 image_generation_service -> image_service
+            storage_service: StorageService,
+            translation_service: TranslationService,  # 현재 워크플로우에서 직접 사용되진 않음
+            postgresql_service: PostgreSQLService,
+            # external_api_session: Optional[aiohttp.ClientSession] = None # 현재 미사용
+        ) -> StateGraph:
+        workflow =
+        # workflow = StateGraph(WorkflowState)
+        #
+        # # --- 노드 인스턴스 생성 (의존성 주입 업데이트) ---
+        # n01_init = N01InitializeNode()
+        # n02_analyze = N02AnalyzeQueryNode(llm_service=llm_service, search_tool=google_search_tool, postgresql_service = postgresql_service)  # pg_service 추가
+        # n03_plan = N03UnderstandAndPlanNode(llm_service=llm_service, postgresql_service=postgresql_service)  # pg_service 추가
+        # n04_search = N04ExecuteSearchNode(search_tool=google_search_tool)
+        # # 통합된 N05 노드 (results_base_dir는 내부적으로 settings 또는 기본값 사용 가정)
+        # n05_finalize_report = N05GenerateAndFinalizeReportNode(llm_service=llm_service)
+        #
+        # # 신규 N06 시리즈 노드
+        # n06_issue_analyzer = N06IssueAnalysisNode(llm_service=llm_service)
+        # n06a_scraper = N06ACommunityReactionScrapingNode(search_tool=google_search_tool)
+        # n06b_reaction_analyzer = N06BCommunityReactionAnalysisNode(llm_service=llm_service)
+        # n06c_satire_generator = N06CSatiricalReactionGenerationNode(llm_service=llm_service)
+        #
+        # # 업그레이드된 N07 노드
+        # n07_ideation = N07SatireIdeationAndFinalizationNode(llm_service=llm_service)
+        #
+        # n08_scenario = N08ScenarioGenerationNode(llm_service=llm_service)
+        # n08a_refine = N08aImagePromptRefinementNode(llm_service=llm_service)
+        # n09_schedule = N09ScheduleNode(postgresql_service=postgresql_service)
+        #
+        # # --- 노드 그래프에 추가 ---
+        # workflow.add_node("n01_initialize", n01_init.run)
+        # workflow.add_node("n02_analyze_query", n02_analyze.run)
+        # workflow.add_node("n03_understand_and_plan", n03_plan.run)
+        # workflow.add_node("n04_execute_search", n04_search.run)
+        # workflow.add_node("n05_finalize_report", n05_finalize_report.run)  # 통합 N05
+        # workflow.add_node("n06_issue_analysis", n06_issue_analyzer.run)
+        # workflow.add_node("n06a_reaction_scraping", n06a_scraper.run)
+        # workflow.add_node("n06b_reaction_analysis", n06b_reaction_analyzer.run)
+        # workflow.add_node("n06c_satire_generation", n06c_satire_generator.run)
+        # workflow.add_node("n07_ideation_finalization", n07_ideation.run)  # N07
+        # workflow.add_node("n08_scenario_generation", n08_scenario.run)
+        # workflow.add_node("n08a_image_prompt_refine", n08a_refine.run)
+        # workflow.add_node("n09_schedule_node", n09_schedule.run)
+        #
+        # # --- 엣지 정의 (라우터 및 각 블록의 순차 실행) ---
+        # workflow.set_conditional_entry_point(workflow_router)
+        #
+        # # 블록 1: 초기 질의 처리 (N01 -> N02 -> N03 -> END로 라우터 복귀)
+        # workflow.add_edge("n01_initialize", "n02_analyze_query")
+        # workflow.add_edge("n02_analyze_query", "n03_understand_and_plan")
+        # workflow.add_edge("n03_understand_and_plan", END)  # 라우터가 다음 단계 결정
+        #
+        # # 블록 2: 검색 및 보고서 생성/최종화 (N04 -> N05(통합) -> END로 라우터 복귀)
+        # workflow.add_edge("n04_execute_search", "n05_finalize_report")
+        # workflow.add_edge("n05_finalize_report", END)
+        #
+        # # 블록 3: 풍자 준비 (N06 -> N06A -> N06B -> N06C -> END로 라우터 복귀)
+        # workflow.add_edge("n06_issue_analysis", "n06a_reaction_scraping")
+        # workflow.add_edge("n06a_reaction_scraping", "n06b_reaction_analysis")
+        # workflow.add_edge("n06b_reaction_analysis", "n06c_satire_generation")
+        # workflow.add_edge("n06c_satire_generation", END)
+        #
+        # # 블록 4: 만화 아이디어 구체화 (N07 -> END)
+        # workflow.add_edge("n07_ideation_finalization", END)
+        #
+        # # 블록 5: 시나리오 생성 (N08 -> END)
+        # workflow.add_edge("n08_scenario_generation", END)
+        #
+        # # 블록 6: 프롬프트 정제 (N08a -> END)
+        # workflow.add_edge("n08a_image_prompt_refine", END)
+        #
+        # # 블록 7: 이미지 생성 예약 (N09 -> END)
+        # workflow.add_edge("n09_schedule_node", END)
+
+        compiled_app = workflow.compile()
+        logger.info("업데이트된 노드를 포함한 워크플로우 컴파일 성공.")
+        return compiled_app

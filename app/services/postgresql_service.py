@@ -2,9 +2,11 @@
 import asyncpg
 import uuid # UUID 처리를 위해 추가
 from sshtunnel import SSHTunnelForwarder
+import json
 from pathlib import Path
 from app.config.settings import settings
 from app.utils.logger import get_logger
+from typing import Optional
 
 class PostgreSQLService:
     def __init__(self, use_ssh=True):
@@ -203,3 +205,109 @@ class PostgreSQLService:
     # 스키마에 맞게 다른 메서드들 (bulk_insert, multi_table_select 등)도
     # 필요하다면 테이블/컬럼 이름을 확인하고 수정해야 합니다.
     # 여기서는 채팅 기능 관련 메서드만 집중적으로 수정했습니다.
+
+    # async def get_workflow_state(self, work_id: uuid.UUID) -> Optional[dict]:
+    #     """ai_test_room_workflow_status에서 work_id로 상태(task_details) 조회"""
+    #     query = "SELECT task_details FROM ai_test_room_workflow_status WHERE work_id = $1"
+    #     row = await self.fetch_one(query, work_id)
+    #     return row['task_details'] if row and row.get('task_details') else None
+    #
+    # async def update_workflow_state(self, work_id: uuid.UUID, room_id: int, status: str, task_details: dict):
+    #     """ai_test_room_workflow_status 업데이트 또는 삽입 (ON CONFLICT 사용)"""
+    #     query = """
+    #     INSERT INTO ai_test_room_workflow_status (work_id, room_id, status, task_details, updated_at)
+    #     VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
+    #     ON CONFLICT (work_id) DO UPDATE
+    #     SET status = EXCLUDED.status,
+    #         task_details = EXCLUDED.task_details,
+    #         updated_at = CURRENT_TIMESTAMP
+    #     """
+    #     # <<< 수정: task_details를 JSON 문자열로 변환 >>>
+    #     task_details_json_str = json.dumps(task_details)
+    #     await self.execute(query, work_id, room_id, status, task_details_json_str)
+    #     self.logger.info(f"Workflow state updated for work_id {work_id} to status {status}.")
+
+    async def _setup_json_codec(self, connection):  # <<< [추가] JSON/JSONB 자동 변환을 위한 코덱 설정
+        self.logger.debug("PostgreSQL 연결에 JSON/JSONB 코덱 설정 시도")
+        await connection.set_type_codec(
+            'json',
+            encoder=json.dumps,
+            decoder=json.loads,
+            schema='pg_catalog'
+        )
+        await connection.set_type_codec(
+            'jsonb',
+            encoder=json.dumps,
+            decoder=json.loads,
+            schema='pg_catalog'
+        )
+        self.logger.info("PostgreSQL JSON/JSONB 코덱 설정 완료.")
+
+    async def get_workflow_state(self, work_id: uuid.UUID, room_id: int) -> Optional[dict]:
+        # 이전 답변에서 제안된 JSON 디코딩 로직 유지
+        query = "SELECT task_details FROM ai_test_room_workflow_status WHERE work_id = $1 AND room_id = $2"
+        self.logger.info(f"PostgreSQL에서 워크플로우 상태 조회 시도. work_id: {work_id}, room_id: {room_id}")
+        row_dict = await self.fetch_one(query, work_id, room_id)
+
+        if row_dict and 'task_details' in row_dict:
+            task_details_value = row_dict['task_details']
+            # _setup_json_codec 설정으로 인해 task_details_value는 이미 dict일 것으로 예상됨
+            if isinstance(task_details_value, dict):
+                self.logger.info(f"워크플로우 상태 조회 성공 (이미 dict 타입). work_id: {work_id}, room_id: {room_id}")
+                return task_details_value
+            elif isinstance(task_details_value, str):
+                self.logger.warning(f"task_details가 문자열로 반환됨. JSON 파싱 시도. work_id: {work_id}, room_id: {room_id}")
+                try:
+                    parsed_details = json.loads(task_details_value)
+                    self.logger.info(f"워크플로우 상태 JSON 파싱 성공. work_id: {work_id}, room_id: {room_id}")
+                    return parsed_details
+                except json.JSONDecodeError as e:
+                    self.logger.error(
+                        f"워크플로우 상태 JSON 파싱 실패: {e}. work_id: {work_id}, room_id: {room_id}, data: {task_details_value[:200]}",
+                        exc_info=True)
+                    return None
+            elif task_details_value is None:
+                self.logger.warning(f"워크플로우 상태의 task_details가 NULL입니다. work_id: {work_id}, room_id: {room_id}")
+                return None
+            else:
+                self.logger.error(
+                    f"task_details가 예상치 못한 타입({type(task_details_value)})입니다. work_id: {work_id}, room_id: {room_id}")
+                return None
+        else:
+            self.logger.warning(
+                f"워크플로우 상태 없거나 task_details 필드 없음. work_id: {work_id}, room_id: {room_id}, row: {row_dict}")
+            return None
+
+    async def update_workflow_state(self, work_id: uuid.UUID, room_id: int, status: str, task_details: dict):
+        """ai_test_room_workflow_status 업데이트 또는 삽입 (ON CONFLICT 사용)"""
+        query = """
+        INSERT INTO ai_test_room_workflow_status (work_id, room_id, status, task_details, updated_at)
+        VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
+        ON CONFLICT (work_id) DO UPDATE
+        SET room_id = EXCLUDED.room_id,
+            status = EXCLUDED.status,
+            task_details = EXCLUDED.task_details,
+            updated_at = CURRENT_TIMESTAMP
+        """
+        # <<< [수정] task_details (dict)를 JSON 문자열로 명시적 변환 >>>
+        task_details_json_str = json.dumps(task_details)
+        await self.execute(query, work_id, room_id, status, task_details_json_str)  # JSON 문자열 전달
+        self.logger.info(f"워크플로우 상태 업데이트 완료. work_id: {work_id}, room_id: {room_id}, status: {status}")
+
+    async def schedule_image_generation(self, work_id: uuid.UUID, prompts: list[dict]):
+        """ai_test_image_generation_queue에 프롬프트 정보 삽입 (Bulk Insert)"""
+        # ai_test_image_generation_queue 테이블 스키마 가정:
+        # (queue_id SERIAL PK, work_id UUID, scene_identifier VARCHAR, prompt_used TEXT,
+        #  model_name VARCHAR, status VARCHAR DEFAULT 'PENDING', created_at TIMESTAMP, ...)
+        query = """
+        INSERT INTO ai_test_image_generation_queue
+        (work_id, scene_identifier, prompt_used, model_name, status)
+        VALUES ($1, $2, $3, $4, 'PENDING')
+        """
+        async with self.pool.acquire() as conn:
+            # executemany를 사용하여 여러 레코드를 효율적으로 삽입
+            await conn.executemany(query, [
+                (work_id, p.get("scene_identifier"), p.get("prompt_used"), p.get("model_name"))
+                for p in prompts
+            ])
+        self.logger.info(f"{len(prompts)} image generation tasks scheduled for work_id {work_id}.")

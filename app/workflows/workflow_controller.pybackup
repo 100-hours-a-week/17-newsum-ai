@@ -1,0 +1,390 @@
+# ai/app/workflows/workflow_controller.py (일부 발췌 및 수정)
+import json
+import uuid
+
+# state_v2 임포트 시, MetaSection에 current_stage, error_message 등이 없음을 인지하고 사용
+from app.workflows.state_v2 import (
+    WorkflowState, MetaSection, QuerySection, SearchSection, ReportSection,
+    IdeaSection, ScenarioSection, ImageSection, UploadSection, ConfigSection
+)
+from app.utils.logger import get_logger
+
+from typing import TYPE_CHECKING, Dict, Any, Optional
+# ...
+if TYPE_CHECKING:
+    from app.services.postgresql_service import PostgreSQLService
+    from langgraph.graph import StateGraph
+    from app.services.llm_service import LLMService
+# from langgraph.graph import StateGraph # 컨트롤러에서는 직접 사용하지 않음
+
+logger = get_logger(__name__)
+
+# main_workflow.py에서 정의된 새로운 라우터 키 (일관성 유지)
+
+INITIAL_PROCESSING_TARGET = "INITIAL_PROCESSING_UPTO_N03"
+SEARCH_AND_REPORT_TARGET = "SEARCH_AND_REPORT_UPTO_N05"
+SATIRE_PREP_TARGET = "SATIRE_PREPARATION_UPTO_N06C"
+COMIC_IDEATION_TARGET = "COMIC_IDEATION_N07"
+SCENARIO_GENERATION_TARGET = "SCENARIO_GENERATION_N08"
+PROMPT_REFINEMENT_TARGET = "PROMPT_REFINEMENT_N08A"
+IMAGE_SCHEDULING_TARGET = "IMAGE_SCHEDULING_N09"
+
+
+class WorkflowController:
+    def __init__(self, pg_service: 'PostgreSQLService', compiled_app: 'StateGraph', llm_service: 'LLMService'):
+        self.pg = pg_service
+        self.app = compiled_app
+        self.llm = llm_service # _apply_chat_modifications_llm에서 사용 가정
+
+    async def _load_state(self, work_id_str: str) -> Optional[WorkflowState]:  # comic_id_str -> work_id_str
+        """ DB에서 work_id로 워크플로우 상태를 로드합니다. """
+        try:
+            work_id_uuid = uuid.UUID(work_id_str)  # work_id로 변경
+            state_json_str = await self.pg.get_workflow_state(work_id_uuid)  # get_workflow_state가 JSON 문자열 반환 가정
+            if state_json_str:
+                logger.debug(f"DB에서 상태 로드됨 (WorkID: {work_id_str}). JSON 파싱 시도.")
+                state_dict = json.loads(state_json_str)  # task_details가 JSON 문자열이라고 가정
+                return WorkflowState.model_validate(state_dict)
+            logger.warning(f"DB에 저장된 상태 없음: {work_id_str}")
+            return None
+        except json.JSONDecodeError as json_e:
+            # state_json_str이 None일 수 있으므로 안전하게 처리
+            original_data_snippet = state_json_str[:500] if state_json_str else "N/A"
+            logger.error(f"DB 상태 JSON 파싱 오류 (WorkID: {work_id_str}): {json_e}. 원본 데이터: {original_data_snippet}...",
+                         exc_info=True)
+            return None
+        except ValueError:  # UUID 변환 실패
+            logger.error(f"잘못된 WorkID 형식 (WorkID: {work_id_str})", exc_info=True)
+            return None
+        except Exception as e:
+            logger.error(f"상태 로드 중 오류 발생 (WorkID: {work_id_str}): {e}", exc_info=True)
+            return None
+
+    async def _save_state(self, state: WorkflowState):
+        """ DB에 워크플로우 상태를 저장합니다. """
+        if not state.meta.work_id:
+            logger.error("상태 저장 실패: work_id가 없습니다.")
+            raise ValueError("work_id is missing in state.meta for saving.")
+
+        try:
+            work_id_uuid = uuid.UUID(state.meta.work_id)
+            room_id_from_config = state.config.config.get("room_id")
+            if not room_id_from_config:
+                # room_id가 필수라면 여기서 오류 발생 또는 기본값 처리
+                logger.warning(f"상태 저장 시 config에 room_id가 없습니다 (WorkID: {state.meta.work_id}). 기본값(0) 사용 시도.")
+                room_id_to_save = 0  # 또는 적절한 기본값/오류 처리
+            else:
+                room_id_to_save = int(room_id_from_config)
+
+            # workflow_status 딕셔너리에서 가장 마지막 노드의 상태를 대표 상태로 사용하거나,
+            # target_status (payload에서 온 값)을 사용 가능. 여기서는 간단히 "업데이트됨"으로.
+            # 또는, 전체 워크플로우의 현재 단계를 나타내는 별도 필드를 MetaSection에 두는 것도 방법.
+            # 예시: 가장 높은 숫자 키의 상태를 가져오거나, 특정 노드 상태를 대표로 사용.
+            # 여기서는 payload의 target_status를 사용한다고 가정 (process_chat에서 전달받는다면)
+            # 또는 마지막 완료/에러 노드 상태를 사용.
+            # 이 예시에서는 마지막으로 설정된 workflow_status의 값을 사용.
+            current_overall_status = "UNKNOWN"
+            if state.meta.workflow_status:
+                # 마지막으로 실행된 (또는 실행 중인) 노드의 상태를 대표로
+                last_node_order = max(state.meta.workflow_status.keys())
+                current_overall_status = state.meta.workflow_status.get(last_node_order, "UNKNOWN")
+
+            logger.debug(
+                f"DB에 상태 저장 시도 (WorkID: {state.meta.work_id}, RoomID: {room_id_to_save}, 대표상태: {current_overall_status})")
+            await self.pg.update_workflow_state(work_id_uuid, room_id_to_save, current_overall_status,
+                                                state.model_dump())
+        except Exception as e:
+            logger.error(f"상태 저장 중 오류 (WorkID: {state.meta.work_id}): {e}", exc_info=True)
+            raise
+
+    def _prepare_for_retry(self, state: WorkflowState, target_next_action: str,
+                           chat_message_for_retry: Optional[str] = None) -> WorkflowState:  # chat_message_for_retry 추가
+        """ 특정 단계 재시도/실행 시, 해당 단계 이후의 상태를 초기화합니다. """
+        logger.info(
+            f"재시도/다음 단계 실행 준비. 목표 액션: {target_next_action}, 새 메시지 제공 여부: {'있음' if chat_message_for_retry else '없음'} (WorkID: {state.meta.work_id})")
+
+        # 기존 플래그 초기화
+        clear_search_strategy_too = False
+        clear_raw_search_results_only = False
+        clear_report, clear_idea_satire_prep, clear_idea_finalization, \
+            clear_scenario, clear_image, clear_upload = [False] * 6
+
+        if target_next_action == INITIAL_PROCESSING_TARGET:
+            current_original_query = state.query.original_query if state.query else None  # 기존 original_query
+
+            # 재시도 시 새 chat_message가 제공되면 이를 original_query로 사용
+            if chat_message_for_retry:
+                current_original_query = chat_message_for_retry
+                logger.info(
+                    f"INITIAL_PROCESSING_TARGET 재시도: original_query를 새 채팅 메시지로 업데이트. 새 original_query: '{current_original_query}' (WorkID: {state.meta.work_id})")
+
+            # QuerySection을 (새로운) original_query로 재생성하고, 하위 필드 명시적 초기화
+            state.query = QuerySection(original_query=current_original_query)
+            state.query.query_context = {}
+            state.query.initial_context_results = []
+            state.query.llm_analysis_details_korean = None
+            state.query.llm_analysis_details_searchplan_korean = None
+
+            clear_search_strategy_too = True  # SearchSection 및 그 이후 모든 단계 초기화
+
+        # ... (elif target_next_action == SEARCH_AND_REPORT_TARGET: 등 나머지 로직은 동일) ...
+        elif target_next_action == SEARCH_AND_REPORT_TARGET:  # N04-N05 실행
+            clear_raw_search_results_only = True
+            clear_report = True
+        elif target_next_action == SATIRE_PREP_TARGET:  # N06 시리즈
+            clear_idea_satire_prep = True
+        elif target_next_action == COMIC_IDEATION_TARGET:  # N07 재시작
+            clear_idea_finalization = True
+        elif target_next_action == SCENARIO_GENERATION_TARGET:  # N08 재시작
+            clear_scenario = True
+        elif target_next_action == PROMPT_REFINEMENT_TARGET:  # N08a 재시작
+            clear_image = True
+        elif target_next_action == IMAGE_SCHEDULING_TARGET:  # N09 재시작
+            clear_upload = True
+
+        # 연쇄적 초기화 로직
+        if clear_search_strategy_too:
+            state.search = SearchSection()
+            clear_report = True
+        elif clear_raw_search_results_only:
+            if state.search:
+                state.search.raw_search_results = None
+            else:
+                state.search = SearchSection()
+            clear_report = True
+
+        if clear_report: clear_idea_satire_prep = True  # N05 결과가 바뀌면 N06 시리즈도 다시
+        if clear_idea_satire_prep: clear_idea_finalization = True  # N06 시리즈 결과가 바뀌면 N07도 다시
+        if clear_idea_finalization: clear_scenario = True  # N07 결과가 바뀌면 N08도 다시
+        if clear_scenario: clear_image = True  # N08 결과가 바뀌면 N08a도 다시
+        if clear_image: clear_upload = True  # N08a 결과가 바뀌면 N09도 다시 (UploadSection 관련)
+
+        # 실제 섹션 초기화
+        if clear_report: state.report = ReportSection()
+        if clear_idea_satire_prep:
+            state.idea = IdeaSection()  # N06 시리즈 관련 필드를 모두 초기화하기 위해 새로 할당
+            # IdeaSection의 Pydantic 모델 기본값으로 모든 관련 필드가 초기화됨
+        if clear_idea_finalization:
+            # SATIRE_PREP_TARGET에서 idea 섹션이 이미 초기화되었을 수 있으므로,
+            # final_comic_ideas 필드만 확실히 초기화하거나, IdeaSection()으로 다시 할당
+            if state.idea:
+                state.idea.final_comic_ideas = []
+            else:  # 만약 IdeaSection이 없다면 (이전 단계에서 초기화 안 된 경우 방지)
+                state.idea = IdeaSection(final_comic_ideas=[])
+        if clear_scenario: state.scenario = ScenarioSection()
+        if clear_image: state.image = ImageSection()
+        if clear_upload: state.upload = UploadSection()  # 현재 UploadSection 사용 여부 확인 필요
+
+        state.scratchpad.pop("graph_execution_error", None)
+        state.scratchpad.pop("last_user_command", None)
+        # 필요하다면 scratchpad의 다른 내용도 추가적으로 초기화
+
+        logger.info(f"상태 초기화 완료. 목표 액션: {target_next_action}.", extra={"work_id": state.meta.work_id})
+        return state
+
+    async def _apply_chat_modifications_llm(self, state: WorkflowState, chat_message: str) -> WorkflowState:
+        """ LLM을 사용하거나 규칙 기반으로 채팅 메시지를 분석하고 상태를 수정합니다. """
+        # (이전 답변의 LLM 활용 코드 - 필요시 구현)
+        logger.info(f"채팅 수정사항 적용 시도 (WorkID: {state.meta.work_id}): {chat_message}")
+
+        # 예시: N07 (만화 아이디어 최종화) 단계에서 아이디어 선택
+        # 현재 워크플로우의 '현재 단계'를 알려면 workflow_status를 분석해야 함.
+        # 여기서는 간단히 scratchpad에 사용자 피드백 저장.
+        # 실제로는 LLM을 호출하여 chat_message의 의도를 파악하고,
+        # state의 특정 필드를 수정하는 로직이 필요할 수 있음.
+        # (예: state.scenario.selected_comic_idea_for_scenario 인덱스 변경 등)
+        if state.idea and state.idea.final_comic_ideas:
+            # 예시: "아이디어 2번으로 진행해줘" -> selected_comic_idea_for_scenario 인덱스 설정
+            # 이 로직은 현재 N08에서 아이디어 선택 시 사용됨.
+            pass
+
+        state.scratchpad["last_user_chat_message"] = chat_message
+        logger.debug(f"사용자 채팅 메시지를 scratchpad에 저장: {chat_message}", extra={"work_id": state.meta.work_id})
+        return state
+
+    async def _run_graph(self, state: WorkflowState, thread_id: str) -> WorkflowState:  # thread_id는 work_id와 동일하게 사용
+        """ LangGraph 워크플로우의 한 단계를 실행합니다. """
+        config = {"configurable": {"thread_id": thread_id}}  # LangGraph 실행 설정
+        next_action_to_run = state.meta.next_action  # 라우터가 사용할 값
+
+        if not next_action_to_run:
+            logger.warning(f"실행할 다음 액션(next_action)이 정의되지 않았습니다 (WorkID: {thread_id}). 워크플로우를 더 이상 진행하지 않습니다.")
+            # 이 경우, 현재 상태를 그대로 반환하거나, 특정 '대기' 상태로 변경
+            # (state.meta.workflow_status는 이전 노드에서 COMPLETED로 설정되었을 것임)
+            return state
+
+        logger.info(f"LangGraph 실행 시작. Thread ID (WorkID): {thread_id}, 다음 액션(라우터 키): {next_action_to_run}")
+
+        try:
+            # LangGraph 실행 시 현재 상태의 model_dump()를 전달
+            final_state_dict_after_run = await self.app.ainvoke(state.model_dump(exclude_unset=True), config=config)
+            updated_state = WorkflowState.model_validate(final_state_dict_after_run)  # 실행 후 상태로 업데이트
+
+            # 실행 후 next_action은 라우터에서 이미 None으로 설정되었거나, 여기서 명시적으로 초기화
+            updated_state.meta.next_action = None
+
+            # scratchpad에 마지막 실행 결과 요약 (디버깅/응답 생성용)
+            # workflow_status에서 마지막 완료/에러 노드 정보 가져오기
+            last_processed_node_status_str = "알 수 없음"
+            if updated_state.meta.workflow_status:
+                last_node_order = max(updated_state.meta.workflow_status.keys())
+                last_processed_node_status_str = f"노드{last_node_order} 상태: {updated_state.meta.workflow_status[last_node_order]}"
+
+            updated_state.scratchpad[
+                "last_graph_result_summary"] = f"액션 '{next_action_to_run}' 관련 그래프 단계 실행 완료. ({last_processed_node_status_str})"
+            logger.info(
+                f"LangGraph 실행 완료. Thread ID (WorkID): {thread_id}. {updated_state.scratchpad['last_graph_result_summary']}")
+            return updated_state
+
+        except Exception as e:
+            logger.exception(f"LangGraph 실행 중 치명적 오류 발생 (WorkID: {thread_id}, 실행 시도 액션: '{next_action_to_run}').")
+            # 오류 발생 시, 입력으로 받은 state의 상태를 업데이트하여 반환
+            # 대신, scratchpad나 별도 필드에 오류 기록.
+            state.scratchpad["graph_execution_error"] = f"오류 발생 액션 '{next_action_to_run}': {str(e)}"
+            state.meta.next_action = None  # 더 이상 진행하지 않도록 next_action 초기화
+            return state
+
+    def _generate_response_message(self, state: WorkflowState,
+                                   target_status_from_payload: str) -> str:  # payload의 target_status 추가
+        """ 현재 상태에 따라 사용자에게 보낼 응답 메시지를 생성합니다. """
+        # MetaSection에 last_response_message 필드가 없으므로, 이 함수는 문자열만 반환.
+
+        # 가장 최근 노드의 상태를 확인
+        last_node_final_status = "정보 없음"
+        if state.meta.workflow_status:
+            last_node_order = max(state.meta.workflow_status.keys(), default=0)
+            last_node_final_status = state.meta.workflow_status.get(last_node_order, "알 수 없음")
+
+        if state.scratchpad.get("graph_execution_error"):
+            return f"❌ 워크플로우 실행 중 오류가 발생했습니다: {state.scratchpad['graph_execution_error']}"
+        if last_node_final_status == "ERROR":  # 특정 노드가 에러 상태로 끝난 경우
+            return f"❌ 이전 단계 처리 중 오류가 발생했습니다. (마지막 노드 상태: {last_node_final_status})"
+        if last_node_final_status == "SCHEDULED":  # N09 예약 완료 시
+            return "✅ 이미지 생성이 성공적으로 예약되었습니다. 잠시 후 확인해주세요."
+
+        # target_status_from_payload는 방금 "요청된" 작업 단계임.
+        # 이 단계가 성공적으로 "COMPLETED"되었는지 확인.
+        # (실제로는 target_status_from_payload에 매핑되는 마지막 노드의 상태를 봐야함)
+
+        last_result_summary = state.scratchpad.get("last_graph_result_summary",
+                                                   f"'{target_status_from_payload}' 단계 요청 처리 완료.")
+
+        # 다음 단계 제안 (새로운 라우터 키 기반)
+        # 이 제안은 현재 워크플로우가 "어디까지" 진행되었는지를 알아야 더 정확해짐.
+        # 여기서는 단순히 요청된 target_status 다음 단계를 제안하는 방식으로 가정.
+        next_possible_actions_map = {
+            INITIAL_PROCESSING_TARGET: f"초기 분석 및 계획 수립 완료. 다음 제안: 검색 및 보고서 생성 (`{SEARCH_AND_REPORT_TARGET}`)",
+            SEARCH_AND_REPORT_TARGET: f"검색 및 보고서 생성 완료. 다음 제안: 풍자 준비 단계 (`{SATIRE_PREP_TARGET}`)",
+            SATIRE_PREP_TARGET: f"풍자 준비 완료. 다음 제안: 만화 아이디어 구체화 (`{COMIC_IDEATION_TARGET}`)",
+            COMIC_IDEATION_TARGET: f"만화 아이디어 구체화 완료. 다음 제안: 시나리오 생성 (`{SCENARIO_GENERATION_TARGET}`)",
+            SCENARIO_GENERATION_TARGET: f"시나리오 생성 완료. 다음 제안: 프롬프트 정제 (`{PROMPT_REFINEMENT_TARGET}`)",
+            PROMPT_REFINEMENT_TARGET: f"프롬프트 정제 완료. 다음 제안: 이미지 생성 예약 (`{IMAGE_SCHEDULING_TARGET}`)",
+            IMAGE_SCHEDULING_TARGET: "이미지 생성 예약 요청됨. (실제 예약 완료는 N09 노드가 SCHEDULED 상태로 변경)"
+        }
+        suggestion_for_next = next_possible_actions_map.get(target_status_from_payload,
+                                                            "모든 주요 단계가 요청되었거나 다음 단계를 알 수 없습니다. 필요시 특정 단계를 재실행하거나 새 작업을 시작하세요.")
+
+        return f"✔️ {last_result_summary}\n➡️ {suggestion_for_next}"
+
+    async def process_chat(self, user_id: str, work_id_str_from_payload: Optional[str],
+                           chat_message: Optional[str], payload: Dict[str, Any]):
+        """
+        채팅 입력과 payload를 처리하고, 최종 상태를 DB에 저장합니다.
+        이 함수는 이제 API 응답을 직접 반환하지 않습니다. 상태 저장 후 종료.
+        """
+        target_status_from_payload = payload.get("target_status")  # 요청된 다음 작업 단계
+        room_id_from_payload = payload.get("room_id")  # payload에서 room_id 사용
+
+        # 로깅을 위한 기본 정보
+        current_work_id_for_log = work_id_str_from_payload or "N/A_NewWorkflow"
+        extra_log = {"work_id": current_work_id_for_log, "target_status": target_status_from_payload,
+                     "user_id": user_id}
+        logger.info(f"WorkflowController.process_chat 시작. 사용자 메시지: '{chat_message or '[메시지 없음]'}'.", extra=extra_log)
+
+        if not target_status_from_payload:
+            logger.error("페이로드에 `target_status`가 누락되었습니다. 처리를 중단합니다.", extra=extra_log)  #
+            # 이 경우 DB에 오류 상태를 기록할 방법이 마땅치 않음 (work_id 불명확)
+            return
+
+        state: Optional[WorkflowState] = None  # 현재 처리 중인 상태 객체
+
+        try:
+            # 1. 상태 로드 또는 신규 생성
+            if work_id_str_from_payload:
+                state = await self._load_state(work_id_str_from_payload)  #
+                current_work_id_for_log = work_id_str_from_payload  # 로깅용 ID 업데이트
+
+            # 새 워크플로우 시작 조건 (예: target_status가 초기 단계이고, work_id가 없거나, 상태 로드 실패 시)
+            if not state and target_status_from_payload == INITIAL_PROCESSING_TARGET and chat_message:  #
+                new_work_id = str(uuid.uuid4())  #
+                current_work_id_for_log = new_work_id  # 로깅용 ID 업데이트
+                logger.info(f"새 워크플로우 시작. 생성된 WorkID: {new_work_id}", extra={**extra_log, "work_id": new_work_id})  #
+                state = WorkflowState(
+                    query=QuerySection(original_query=chat_message),  #
+                    meta=MetaSection(work_id=new_work_id),  # work_id만 설정, timestamp/workflow_status는 Pydantic 기본값
+                    config=ConfigSection(config={"room_id": int(room_id_from_payload) if room_id_from_payload else 0,  #
+                                                 "writer_id": user_id})  # room_id, writer_id 설정
+                )
+                # 초기 상태는 DB에 바로 저장하지 않고, 첫 노드 실행 후 저장 (또는 여기서 저장도 가능)
+            elif not state:
+                logger.error(
+                    f"상태를 로드할 수 없고, 새 워크플로우 시작 조건도 만족하지 않습니다 (WorkID: {work_id_str_from_payload}, Target: {target_status_from_payload}). 처리를 중단합니다.",
+                    #
+                    extra=extra_log)
+                return
+
+            # 2. (선택적) 채팅 메시지 기반 기타 상태 수정 (INITIAL_PROCESSING_TARGET가 아니고, chat_message가 있는 경우)
+            # INITIAL_PROCESSING_TARGET 재시도 시 original_query 변경은 _prepare_for_retry에서 처리함.
+            if chat_message and target_status_from_payload != INITIAL_PROCESSING_TARGET:  #
+                state = await self._apply_chat_modifications_llm(state, chat_message)  #
+
+            # 3. 재시도 또는 다음 단계 실행을 위한 상태 준비
+            chat_message_for_current_retry = None
+            if target_status_from_payload == INITIAL_PROCESSING_TARGET and chat_message:
+                # 새 워크플로우 생성 시에는 chat_message가 original_query로 이미 사용되었지만,
+                # 기존 워크플로우 재실행 시에는 _prepare_for_retry에 chat_message를 전달하여 original_query를 갱신.
+                chat_message_for_current_retry = chat_message
+
+            state = self._prepare_for_retry(state, target_status_from_payload,
+                                            chat_message_for_current_retry)  # chat_message 전달
+
+            # 4. LangGraph 워크플로우 실행
+            if target_status_from_payload.upper() != "PAUSE":  # "PAUSE" 명령이 아닌 경우
+                state.meta.next_action = target_status_from_payload  # 라우터가 사용할 다음 액션 설정
+                state = await self._run_graph(state, state.meta.work_id)  # type: ignore # work_id는 반드시 존재
+            else:  # "PAUSE" 명령인 경우
+                # 'PAUSE' 상태는 명시적으로 workflow_status 딕셔너리에 기록하거나,
+                # 컨트롤러 레벨에서 별도 처리. 여기서는 단순히 로깅.
+                logger.info(f"워크플로우 일시 중지 요청됨 (WorkID: {state.meta.work_id}).", extra=extra_log)  #
+                state.scratchpad["last_user_command"] = "PAUSE"  #
+                # workflow_status에 특정 노드 상태를 PAUSED로 할 필요는 없을 수 있음.
+                # 대신, 다음 요청이 오기 전까지 이 상태가 유지됨.
+
+            # 5. (선택적) API 응답 생성 및 상태에 임시 저장 (실제 API 응답은 다른 메커니즘으로 전달될 수 있음)
+            response_for_api = self._generate_response_message(state, target_status_from_payload)  #
+            # state.meta.last_response_message = response_for_api # MetaSection에 필드가 없다면 scratchpad 사용
+            state.scratchpad["last_api_response_suggestion"] = response_for_api  #
+            logger.info(f"생성된 API 응답 제안: {response_for_api}", extra=extra_log)  #
+
+            # 6. 최종 상태 DB에 저장
+            await self._save_state(state)  #
+            logger.info(f"최종 상태가 DB에 성공적으로 저장되었습니다 (WorkID: {state.meta.work_id}).", extra=extra_log)  #
+
+        except Exception as e:
+            critical_error_msg = f"WorkflowController.process_chat에서 치명적 오류 발생: {e}"
+            logger.exception(critical_error_msg, extra=extra_log)  #
+            # 치명적 오류 발생 시에도, 'state' 객체가 존재하면 오류 상태를 DB에 기록 시도
+            if state and state.meta and state.meta.work_id:  # state와 work_id가 있어야 기록 가능
+                try:
+                    # workflow_status 딕셔너리를 직접 수정하는 대신, scratchpad에 오류 기록
+                    state.scratchpad["critical_controller_error"] = f"Controller Error: {str(e)[:1000]}"  #
+                    # 이 경우, DB에 저장되는 'overall_status'는 마지막 유효 상태 또는 FAILED가 될 수 있음.
+                    # _save_state에서 current_overall_status 결정 로직에 따라 달라짐.
+                    await self._save_state(state)  # 오류 상태 저장 시도
+                    logger.warning(f"치명적 오류 발생 후 부분적 상태 저장 시도됨 (WorkID: {state.meta.work_id}).", extra=extra_log)  #
+                except Exception as save_e:
+                    logger.error(
+                        f"치명적 오류 상태 DB 저장 실패 (WorkID: {state.meta.work_id if state.meta else 'N/A'}): {save_e}",  #
+                        extra=extra_log)
+            # 이 함수는 API 응답을 반환하지 않으므로, 오류는 로깅으로만 처리.
+            # Background task이므로, 호출부에 직접 예외를 전파하지 않음.
