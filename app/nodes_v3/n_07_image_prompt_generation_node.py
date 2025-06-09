@@ -182,50 +182,59 @@ class N07ImagePromptGenerationNode:
             return None
 
     def _build_prompt_conversion_prompt(self, concept: ImageConcept) -> str:
-        return f"""You are a professional prompt engineer for advanced text-to-image models like Stable Diffusion XL (SDXL).
-            Your task is to convert a detailed visual concept into a high-quality, effective English prompt.
-            [VISUAL CONCEPT TO CONVERT]
-            - Narrative Step (Korean): "{concept.narrative_step}"
-            - Concept Description (Korean): "{concept.concept_description}"
-            - Caption (Korean): "{concept.caption}"
-            [TASK INSTRUCTIONS]
-            1.  Read the Korean concept description and caption to fully understand the scene, mood, and message.
-            2.  Translate and expand this concept into a detailed, comma-separated English prompt for SDXL.
-            3.  The prompt must include keywords for:
-                - Subject & Composition
-                - Action & Emotion
-                - Environment & Background
-                - Art Style & Lighting
-            4.  Create a standard `negative_prompt` to prevent common image flaws.
-            [JSON OUTPUT FORMAT]
-            Your response MUST be ONLY a JSON object with two keys: "prompt" and "negative_prompt".
-            Example:
-            {{
-              "prompt": "masterpiece, best quality, cinematic digital painting of a middle-aged Korean cafe owner, head in hands, desperate expression, sitting at a wooden table in a dimly lit cafe at night, piles of bills with red text scattered on the table, dramatic shadows, moody, emotional",
-              "negative_prompt": "text, watermark, signature, ugly, deformed, blurry, extra limbs, poorly drawn hands"
-            }}
-            Now, generate the JSON for the provided visual concept.
-        """
+        return f"""
+You are an expert Flux Dev–style image-prompt engineer.
+
+Create a single fluent English sentence to visualize the scene for Flux Dev based on the details below.
+
+**Requirements:**
+1. Composition: Specify subject placement (foreground, midground, background).
+2. Details: Describe color, lighting, texture, props, and mood.
+3. Fluent Prose: Use one or two short English sentences with descriptive clauses (e.g., "with ...").
+4. Few-Shot Examples: Provide prompt examples only; negative_prompt examples are not required here.
+5. Negative Prompt: After the prompt, generate a **short list of 5 words or phrases** to avoid common flaws (e.g., "text, watermark, blurry, deformed, extra limbs").
+6. Output only a JSON object with keys "prompt" and "negative_prompt".
+
+**Examples:**
+- "A single tree stands in the center, its left half lush green under a bright sunlit sky and its right half frosted bare under a stormy, thunderous backdrop."
+- "In the foreground, a vintage car with a 'CLASSIC' license plate sits on cobblestone, behind it a bustling market of colorful awnings, and in the distance the silhouette of an ancient castle shrouded in mist."
+
+[VISUAL CONCEPT TO CONVERT]
+- Narrative Step (Korean): "{concept.narrative_step}"
+- Concept Description (Korean): "{concept.concept_description}"
+- Caption (Korean): "{concept.caption}"
+
+Now generate only the JSON:
+{{
+  "prompt": "<Flux Dev–style English sentence>",
+  "negative_prompt": "<Short English phrase describing what to avoid>"
+}}
+"""
 
     async def _revise_single_prompt(self, prompt_item: ImagePromptItemPydantic, concept: ImageConcept, feedback: str,
                                     work_id: str) -> ImagePromptItemPydantic:
-        prompt_for_llm = f"""You are a prompt engineer revising a prompt for an SDXL model.
-            [Original Visual Concept]
-            - Narrative Step: {concept.narrative_step}
-            - Description: {concept.concept_description}
-            - Caption: {concept.caption}
-            [Original Prompt to Revise]
-            - "prompt": "{prompt_item.prompt}"
-            - "negative_prompt": "{prompt_item.negative_prompt}"
-            [User's Revision Request (Korean)]
-            "{feedback}"
-            [TASK]
-            Revise the [Original Prompt to Revise] based on the user's feedback, while still respecting the [Original Visual Concept].
-            Your response MUST be ONLY a JSON object with "prompt" and "negative_prompt" keys.
-        """
+        prompt_for_llm = f"""
+You are an expert Flux Dev–style prompt engineer revising an existing prompt.
+
+[Original Visual Concept]
+- Narrative Step: {concept.narrative_step}
+- Description: {concept.concept_description}
+- Caption: {concept.caption}
+
+[Original Prompt]
+- prompt: "{prompt_item.prompt}"
+- negative_prompt: "{prompt_item.negative_prompt}"
+
+[User Feedback (Korean)]
+"{feedback}"
+
+Revise the prompt and negative_prompt into fluent Flux Dev–style English sentences.
+Output ONLY a JSON object with keys "prompt" and "negative_prompt".
+"""
         try:
-            response = await self.llm.generate_text(messages=[{"role": "user", "content": prompt_for_llm}],
-                                                    request_id=f"revise-prompt-{work_id}", temperature=0.5)
+            response = await self.llm.generate_text(
+                messages=[{"role": "user", "content": prompt_for_llm}],
+                request_id=f"revise-prompt-{work_id}", temperature=0.5)
             json_string = response.get("generated_text", "{}").strip()
             if json_string.startswith("```json"): json_string = json_string[7:-3].strip()
             revised_data = json.loads(json_string)
