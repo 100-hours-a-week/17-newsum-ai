@@ -94,7 +94,7 @@ class N08QueueForImageGenerationNode:
         """
         # RETURNING 절은 삽입된 행의 특정 컬럼 값을 반환하도록 지시합니다.
         query = """
-            INSERT INTO image_generation_queue (work_id, persona_id, report_text, image_prompts)
+            INSERT INTO ai_test_image_generation_queue (work_id, persona_id, report_text, image_prompts)
             VALUES ($1, $2, $3, $4)
             RETURNING job_id;
         """
