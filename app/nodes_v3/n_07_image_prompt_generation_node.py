@@ -25,7 +25,7 @@ LLM_TIMEOUT_SEC: int = 60  # 의도 분류 함수에서 사용할 타임아웃
 
 class N07ImagePromptGenerationNode:
     """
-    LangGraph 비동기 노드 – 이미지 콘셉트를 SDXL 프롬프트로 변환하고 사용자와 상호작용하여 확정합니다. (n_07)
+    LangGraph 비동기 노드 – 이미지 콘셉트를 Flux Dev 프롬프트로 변환하고 사용자와 상호작용하여 확정합니다. (n_07)
     """
 
     def __init__(self, llm_service: LLMService, redis_client: DatabaseClient):
@@ -48,120 +48,43 @@ class N07ImagePromptGenerationNode:
             self.logger.error(f"N07 State 유효성 검사 실패: {e}", extra=log_extra)
             return current_state_dict
 
-        if not node_state.prompt_candidates and not node_state.is_ready:
-            self.logger.info("초기 실행 단계: 4개 이미지 프롬프트 생성 시작.", extra=log_extra)
+        # 1. 썸네일/4컷 프롬프트 생성 및 저장 (분리)
+        if not node_state.prompt_candidates and not node_state.thumbnail_prompt_candidate and not node_state.is_ready:
+            # 썸네일 프롬프트 생성
+            final_thumbnail = workflow_state.image_concept.final_thumbnail
+            if final_thumbnail:
+                thumbnail_prompt = await self._convert_concept_to_prompt(final_thumbnail, work_id)
+                node_state.thumbnail_prompt_candidate = thumbnail_prompt
+            # 4컷 프롬프트 생성
             final_concepts = workflow_state.image_concept.final_concepts
-            if final_concepts and workflow_state.image_concept.is_ready:
-                prompts = await self._run_initial_prompt_generation(final_concepts, work_id)
-                node_state.prompt_candidates = prompts
-                node_state.question = self._formulate_choice_question(prompts)
-            else:
-                node_state.error_message = "참조할 최종 확정 콘셉트가 없습니다."
+            if final_concepts:
+                prompt_tasks = [self._convert_concept_to_prompt(concept, work_id) for concept in final_concepts]
+                prompt_candidates = await asyncio.gather(*prompt_tasks)
+                node_state.prompt_candidates = [p for p in prompt_candidates if p]
 
-        elif node_state.question and user_response:
-            self.logger.info("사용자 프롬프트 피드백 처리 시작.", extra=log_extra)
-            await self._process_user_feedback(node_state, user_response, workflow_state.image_concept.final_concepts,
-                                              work_id)
+        # 2. 피드백/수정 루프 (통합 피드백 처리)
+        if node_state.question and user_response:
+            await self._process_prompts_and_thumbnail_feedback(node_state, user_response, work_id)
+
+        # 3. 질문 메시지 생성(썸네일+4컷 모두 포함)
+        if not node_state.question:
+            panel_text = self._formulate_choice_question(node_state.prompt_candidates)
+            thumbnail = node_state.thumbnail_prompt_candidate
+            if thumbnail:
+                thumbnail_text = (
+                    f"\n\n---\n\n"
+                    f"### 썸네일 프롬프트\n"
+                    f"- prompt: {thumbnail.prompt}\n"
+                    f"- negative_prompt: {thumbnail.negative_prompt}"
+                )
+            else:
+                thumbnail_text = ""
+            node_state.question = f"아래는 4컷 프롬프트와 썸네일 프롬프트입니다.\n{panel_text}{thumbnail_text}\n\n각 항목에 대해 수정/확정/재생성 의견을 말씀해 주세요."
 
         workflow_state.image_prompts = node_state
         return await self._finalize_and_save_state(workflow_state, log_extra)
 
-    # --- 핵심 수정: 피드백 처리 로직 ---
-    async def _process_user_feedback(self, node_state: ImagePromptsPydanticState, user_response: str,
-                                     concepts: List[ImageConcept], work_id: str):
-        """사용자 피드백을 분류하고 프롬프트를 수정, 재생성 또는 확정합니다."""
-        # 개선된 LLM 기반 의도 분류 함수 호출
-        intent = await self._classify_user_response_intent(user_response, work_id)
-        self.logger.info(f"사용자 프롬프트 피드백 의도 분류 결과: {intent}", extra={"work_id": work_id})
-
-        if intent == 'CO':
-            node_state.panels = node_state.prompt_candidates
-            node_state.is_ready = True
-            node_state.question = None
-            self.logger.info("사용자가 모든 프롬프트를 최종 확정했습니다.", extra={"work_id": work_id})
-
-        elif intent == 'RG':
-            self.logger.info("사용자가 새로운 프롬프트 세트 재생성을 요청했습니다.", extra={"work_id": work_id})
-            new_prompts = await self._run_initial_prompt_generation(concepts, work_id)
-            node_state.prompt_candidates = new_prompts
-            node_state.question = self._formulate_choice_question(new_prompts, "\n\n**[알림] 요청에 따라 프롬프트를 다시 생성했습니다.**")
-
-        elif intent == 'RE':
-            # LLM 기반 분류기를 사용하므로, 이제 '전체 수정' 요청도 더 잘 처리할 수 있습니다.
-            # 코드는 이전과 동일하게 유지하되, 분류기의 성능 향상으로 더 정확하게 동작합니다.
-            match = re.search(r"(\d+)\s*번", user_response)
-            if match:  # 특정 프롬프트 수정
-                try:
-                    choice_index = int(match.group(1)) - 1
-                    original_prompt_item = node_state.prompt_candidates[choice_index]
-                    original_concept = concepts[choice_index]
-                    revised_prompt = await self._revise_single_prompt(original_prompt_item, original_concept,
-                                                                      user_response, work_id)
-                    node_state.prompt_candidates[choice_index] = revised_prompt
-                    node_state.question = self._formulate_choice_question(node_state.prompt_candidates,
-                                                                          f"\n\n**[알림] {choice_index + 1}번 프롬프트가 수정되었습니다.**")
-                except (ValueError, IndexError):
-                    node_state.question = "잘못된 번호를 언급하셨습니다. 다시 확인해주세요."
-            else:  # 전반적인 프롬프트 수정
-                # 전반적인 수정 요청은 아직 지원하지 않는다는 메시지 유지 또는 전체 수정 로직 추가
-                self.logger.warning("전반적인 프롬프트 수정 요청은 아직 별도 로직이 없습니다. 번호 지정이 필요합니다.", extra={"work_id": work_id})
-                node_state.question = "전체 프롬프트를 한 번에 수정하는 것은 현재 지원되지 않습니다. 수정하고 싶은 프롬프트의 번호를 지정하여 한 번에 하나씩 수정해주세요. (예: 1번 프롬프트를 더 밝게)"
-
-        else:  # 'UN'
-            node_state.question = "답변의 의도가 명확하지 않습니다. 현재 프롬프트를 '확정'할까요, 특정 부분을 '수정'할까요, 아니면 '새로 생성'할까요?"
-
-    # --- 교체된 함수: _classify_user_response_intent ---
-    async def _classify_user_response_intent(self, user_answer: str, work_id: str) -> str:
-        """사용자 피드백 의도를 'CO'(확정), 'RE'(수정), 'RG'(재생성), 'UN'(불명확)으로 분류합니다."""
-        prompt_sys = (
-            "Your critical task is to classify a user's Korean feedback into one of four categories: 'CO', 'RE', 'RG', or 'UN'.\n"
-            "1. 'CO' (Confirm): User is satisfied and agrees to proceed. (e.g., '네 좋아요', '이대로 진행해주세요', '확정')\n"
-            "2. 'RE' (Revise): User wants specific modifications to the current proposals. (e.g., '2번을 좀 더 어둡게 바꿔주세요', '대사를 수정해주세요')\n"
-            "3. 'RG' (Regenerate): User is dissatisfied and wants a completely new set. (e.g., '새로 생성', '다시생성', '다 별로네요, 새로 만들어주세요', '다른 콘셉트는 없나요?')\n"
-            "4. 'UN' (Unclear): The user's intent is ambiguous.\n\n"
-            "**RESPONSE INSTRUCTIONS:**\n"
-            "- Your response MUST BE ONLY ONE of these exact English strings: 'CO', 'RE', 'RG', or 'UN'.\n"
-            "- DO NOT include any other text or explanations."
-        )
-        prompt_user = (f"[User's Feedback (Korean)]\n{user_answer}\n\nClassify the intent:")
-        messages = [{"role": "system", "content": prompt_sys}, {"role": "user", "content": prompt_user}]
-
-        valid_labels = ["CO", "RE", "RG", "UN"]
-        try:
-            resp = await self.llm.generate_text(
-                messages=messages,
-                request_id=f"intent-classify-v3-{work_id}",
-                max_tokens=50,
-                temperature=0.0,
-                timeout=LLM_TIMEOUT_SEC / 4
-            )
-            raw_classification = resp.get("generated_text", "").strip().upper()
-
-            if raw_classification in valid_labels:
-                return raw_classification
-            else:
-                for label in valid_labels:
-                    if label in raw_classification:
-                        self.logger.warning(f"의도 분류 시 라벨 외 텍스트 포함: '{raw_classification}'. '{label}'로 처리.",
-                                            extra={"work_id": work_id})
-                        return label
-                self.logger.error(f"의도 분류 결과가 유효 라벨 미포함: '{raw_classification}'. 'UN'으로 처리.",
-                                  extra={"work_id": work_id})
-                return "UN"
-        except Exception as e:
-            self.logger.error(f"LLM 의도 분류 중 오류: {e}", exc_info=True, extra={"work_id": work_id})
-            return "UN"
-
-    # --- 나머지 헬퍼 함수들은 이전 답변과 동일하게 유지됩니다 ---
-    # ... ( _run_initial_prompt_generation, _convert_concept_to_prompt, _revise_single_prompt, _formulate_choice_question 등) ...
-    async def _run_initial_prompt_generation(self, concepts: List[ImageConcept], work_id: str) -> List[
-        ImagePromptItemPydantic]:
-        prompt_tasks = [self._convert_concept_to_prompt(concept, work_id) for concept in concepts]
-        generated_prompts = await asyncio.gather(*prompt_tasks)
-        return [prompt for prompt in generated_prompts if prompt]
-
-    async def _convert_concept_to_prompt(self, concept: ImageConcept, work_id: str) -> Optional[
-        ImagePromptItemPydantic]:
+    async def _convert_concept_to_prompt(self, concept: ImageConcept, work_id: str) -> Optional[ImagePromptItemPydantic]:
         prompt_for_llm = self._build_prompt_conversion_prompt(concept)
         try:
             response = await self.llm.generate_text(
@@ -172,11 +95,11 @@ class N07ImagePromptGenerationNode:
             json_string = response.get("generated_text", "{}").strip()
             if json_string.startswith("```json"): json_string = json_string[7:-3].strip()
             prompt_data = json.loads(json_string)
-
             return ImagePromptItemPydantic(
                 panel_id=concept.panel_id,
                 prompt=prompt_data.get("prompt", ""),
-                negative_prompt=prompt_data.get("negative_prompt", "text, watermark, ugly, deformed, blurry"))
+                negative_prompt=prompt_data.get("negative_prompt", "text, watermark, ugly, deformed, blurry")
+            )
         except Exception as e:
             self.logger.error(f"{concept.panel_id}번 패널 프롬프트 변환 중 오류: {e}", extra={"work_id": work_id})
             return None
@@ -211,51 +134,91 @@ Now generate only the JSON:
 }}
 """
 
-    async def _revise_single_prompt(self, prompt_item: ImagePromptItemPydantic, concept: ImageConcept, feedback: str,
-                                    work_id: str) -> ImagePromptItemPydantic:
-        prompt_for_llm = f"""
-You are an expert Flux Dev–style prompt engineer revising an existing prompt.
+    async def _process_prompts_and_thumbnail_feedback(self, node_state: ImagePromptsPydanticState, user_response: str, work_id: str):
+        """
+        사용자 피드백이 썸네일/패널/전체 중 어디에 대한 것인지 LLM이 판단하여 해당 부분만 수정/재생성/확정하는 통합 피드백 처리 함수
+        """
+        # 통합 intent 분류 프롬프트
+        prompt = f"""
+You are an expert image prompt engineer. The user has provided feedback after seeing both a 4-panel set of prompts and a thumbnail prompt. Your job is to:
+1. Classify the feedback as targeting (a) the thumbnail, (b) one of the 4 panels, or (c) all/overall.
+2. For each target, determine if the user wants to confirm (CO), revise (RE), regenerate (RG), or if the intent is unclear (UN).
+3. Apply the user's feedback to the correct part(s) and return the updated prompts.
 
-[Original Visual Concept]
-- Narrative Step: {concept.narrative_step}
-- Description: {concept.concept_description}
-- Caption: {concept.caption}
+[Current Prompts]
+- Thumbnail:
+  - panel_id: 0
+  - prompt: {node_state.thumbnail_prompt_candidate.prompt if node_state.thumbnail_prompt_candidate else ''}
+  - negative_prompt: {node_state.thumbnail_prompt_candidate.negative_prompt if node_state.thumbnail_prompt_candidate else ''}
+- Panels:
+"""
+        for p in node_state.prompt_candidates:
+            prompt += f"  - panel_id: {p.panel_id}\n    prompt: {p.prompt}\n    negative_prompt: {p.negative_prompt}\n"
+        prompt += f"""
 
-[Original Prompt]
-- prompt: "{prompt_item.prompt}"
-- negative_prompt: "{prompt_item.negative_prompt}"
+[User's Feedback (Korean)]
+{user_response}
 
-[User Feedback (Korean)]
-"{feedback}"
-
-Revise the prompt and negative_prompt into fluent Flux Dev–style English sentences.
-Output ONLY a JSON object with keys "prompt" and "negative_prompt".
+[INSTRUCTIONS]
+- You MUST return a JSON object with these keys:
+  - 'thumbnail': the updated thumbnail prompt (or null if unchanged). This MUST be a JSON object, not a string.
+  - 'panels': a list of 4 updated panel prompts (or null if unchanged). This MUST be a list of JSON objects, not a list of strings.
+  - 'finalize': true if the user confirmed all, false otherwise
+  - 'clarification_needed': true if the intent was unclear, false otherwise
+  - 'clarification_message': (if clarification_needed) a Korean message to ask the user
+- DO NOT return any value as a string. All values must be JSON objects or lists as specified.
+- Example of correct output:
+{
+  "thumbnail": {"panel_id": 0, "prompt": "...", "negative_prompt": "..."},
+  "panels": [
+    {"panel_id": 1, "prompt": "...", "negative_prompt": "..."},
+    {"panel_id": 2, "prompt": "...", "negative_prompt": "..."},
+    {"panel_id": 3, "prompt": "...", "negative_prompt": "..."},
+    {"panel_id": 4, "prompt": "...", "negative_prompt": "..."}
+  ],
+  "finalize": true,
+  "clarification_needed": false,
+  "clarification_message": ""
+}
+- Do NOT return any value as a string (e.g., "thumbnail": "some string" is NOT allowed).
 """
         try:
             response = await self.llm.generate_text(
-                messages=[{"role": "user", "content": prompt_for_llm}],
-                request_id=f"revise-prompt-{work_id}", temperature=0.5)
+                messages=[{"role": "user", "content": prompt}],
+                request_id=f"prompts-thumbnail-feedback-{work_id}",
+                max_tokens=3000,
+                temperature=0.7
+            )
             json_string = response.get("generated_text", "{}").strip()
             if json_string.startswith("```json"): json_string = json_string[7:-3].strip()
-            revised_data = json.loads(json_string)
-            prompt_item.prompt = revised_data.get("prompt", prompt_item.prompt)
-            prompt_item.negative_prompt = revised_data.get("negative_prompt", prompt_item.negative_prompt)
-            return prompt_item
+            data = json.loads(json_string)
+            # 썸네일 처리
+            if data.get('thumbnail'):
+                node_state.thumbnail_prompt_candidate = ImagePromptItemPydantic(**data['thumbnail'])
+            # 패널 처리
+            if data.get('panels'):
+                node_state.prompt_candidates = [ImagePromptItemPydantic(**p) for p in data['panels']]
+            # 확정 처리
+            if data.get('finalize'):
+                node_state.thumbnail_prompt = node_state.thumbnail_prompt_candidate
+                node_state.panels = node_state.prompt_candidates
+                node_state.is_ready = True
+                node_state.question = None
+            # 추가 질문
+            elif data.get('clarification_needed'):
+                node_state.question = data.get('clarification_message', '답변의 의도가 명확하지 않습니다. 어떤 부분을 수정/확정/재생성할지 구체적으로 말씀해 주세요.')
         except Exception as e:
-            self.logger.error(f"프롬프트 수정 중 오류: {e}", extra={"work_id": work_id})
-            return prompt_item
+            self.logger.error(f"통합 프롬프트 피드백 처리 중 오류: {e}", extra={"work_id": work_id})
+            node_state.question = "피드백 처리 중 오류가 발생했습니다. 다시 시도해 주세요."
 
     def _formulate_choice_question(self, prompts: List[ImagePromptItemPydantic], prefix_message: str = "") -> str:
         options_text = "\n\n".join(
-            [f"### {p.panel_id}번 프롬프트\n**Prompt:** `{p.prompt}`\n**Negative Prompt:** `{p.negative_prompt}`" for p in
-             prompts]
+            [f"### {p.panel_id}번 프롬프트\n**Prompt:** `{p.prompt}`\n**Negative Prompt:** `{p.negative_prompt}`" for p in prompts]
         )
         return (
             f"{prefix_message}\n\n"
             "이미지 생성을 위해 다음과 같이 4개의 프롬프트를 만들었습니다.\n\n"
-            f"{options_text}\n\n"
-            "이 프롬프트들에 대해 어떻게 생각하시나요? 특정 번호를 골라 수정하거나, 의견을 말씀해주세요. "
-            "마음에 드신다면 '이대로 진행', 전체를 새로 만들고 싶다면 '새로 생성'이라고 알려주세요."
+            f"{options_text}\n"
         )
 
     async def _finalize_and_save_state(self, workflow_state: OverallWorkflowState, log_extra: Dict) -> Dict[str, Any]:

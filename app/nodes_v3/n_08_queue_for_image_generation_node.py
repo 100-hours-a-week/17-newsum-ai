@@ -1,6 +1,7 @@
 # app/nodes_v3/n_08_queue_for_image_generation_node.py
 
 import json
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from pydantic import ValidationError
@@ -17,6 +18,7 @@ from app.workflows.state_v3 import (
 
 # --- 로거 설정 ---
 logger = get_logger("n_08_QueueForImageGenerationNode")
+FIXED_TIME = datetime(2025, 6, 10, 15, 0, tzinfo=timezone.utc)
 
 
 class N08QueueForImageGenerationNode:
@@ -61,11 +63,24 @@ class N08QueueForImageGenerationNode:
 
         # --- DB에 저장할 데이터 추출 ---
         try:
+            # 썸네일(0번) + 4컷(1~4번) 프롬프트 합치기
+            all_prompts = []
+            thumbnail = image_prompts_state.thumbnail_prompt
+            panels = image_prompts_state.panels
+            if thumbnail:
+                all_prompts.append(thumbnail)
+            all_prompts.extend(panels)
+            # title, panel_descriptions 추출
+            title = image_concept_state.final_thumbnail.caption if image_concept_state.final_thumbnail else None
+            panel_descriptions = [c.caption for c in image_concept_state.final_concepts] if image_concept_state.final_concepts else []
             job_data = {
                 "work_id": work_id,
                 "persona_id": persona_analysis_state.selected_opinion.persona_id,
                 "report_text": report_draft_state.draft,
-                "image_prompts": [p.model_dump() for p in image_prompts_state.panels]
+                "title": title,
+                "panel_descriptions": panel_descriptions,
+                "image_prompts": [p.model_dump() for p in all_prompts],
+                "scheduled_at": FIXED_TIME
             }
         except AttributeError as e:
             error_msg = f"DB에 저장할 데이터를 추출하는 중 필요한 값이 없습니다: {e}"
@@ -87,26 +102,21 @@ class N08QueueForImageGenerationNode:
         workflow_state.insert_image_queue = node_state
         return await self._finalize_and_save_state(workflow_state, log_extra)
 
-    async def _queue_image_generation_job(self, work_id: str, persona_id: str, report_text: str,
-                                          image_prompts: List[Dict]) -> Optional[int]:
+    async def _queue_image_generation_job(self, work_id: str, persona_id: str, report_text: str, title: str, panel_descriptions: list, image_prompts: list, scheduled_at: str) -> Optional[int]:
         """
         이미지 생성에 필요한 모든 데이터를 DB 테이블에 'pending' 상태로 삽입합니다.
         """
         # RETURNING 절은 삽입된 행의 특정 컬럼 값을 반환하도록 지시합니다.
         query = """
-            INSERT INTO ai_test_image_generation_queue (work_id, persona_id, report_text, image_prompts)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO ai_test_image_generation_queue (work_id, persona_id, report_text, title, panel_descriptions, image_prompts, scheduled_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             RETURNING job_id;
         """
         # image_prompts 리스트를 JSON 문자열로 변환
         image_prompts_json = json.dumps(image_prompts, ensure_ascii=False)
-
+        panel_descriptions_json = json.dumps(panel_descriptions, ensure_ascii=False)
         try:
-            # --- 핵심 수정 ---
-            # 존재하지 않는 fetch_val 대신, 한 행을 딕셔너리로 가져오는 fetch_one 메서드를 사용합니다.
-            record = await self.db.fetch_one(query, work_id, persona_id, report_text, image_prompts_json)
-
-            # fetch_one은 행 전체를 반환하므로 (예: {'job_id': 1}), 'job_id' 키로 값을 추출합니다.
+            record = await self.db.fetch_one(query, work_id, persona_id, report_text, title, panel_descriptions_json, image_prompts_json, scheduled_at)
             if record and 'job_id' in record:
                 job_id = record['job_id']
                 self.logger.info(f"DB에서 반환된 Job ID: {job_id}", extra={"work_id": work_id})
@@ -114,7 +124,6 @@ class N08QueueForImageGenerationNode:
             else:
                 self.logger.error("DB INSERT 후 job_id를 반환받지 못했습니다.", extra={"work_id": work_id})
                 return None
-
         except Exception as e:
             self.logger.error(f"DB 작업 큐 삽입 중 오류 발생: {e}", exc_info=True, extra={"work_id": work_id})
             return None
