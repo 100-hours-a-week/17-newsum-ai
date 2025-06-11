@@ -70,6 +70,8 @@ class N08QueueForImageGenerationNode:
             if thumbnail:
                 all_prompts.append(thumbnail)
             all_prompts.extend(panels)
+            # image_concept_state 정의 추가
+            image_concept_state = workflow_state.image_concept
             # title, panel_descriptions 추출
             title = image_concept_state.final_thumbnail.caption if image_concept_state.final_thumbnail else None
             panel_descriptions = [c.caption for c in image_concept_state.final_concepts] if image_concept_state.final_concepts else []

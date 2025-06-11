@@ -154,7 +154,8 @@ You are an expert image prompt engineer. The user has provided feedback after se
 """
         for p in node_state.prompt_candidates:
             prompt += f"  - panel_id: {p.panel_id}\n    prompt: {p.prompt}\n    negative_prompt: {p.negative_prompt}\n"
-        prompt += f"""
+        prompt += (
+            f"""
 
 [User's Feedback (Korean)]
 {user_response}
@@ -168,20 +169,21 @@ You are an expert image prompt engineer. The user has provided feedback after se
   - 'clarification_message': (if clarification_needed) a Korean message to ask the user
 - DO NOT return any value as a string. All values must be JSON objects or lists as specified.
 - Example of correct output:
-{
-  "thumbnail": {"panel_id": 0, "prompt": "...", "negative_prompt": "..."},
+{{
+  "thumbnail": {{"panel_id": 0, "prompt": "...", "negative_prompt": "..."}},
   "panels": [
-    {"panel_id": 1, "prompt": "...", "negative_prompt": "..."},
-    {"panel_id": 2, "prompt": "...", "negative_prompt": "..."},
-    {"panel_id": 3, "prompt": "...", "negative_prompt": "..."},
-    {"panel_id": 4, "prompt": "...", "negative_prompt": "..."}
+    {{"panel_id": 1, "prompt": "...", "negative_prompt": "..."}},
+    {{"panel_id": 2, "prompt": "...", "negative_prompt": "..."}},
+    {{"panel_id": 3, "prompt": "...", "negative_prompt": "..."}},
+    {{"panel_id": 4, "prompt": "...", "negative_prompt": "..."}}
   ],
   "finalize": true,
   "clarification_needed": false,
   "clarification_message": ""
-}
+}}
 - Do NOT return any value as a string (e.g., "thumbnail": "some string" is NOT allowed).
 """
+        )
         try:
             response = await self.llm.generate_text(
                 messages=[{"role": "user", "content": prompt}],
