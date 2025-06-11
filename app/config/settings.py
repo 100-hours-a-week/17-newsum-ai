@@ -75,6 +75,7 @@ class Settings(BaseSettings):
     SECRET_KEY: Optional[str] = Field(None) 
     LOCAL_STORAGE_PATH: str = Field("local_storage_path") 
     S3_STORAGE_PATH: str = Field("s3_storage_path") 
+    CLOUDFRONT_ROOT_URL: Optional[str] = Field("cloudfront_root_url")
 
     # --- 이미지 생성 서비스 ---
     IMAGE_SERVER_URL: Optional[AnyHttpUrl] = Field(None) 
