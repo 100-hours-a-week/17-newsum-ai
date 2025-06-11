@@ -4,9 +4,7 @@ import asyncio
 import random
 import time
 import re
-import traceback # 상세 오류 로깅용
 from typing import Dict, Any, Optional
-from urllib.parse import urlparse
 
 # Selenium 및 관련 라이브러리 동적 임포트
 SELENIUM_AVAILABLE = False
@@ -49,24 +47,51 @@ class SeleniumScraperTool:
     # USER_AGENTS = settings.USER_AGENT_LIST or [settings.SCRAPER_USER_AGENT]
 
     def __init__(self):
-        """SeleniumScraperTool 초기화."""
-        self.grid_url = settings.SELENIUM_GRID_URL
-        self.is_headless = settings.SELENIUM_HEADLESS
-        self.use_proxy = settings.SCRAPER_USE_PROXY
-        self.proxy_url = settings.SCRAPER_PROXY_URL
-        self.rotate_ua = settings.SCRAPER_ROTATE_UA
-        self.default_ua = settings.SCRAPER_USER_AGENT
-        self.min_delay_ms = settings.SCRAPER_MIN_DELAY_MS
-        self.max_delay_ms = settings.SCRAPER_MAX_DELAY_MS
-        self.min_text_length = settings.MIN_EXTRACTED_TEXT_LENGTH
-        self.retry_attempts = settings.SELENIUM_RETRY_ATTEMPTS
-        self.retry_wait = settings.SELENIUM_RETRY_WAIT_SECONDS
+        """
+        SeleniumScraperTool 초기화.
+        설정값이 없는 경우를 대비하여 안정적인 기본값을 할당합니다.
+        """
+        # --- 드라이버 및 연결 설정 ---
+        # 설정에 SELENIUM_GRID_URL이 없으면 기본값으로 None 할당
+        self.grid_url = getattr(settings, 'SELENIUM_GRID_URL', None)
+
+        # bool 값은 None과 비교하여 명확하게 처리
+        is_headless_setting = getattr(settings, 'SELENIUM_HEADLESS', None)
+        self.is_headless = True if is_headless_setting is None else is_headless_setting
+
+        use_proxy_setting = getattr(settings, 'SCRAPER_USE_PROXY', None)
+        self.use_proxy = False if use_proxy_setting is None else use_proxy_setting
+
+        self.proxy_url = getattr(settings, 'SCRAPER_PROXY_URL', None)
+
+        # --- 스크레이핑 동작 설정 ---
+        rotate_ua_setting = getattr(settings, 'SCRAPER_ROTATE_UA', None)
+        self.rotate_ua = True if rotate_ua_setting is None else rotate_ua_setting
+
+        # 설정값이 없거나 비어있으면, 'or'를 사용하여 기본값 할당
+        self.default_ua = getattr(settings, 'SCRAPER_USER_AGENT', None) or \
+                          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+
+        self.min_delay_ms = getattr(settings, 'SCRAPER_MIN_DELAY_MS', 1000)
+        self.max_delay_ms = getattr(settings, 'SCRAPER_MAX_DELAY_MS', 3000)
+        self.min_text_length = getattr(settings, 'MIN_EXTRACTED_TEXT_LENGTH', 150)
+
+        # --- 재시도 설정 ---
+        self.retry_attempts = getattr(settings, 'SELENIUM_RETRY_ATTEMPTS', 3)
+        self.retry_wait = getattr(settings, 'SELENIUM_RETRY_WAIT_SECONDS', 5)
+
+        # -- 이전 답변의 동적 할당 로직과 결합 (선택 사항) --
+        # self.proxy_list = getattr(settings, 'SCRAPER_PROXY_LIST', [])
+        # self.user_agent_list = getattr(settings, 'USER_AGENT_LIST', [self.default_ua])
+        #
+        # self.active_proxy = random.choice(self.proxy_list) if self.use_proxy and self.proxy_list else None
+        # self.active_ua = random.choice(self.user_agent_list) if self.rotate_ua and self.user_agent_list else self.default_ua
 
         self._driver: Optional[webdriver.Remote] = None # 드라이버 인스턴스 (Lazy init)
 
-    def _get_driver(self, trace_id: str, comic_id: str) -> Optional[webdriver.Remote]:
+    def _get_driver(self, work_id: str) -> Optional[webdriver.Remote]:
         """Selenium WebDriver 인스턴스를 가져오거나 초기화합니다."""
-        extra_log_data = {'trace_id': trace_id, 'comic_id': comic_id}
+        extra_log_data = {'work_id': work_id}
         if not SELENIUM_AVAILABLE:
             logger.error("Selenium 사용 불가 (라이브러리 미설치)", extra=extra_log_data)
             return None
@@ -82,7 +107,7 @@ class SeleniumScraperTool:
                   return self._driver
              except WebDriverException:
                   logger.warning("기존 Selenium 드라이버가 응답하지 않음. 새로 생성 시도.", extra=extra_log_data)
-                  self.quit_driver(trace_id, comic_id) # 기존 드라이버 종료
+                  self.quit_driver(work_id) # 기존 드라이버 종료
 
         logger.info("Selenium WebDriver 초기화 시도...", extra=extra_log_data)
         try:
@@ -134,9 +159,9 @@ class SeleniumScraperTool:
              self._driver = None
              return None
 
-    def quit_driver(self, trace_id: str, comic_id: str):
+    def quit_driver(self, work_id: str):
         """현재 WebDriver 인스턴스를 종료합니다."""
-        extra_log_data = {'trace_id': trace_id, 'comic_id': comic_id}
+        extra_log_data = {'work_id': work_id}
         if self._driver:
             logger.info("Selenium WebDriver 종료 중...", extra=extra_log_data)
             try:
@@ -147,16 +172,16 @@ class SeleniumScraperTool:
                 self._driver = None # 종료 후 None으로 설정
 
     @retry(
-        stop=stop_after_attempt(settings.SELENIUM_RETRY_ATTEMPTS), # Selenium 재시도 설정 사용
-        wait=wait_fixed(settings.SELENIUM_RETRY_WAIT_SECONDS), # 고정 대기 사용
+        stop=stop_after_attempt(getattr(settings, 'SELENIUM_RETRY_ATTEMPTS', 3)), # Selenium 재시도 설정 사용
+        wait=wait_fixed(getattr(settings, 'SELENIUM_RETRY_WAIT_SECONDS', 5)), # 고정 대기 사용
         retry=retry_if_exception_type(WebDriverException), # WebDriver 관련 예외 발생 시 재시도
         reraise=True # 최종 실패 시 예외 다시 발생
     )
-    def _scrape_url_sync(self, driver: webdriver.Remote, url: str, platform: str, trace_id: str, comic_id: str) -> Optional[Dict[str, Any]]:
+    def _scrape_url_sync(self, driver: webdriver.Remote, url: str, platform: str, work_id: str) -> Optional[Dict[str, Any]]:
         """
         동기 함수: Selenium을 사용하여 특정 URL 스크랩. 재시도 로직은 외부 decorator에 의해 처리됨.
         """
-        extra_log_data = {'trace_id': trace_id, 'comic_id': comic_id, 'url': url, 'platform': platform}
+        extra_log_data = {'work_id': work_id, 'url': url, 'platform': platform}
         logger.debug(f"Selenium 스크래핑 실행: {url}", extra=extra_log_data)
 
         # 페이지 로드
@@ -251,27 +276,26 @@ class SeleniumScraperTool:
              logger.info(f"Selenium 스크래핑 성공", extra=extra_log_data)
              return data
 
-    async def scrape_url(self, url: str, platform: str, trace_id: str, comic_id: str) -> Optional[Dict[str, Any]]:
+    async def scrape_url(self, url: str, platform: str, work_id: str) -> Optional[Dict[str, Any]]:
         """
         주어진 URL을 Selenium을 사용하여 스크랩합니다. WebDriver를 관리하고 동기 스크래핑 함수를 실행합니다.
 
         Args:
             url (str): 스크랩할 URL.
             platform (str): URL의 플랫폼 유형 (예: 'Blog', 'Twitter').
-            trace_id (str): 로깅용 추적 ID.
-            comic_id (str): 로깅용 코믹 ID.
+            work_id (str): 로깅용 추적 ID.
 
         Returns:
             Optional[Dict[str, Any]]: 추출된 데이터 또는 실패 시 None.
         """
-        extra_log_data = {'trace_id': trace_id, 'comic_id': comic_id, 'url': url, 'platform': platform}
+        extra_log_data = {'work_id': work_id,'url': url, 'platform': platform}
 
         # 랜덤 지연 적용 (Anti-scraping)
         delay = random.uniform(self.min_delay_ms, self.max_delay_ms) / 1000.0
         logger.debug(f"스크래핑 전 랜덤 지연 적용: {delay:.2f}초", extra=extra_log_data)
         await asyncio.sleep(delay)
 
-        driver = self._get_driver(trace_id, comic_id) # 드라이버 가져오기 또는 생성
+        driver = self._get_driver(work_id) # 드라이버 가져오기 또는 생성
         if not driver:
             logger.error("Selenium 드라이버를 사용할 수 없어 스크래핑 불가", extra=extra_log_data)
             return None
@@ -281,19 +305,19 @@ class SeleniumScraperTool:
             loop = asyncio.get_running_loop()
             # 동기 스크래핑 함수를 executor에서 실행 (재시도 로직 포함)
             scraped_data = await loop.run_in_executor(
-                None, self._scrape_url_sync, driver, url, platform, trace_id, comic_id
+                None, self._scrape_url_sync, driver, url, platform, work_id
             )
         except WebDriverException as e: # 재시도 실패 후 최종 WebDriver 오류
              logger.error(f"Selenium 최종 실패 (WebDriverException): {e}", exc_info=True, extra=extra_log_data)
              # 드라이버가 불안정할 수 있으므로 리셋 고려
-             self.quit_driver(trace_id, comic_id)
+             self.quit_driver(work_id)
         except Exception as e: # 기타 예상치 못한 오류
              logger.error(f"Selenium 스크래핑 실행 중 예상치 못한 오류 발생: {e}", exc_info=True, extra=extra_log_data)
 
         # 참고: 드라이버 종료 시점 결정 필요
         # 매번 종료 vs 노드 실행 끝날 때 한번만 종료 vs 외부에서 관리
         # 여기서는 매번 종료하지 않고, 노드 레벨에서 마지막에 quit_driver 호출 가정
-        # self.quit_driver(trace_id, comic_id) # 필요 시 여기서 매번 종료
+        # self.quit_driver(work_id) # 필요 시 여기서 매번 종료
 
         return scraped_data
 
@@ -301,4 +325,5 @@ class SeleniumScraperTool:
         """도구 사용 완료 후 WebDriver 인스턴스를 종료합니다."""
         # quit_driver 호출 시 임시 ID 또는 None 전달 (quit_driver 구현에 따라 다름)
         # quit_driver 내부 로깅에서 해당 ID 사용 시 None 체크 필요
-        self.quit_driver(trace_id="shutdown", comic_id="cleanup")
+        self.quit_driver(work_id="shutdown"
+                         )

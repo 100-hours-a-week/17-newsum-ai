@@ -89,7 +89,7 @@ class N02ReportSearchPlanningNode:
         # 2️⃣ 사용자 피드백 처리 (기존 계획에 대한 피드백이 있을 경우)
         if node_state.planning_question and user_response:
             self.logger.info(f"사용자 피드백 처리 시작: '{user_response[:50]}...'", extra=log_extra)
-            await self._process_user_feedback(node_state, user_response, work_id)
+            await self._process_user_feedback(node_state, user_response, work_id,topic_draft=topic_draft)
             self.logger.info("사용자 피드백 처리 완료.", extra=log_extra)
             # 피드백 처리 후 상태를 반환하여 워크플로우가 다음 단계를 결정하게 함
             return workflow_state.model_dump(exclude_none=True)
@@ -122,52 +122,66 @@ class N02ReportSearchPlanningNode:
 
     async def _design_report_structure_pipeline(self, node_state: ReportPlanningPydanticState, topic: str,
                                                 work_id: str):
-        """보고서 설계를 위한 전체 파이프라인을 실행합니다."""
+        """
+        [개선된 버전] 보고서 설계를 위한 전체 파이프라인. 실패 시 구체적인 피드백을 요청합니다.
+        """
         log_extra = {"work_id": work_id}
         self.logger.info("보고서 설계 파이프라인 시작.", extra=log_extra)
 
-        # 단계 1: 심층 질의 분석 및 분해
+        # --- 단계 1: 심층 질의 분석 및 분해 ---
         query_analysis = await self._analyze_and_decompose_query(topic, work_id)
         node_state.query_analysis = query_analysis
-        if not query_analysis.get("sub_questions"):
-            self.logger.error("질의 분해에 실패하여 파이프라인을 중단합니다.", extra=log_extra)
-            node_state.planning_question = "입력하신 주제를 분석하는 데 어려움이 있습니다. 더 구체적인 내용으로 다시 요청해주시겠어요?"
-            return
 
-        # 단계 2: 다중 목차 생성 및 최적안 선택
+        # [실패 지점 1] 질의 분석 자체를 실패한 경우
+        if not query_analysis or not query_analysis.get("sub_questions"):
+            self.logger.error("1단계 (질의 분해)에 실패하여 파이프라인을 중단합니다.", extra=log_extra)
+
+            # 사용자에게 전달할 구체적인 질문 생성
+            node_state.planning_question = """AI가 보고서의 핵심 내용을 분석하는 데 어려움을 겪고 있습니다.
+    이는 보고서의 주제가 다소 추상적이거나, 분석해야 할 핵심 대상과 관점이 명확하지 않기 때문일 수 있습니다.
+
+    보고서의 방향을 명확히 하기 위해, 아래 내용 중 하나를 구체적으로 알려주시겠어요?
+
+    - **핵심 질문**: 이 보고서를 통해 가장 알고 싶은 핵심 질문은 무엇인가요? (예: "AI 환각 현상의 가장 큰 원인은?")
+    - **주요 대상/키워드**: 보고서가 반드시 다루어야 할 인물, 기술, 사건을 지정해주세요. (예: "오픈AI의 GPT-4", "검색 증강 생성(RAG) 기술")
+    - **분석 관점**: 어떤 관점에 집중할까요? (예: "기술적 원인 분석에 집중", "산업에 미치는 경제적 영향 중심")"""
+            return  # 파이프라인 중단
+
+        # --- 단계 2: 다중 목차 생성 및 최적안 선택 ---
         selected_outline, candidates = await self._generate_and_select_outline(query_analysis, work_id)
         node_state.outline_candidates = candidates
 
-        # --- [개선안 1] 최적 목차 선택 실패 시 Fallback 로직 추가 ---
-        if not selected_outline and candidates:
-            self.logger.warning("LLM의 최적 목차 선택에 실패하여, 첫 번째 후보를 Fallback으로 사용합니다.", extra=log_extra)
-            selected_outline = candidates[0]
-        # ---------------------------------------------------------
-
+        # [실패 지점 2] 질의 분석은 성공했으나, 목차 생성을 실패한 경우
         if not selected_outline:
-            self.logger.error("목차 생성 및 선택에 실패하여 파이프라인을 중단합니다.", extra=log_extra)
-            # 실패 원인을 더 구체적으로 파악하여 질문 생성
-            node_state.planning_question = self._generate_planning_question(node_state)
-            return
+            self.logger.error("2단계 (목차 생성/선택)에 실패하여 파이프라인을 중단합니다.", extra=log_extra)
 
-        # 단계 3: 자가 검증 및 정제 (Reflection)
+            # 사용자에게 전달할 구체적인 질문 생성
+            node_state.planning_question = """AI가 보고서의 핵심 내용은 파악했지만, 논리적인 목차를 구성하는 데 실패했습니다.
+    이는 분석된 내용들을 어떤 순서로 배치해야 할지 판단하기 어렵기 때문입니다.
+
+    보고서의 전체적인 틀을 잡을 수 있도록, 원하시는 보고서의 대략적인 구조나 포함되었으면 하는 섹션 제목들을 알려주시겠어요?
+
+    - **예시 1**: 서론 / 기술적 배경 / 시장 현황 / 문제점 및 해결 방안 / 결론
+    - **예시 2**: 1. AI 도입 현황, 2. 주요 성공 사례 분석, 3. 도입 시 고려사항, 4. 향후 전망
+    - 또는, 가장 중요하게 생각하는 섹션 2~3개만 알려주셔도 좋습니다."""
+            return  # 파이프라인 중단
+
+        # --- 단계 3: 자가 검증 및 정제 (Reflection) ---
         final_outline = await self._reflect_and_refine_outline(selected_outline, query_analysis, work_id)
         node_state.structure = final_outline
 
-        # # 단계 4: 최종 계획 확정 및 사용자 피드백 요청
-        # if self._check_planning_sufficiency(final_outline):
-        #     self.logger.info("시스템이 설계한 보고서 구조가 충분하다고 판단되어 'is_ready'를 true로 설정합니다.", extra=log_extra)
-        #     node_state.is_ready = True
-        #     node_state.planning_question = None
-        # else:
-        #     self.logger.info("최종 설계안에 대해 사용자 확인이 필요하다고 판단됩니다.", extra=log_extra)
-        #     node_state.is_ready = False
-        #     # 이 부분도 상황에 맞는 질문을 생성하도록 node_state 전체를 전달
-        #     node_state.planning_question = self._generate_planning_question(node_state)
-
-        # 단계 4: 최종 계획 확정 및 사용자 피드백 요청
-        # --- [수정된 부분] ---
-        # 이제 성공/실패 여부와 관계없이 항상 사용자에게 질문을 생성합니다.
+        # --- 단계 4: 최종 계획 확정 및 사용자 피드백 요청 ---
+        if self._check_planning_sufficiency(final_outline):
+            self.logger.info("시스템이 설계한 보고서 구조가 충분하다고 판단되어 사용자에게 최종 확인을 요청합니다.", extra=log_extra)
+            node_state.is_ready = False
+            # '확인'을 위한 질문을 생성
+            node_state.planning_question = self._create_confirmation_question(final_outline)
+        else:
+            # 이 경우는 최종안이 나왔으나 시스템이 보기에 부실한 경우이므로, 개선을 위한 일반적인 질문을 할 수 있습니다.
+            self.logger.info("최종 목차 설계안에 대해 시스템 테스트 결과 개선이 필요하다고 판단됩니다.", extra=log_extra)
+            node_state.is_ready = False
+            # '개선'을 위한 질문을 생성 (기존 _generate_planning_question 로직 활용 가능)
+            node_state.planning_question = self._generate_planning_question(node_state)
         if self._check_planning_sufficiency(final_outline):
             self.logger.info("시스템이 설계한 보고서 구조가 충분하다고 판단되어 사용자에게 최종 확인을 요청합니다.", extra=log_extra)
             # is_ready는 False로 유지하여 사용자 입력을 기다림
@@ -369,9 +383,9 @@ Return a single JSON object representing the final, chosen outline. Do not add a
             summary_parts.append(f"{sec_header}\n{sub_topics_str}")
 
         # 각 대목차 사이에 두 줄의 줄바꿈을 넣어 시각적으로 분리합니다.
-        structure_summary = "\n\n".join(summary_parts)
+        structure_summary = "\n\n".join(summary_parts).replace("```","")
 
-        question = f"""AI가 아래와 같이 보고서 계획을 제안합니다.
+        question = f"""AI가 아래와 같이 조사 계획을 제안합니다.
 
             [ **제안된 최종 계획안** ]
             {structure_summary}
@@ -438,76 +452,105 @@ Return a single JSON object representing the final, chosen outline. Do not add a
             (예시: "기술적 원인 분석에 집중", "산업에 미치는 경제적 영향 중심으로", "법적 및 윤리적 쟁점 위주로")
         """
 
-    async def _process_user_feedback(self, node_state: ReportPlanningPydanticState, feedback: str,
-                                         work_id: str) -> None:
+    async def _process_user_feedback(
+            self,
+            node_state: ReportPlanningPydanticState,
+            feedback: str,
+            work_id: str,
+            # topic_draft를 명시적으로 받아오도록 함수 시그니처 수정
+            topic_draft: str
+    ) -> None:
         """
         [개선된 버전]
-        사용자 피드백의 의도를 'CO', 'RE', 'UN'으로 분류하고, 그에 따라 계획을 확정, 수정, 또는 재질의합니다.
+        사용자 피드백을 처리하되, 현재 목차(structure)의 존재 여부에 따라 분기합니다.
         """
         log_extra = {"work_id": work_id}
-        self.logger.info("사용자 피드백 처리 시작 (의도 분류 기반).", extra=log_extra)
+        self.logger.info("사용자 피드백 처리 시작 (상태 기반 분기).", extra=log_extra)
+        node_state.planning_answer = feedback
 
-        # 1. LLM을 통해 사용자 피드백 의도 분류
-        intent = await self._classify_user_response_intent(feedback, work_id)
-        node_state.planning_answer = feedback  # 사용자의 원본 답변은 우선 저장
+        # ◀◀◀ 핵심 분기 로직 ▶▶▶
+        # 현재 목차(structure)가 비어있는지 확인
+        if not node_state.structure:
+            # CASE 1: 목차가 없는 경우 -> 초기 계획 실패 후 사용자가 답변한 상황
+            self.logger.info("기존 목차가 없어, 사용자 피드백을 반영하여 계획 수립을 '재시도'합니다.", extra=log_extra)
 
-        # 2. 분류된 의도에 따라 분기 처리
-        if intent == 'CO':
-            # [확정] 사용자가 계획에 동의한 경우
-            self.logger.info("사용자 의도: '확정(CO)'. 계획을 최종 확정합니다.", extra=log_extra)
-            node_state.is_ready = True
-            node_state.planning_question = None  # 질문 초기화
+            # 1-1. 기존 주제와 사용자 답변을 합쳐 새로운, 더 구체적인 주제 생성
+            refined_topic = f"""초기 주제: "{topic_draft}"
 
-        elif intent == 'RE':
-            # [수정] 사용자가 수정을 요청한 경우
-            self.logger.info("사용자 의도: '수정(RE)'. 피드백을 반영하여 목차를 수정합니다.", extra=log_extra)
+            이에 대한 사용자의 추가 정보 또는 답변: "{feedback}"
 
-            structure_str = json.dumps(node_state.structure, ensure_ascii=False, indent=2)
-            prompt = f"""You are an intelligent report editor. The user has provided feedback to revise the current report outline. Your task is to update the outline based on the user's request.
-    
-                **Current Outline:**
-                {structure_str}
-            
-                **User's Revision Request:**
-                "{feedback}"
-            
-                **Task:**
-                Return a single, updated JSON object of the report outline in the same format as the Current Outline.
-            """
-            try:
-                resp = await self.llm.generate_text(
-                    messages=[{"role": "user", "content": prompt}],
-                    request_id=f"process-feedback-revise-{work_id}",
-                    max_tokens=1536,
-                    temperature=0.2
-                )
-                updated_structure = json.loads(resp.get("generated_text", "{}").strip())
+            위 두 내용을 종합하여 하나의 완성된 보고서 주제로 명확하게 재구성한 내용을 바탕으로 보고서의 목차를 생성해주세요."""
 
-                # 수정된 목차의 충분성 재검사
-                if self._check_planning_sufficiency(updated_structure):
-                    node_state.structure = updated_structure
-                    node_state.is_ready = True
-                    node_state.planning_question = None
-                    self.logger.info("사용자 피드백을 성공적으로 반영하고 계획을 확정했습니다.", extra=log_extra)
-                else:
-                    # 피드백을 반영했으나 여전히 불충분하면 다시 질문
-                    node_state.structure = updated_structure
-                    node_state.is_ready = False
-                    node_state.planning_question = self._generate_planning_question(node_state)  # 개선을 위한 질문 생성
-                    self.logger.info("피드백을 반영했으나 계획이 불충분하여 다시 질문합니다.", extra=log_extra)
+            self.logger.info(f"보강된 새 주제로 전체 설계 파이프라인을 다시 실행합니다.", extra=log_extra)
 
-            except (json.JSONDecodeError, Exception) as e:
-                self.logger.error(f"사용자 피드백 처리 중 오류 발생: {e}", extra=log_extra)
-                # 오류 발생 시 사용자에게 다시 입력을 요청
-                node_state.planning_question = f"피드백을 처리하는 중 오류가 발생했습니다. '{feedback}' 요청을 다른 방식으로 다시 설명해주시겠어요?"
+            # 1-2. 보강된 주제로 보고서 설계 파이프라인(_design_report_structure_pipeline)을 "다시 호출"
+            #      이렇게 하면 처음부터 계획을 세우는 것과 동일한 프로세스를 타게 됩니다.
+            await self._design_report_structure_pipeline(node_state, refined_topic, work_id)
 
-        else:  # 'UN' 또는 예외 상황
-            # [불명확] 사용자의 의도가 불분명한 경우
-            self.logger.info("사용자 의도: '불명확(UN)'. 사용자에게 명확화를 요청합니다.", extra=log_extra)
-            node_state.is_ready = False
-            node_state.planning_question = """죄송합니다, 답변의 의도를 명확히 파악하기 어렵습니다. 
-                                            제시된 계획을 확정할까요, 아니면 수정할 부분이 있을까요? 
-                                            더 구체적인 내용으로 알려주시겠어요?"""
+        else:
+            # CASE 2: 목차가 이미 있는 경우 -> 기존 목차를 '수정'하는 상황 (원본 파일의 로직)
+            self.logger.info("기존 목차가 존재하여, 사용자 피드백을 반영하여 '수정'합니다.", extra=log_extra)
+
+            # LLM을 통해 의도를 'CO'(확정), 'RE'(수정) 등으로 분류하고 처리
+            intent = await self._classify_user_response_intent(feedback, work_id)
+
+            if intent == 'CO':
+                # [확정] 사용자가 계획에 동의한 경우
+                self.logger.info("사용자 의도: '확정(CO)'. 계획을 최종 확정합니다.", extra=log_extra)
+                node_state.is_ready = True
+                node_state.planning_question = None  # 질문 초기화
+
+            elif intent == 'RE':
+                # [수정] 사용자가 수정을 요청한 경우
+                self.logger.info("사용자 의도: '수정(RE)'. 피드백을 반영하여 목차를 수정합니다.", extra=log_extra)
+
+                structure_str = json.dumps(node_state.structure, ensure_ascii=False, indent=2)
+                prompt = f"""You are an intelligent report editor. The user has provided feedback to revise the current report outline. Your task is to update the outline based on the user's request.
+
+                    **Current Outline:**
+                    {structure_str}
+
+                    **User's Revision Request:**
+                    "{feedback}"
+
+                    **Task:**
+                    Return a single, updated JSON object of the report outline in the same format as the Current Outline.
+                """
+                try:
+                    resp = await self.llm.generate_text(
+                        messages=[{"role": "user", "content": prompt}],
+                        request_id=f"process-feedback-revise-{work_id}",
+                        max_tokens=1536,
+                        temperature=0.2
+                    )
+                    updated_structure = json.loads(resp.get("generated_text", "{}").strip())
+
+                    # 수정된 목차의 충분성 재검사
+                    if self._check_planning_sufficiency(updated_structure):
+                        node_state.structure = updated_structure
+                        node_state.is_ready = True
+                        node_state.planning_question = None
+                        self.logger.info("사용자 피드백을 성공적으로 반영하고 계획을 확정했습니다.", extra=log_extra)
+                    else:
+                        # 피드백을 반영했으나 여전히 불충분하면 다시 질문
+                        node_state.structure = updated_structure
+                        node_state.is_ready = False
+                        # 개선을 위한 질문 생성 (상황에 맞는 질문 생성기로 전달)
+                        node_state.planning_question = self._generate_planning_question(node_state)
+                        self.logger.info("피드백을 반영했으나 계획이 불충분하여 다시 질문합니다.", extra=log_extra)
+
+                except (json.JSONDecodeError, Exception) as e:
+                    self.logger.error(f"사용자 피드백 처리 중 오류 발생: {e}", extra=log_extra)
+                    # 오류 발생 시 사용자에게 다시 입력을 요청
+                    node_state.planning_question = f"피드백을 처리하는 중 오류가 발생했습니다. '{feedback}' 요청을 다른 방식으로 다시 설명해주시겠어요?"
+
+            else:  # 'UN' 또는 예외 상황
+                # [불명확] 사용자의 의도가 불분명한 경우
+                self.logger.info("사용자 의도: '불명확(UN)'. 사용자에게 명확화를 요청합니다.", extra=log_extra)
+                node_state.is_ready = False
+                node_state.planning_question = """죄송합니다, 답변의 의도를 명확히 파악하기 어렵습니다. 
+                                                제시된 계획을 확정할까요, 아니면 수정할 부분이 있을까요? 
+                                                더 구체적인 내용으로 알려주시겠어요?"""
 
     async def _classify_user_response_intent(self, user_answer: str, work_id: str) -> str:
         # 시스템 프롬프트 (영문) - "<THINK>" 태그 등 불필요한 출력 금지 지시 강화
@@ -544,9 +587,9 @@ Return a single JSON object representing the final, chosen outline. Do not add a
             resp = await self.llm.generate_text(
                 messages=messages,
                 request_id=f"intent-classify-strict-{work_id}",  # request_id 변경 가능
-                max_tokens=50,  # 라벨 길이를 고려한 최소한의 토큰 수 (예: "CO"은 약 3-4 토큰)
+                max_tokens=200,  # 라벨 길이를 고려한 최소한의 토큰 수 (예: "CO"은 약 3-4 토큰)
                 temperature=0.0,  # 결정적이고 일관된 출력 유도
-                timeout=LLM_TIMEOUT_SEC / 4  # 매우 짧은 시간 내 응답 기대
+                timeout=LLM_TIMEOUT_SEC  # 매우 짧은 시간 내 응답 기대
             )
             raw_classification = resp.get("generated_text", "").strip().upper()
             # LLMService에서 <think> 태그 등을 이미 제거한다고 가정.
