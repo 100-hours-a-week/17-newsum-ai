@@ -1,0 +1,79 @@
+name: Deploy AI Service to GCP VM (dev)
+
+on:
+  push:
+    branches:
+      - dev
+
+jobs:
+  deploy:
+    name: Deploy AI to VM
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Install Infisical CLI from CloudFront
+        run: |
+          curl -L https://${{ secrets.AWS_CLOUDFRONT_URL }}/tools/infisical-linux-amd64 -o infisical
+          chmod +x infisical
+          sudo mv infisical /usr/local/bin/infisical
+
+      - name: Export MAIN env (.env for FastAPI)
+        run: |
+          infisical export \
+            --env=prod \
+            --token=${{ secrets.INFISICAL_MAIN_TOKEN }} \
+            --projectId=${{ secrets.INFISICAL_PROJECT_ID }} \
+            --format=dotenv \
+            --domain=${{ secrets.INFISICAL_API_URL }} \
+            > main.env
+
+      - name: Export SUB env (.env for Streamlit)
+        run: |
+          infisical export \
+            --env=prod \
+            --token=${{ secrets.INFISICAL_SUB_TOKEN }} \
+            --projectId=${{ secrets.INFISICAL_PROJECT_ID }} \
+            --path=/streamit \
+            --format=dotenv \
+            --domain=${{ secrets.INFISICAL_API_URL }} \
+            > sub.env
+
+      - name: Set up SSH
+        uses: webfactory/ssh-agent@v0.8.0
+        with:
+            ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY_DEV }}
+
+      - name: Upload Project and .envs to GCP VM
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ secrets.GCP_VM_USER_DEV }}@${{ secrets.GCP_VM_IP_DEV }} "rm -rf ~/17-newsum-ai && mkdir -p ~/17-newsum-ai"
+          scp -r ./* ${{ secrets.GCP_VM_USER_DEV }}@${{ secrets.GCP_VM_IP_DEV }}:~/17-newsum-ai/
+          scp main.env ${{ secrets.GCP_VM_USER_DEV }}@${{ secrets.GCP_VM_IP_DEV }}:~/17-newsum-ai/.env
+          scp sub.env ${{ secrets.GCP_VM_USER_DEV }}@${{ secrets.GCP_VM_IP_DEV }}:~/17-newsum-ai/pre-test/service_streamlit/.env
+
+      - name: Run Deployment Commands on VM
+        run: |
+          ssh ${{ secrets.GCP_VM_USER_DEV }}@${{ secrets.GCP_VM_IP_DEV }} << 'EOF'
+            cd ~/17-newsum-ai
+
+            # FastAPI venv
+            python -m venv .venv
+            source .venv/bin/activate
+            pip install --upgrade pip
+            pip install -r requirements.txt
+
+            # 서비스 실행
+            chmod +x ./scripts/start_services.sh
+            ./scripts/start_services.sh
+
+            # Streamlit
+            cd pre-test/service_streamlit
+            python -m venv .venv
+            source .venv/bin/activate
+            pip install --upgrade pip
+            pip install -r requirements.txt
+            nohup streamlit run app.py --server.port 8501 --server.address 0.0.0.0 > streamlit.log 2>&1 &
+            nohup python3 -u reception_api.py > reception_api.log 2>&1 & echo $! > reception_api.pid
+          EOF
