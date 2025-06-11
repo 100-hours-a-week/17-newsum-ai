@@ -26,6 +26,7 @@ from app.utils.logger import get_logger
 from app.workflows.state_v3 import (
     OverallWorkflowState,
 )
+from app.utils.report_html_renderer import render_report_html_from_markdown, save_report_html
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 설정 및 상수
@@ -204,6 +205,14 @@ class N04ReportDraftingNode:
         workflow_state.report_draft.draft = final_draft_with_title
         workflow_state.report_draft.is_ready = True
         self.logger.info("보고서 초안 작성을 모두 완료했습니다.", extra={"work_id": work_id})
+
+        # HTML 파일로 저장 (최종 확정 시점)
+        try:
+            html = render_report_html_from_markdown(work_id, report_title_text, final_draft_with_title)
+            save_report_html(work_id, html)
+            self.logger.info(f"HTML 보고서가 저장되었습니다. work_id={work_id}", extra={"work_id": work_id})
+        except Exception as e:
+            self.logger.error(f"HTML 보고서 저장 중 오류: {e}", extra={"work_id": work_id})
 
     async def _finalize_and_save_state(self, workflow_state: OverallWorkflowState, log_extra: Dict) -> Dict[str, Any]:
         """최종 상태를 저장하고 반환합니다."""
