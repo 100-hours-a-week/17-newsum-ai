@@ -364,7 +364,7 @@ async def main():
         custom_object_key = f"{upload_prefix}custom_name_image.png"  # 사용자 정의 키 사용 테스트
 
         print(f"\n1. 자동 생성된 object_key로 업로드 테스트 (ACL 기본값)...")
-        result1 = await storage_service.upload_file(
+        result1 = await storage_service.upload_file_with_cloudfront_url(
             file_path=dummy_image_path,
             prefix=upload_prefix
         )
@@ -376,5 +376,23 @@ async def main():
     print("\n--- 테스트 완료 ---")
 
 
+async def test_cloudfront_url():
+    storage_service = StorageService()
+    file_path = os.path.join(os.path.dirname(__file__), "test.png")
+    object_key = "test_uploads/test.png"  # S3에 저장될 경로 및 파일명
+    content_type = "image/png"
+
+    if os.path.exists(file_path):
+        result = await storage_service.upload_file_with_cloudfront_url(
+            file_path=file_path,
+            object_key=object_key,
+            content_type=content_type
+        )
+        print(f"업로드 결과: {result}")
+    else:
+        print(f"테스트 파일 '{file_path}'이(가) 존재하지 않습니다.")
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(test_cloudfront_url())
+    # asyncio.run(main())
