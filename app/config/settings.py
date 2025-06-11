@@ -79,7 +79,8 @@ class Settings(BaseSettings):
     # --- 이미지 생성 서비스 ---
     IMAGE_SERVER_URL: Optional[AnyHttpUrl] = Field(None) 
     IMAGE_SERVER_API_TOKEN: Optional[str] = Field(None) 
-    IMAGE_STORAGE_PATH: str = Field("generated_images") 
+    IMAGE_STORAGE_PATH: str = Field("generated_images")
+    IMAGE_SERVICE_MODEL_NAME: str = Field("pure")
     LLM_MAX_TOKENS_SCENARIO: int = 2000
     IMAGE_DEFAULT_NEGATIVE_PROMPT: str = Field("(worst quality, low quality, normal quality:1.2), deformed, blurry, text, signature")
 

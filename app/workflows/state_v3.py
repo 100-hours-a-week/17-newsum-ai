@@ -78,7 +78,7 @@ class ImageConcept(BaseModel):
     """
     단일 이미지 콘셉트에 대한 구조화된 모델
     """
-    panel_id: int = Field(description="패널 번호 (1-4)")
+    panel_id: int = Field(description="패널 번호 (1-4)")    # thumbnail은 0번 패널
     narrative_step: str = Field(description="콘셉트의 서사 단계 (예: 기(起): 문제 제기)")
     concept_description: str = Field(description="이미지에 표현될 구체적인 시각 요소와 장면에 대한 상세 설명")
     caption: str = Field(description="이미지에 오버레이될 짧고 임팩트 있는 문구")
@@ -88,9 +88,11 @@ class ImageConceptState(BaseModel):
     N06 이미지 콘셉트 생성 노드의 상태 관리 모델 (대화형)
     """
     # 초기 4개의 콘셉트 후보를 저장
+    thumbnail_candidate: Optional[ImageConcept] = Field(default=None)
     concept_candidates: List[ImageConcept] = Field(default_factory=list, description="사용자에게 제시될 4개의 초기 이미지 콘셉트 후보")
     question: Optional[str] = Field(None, description="사용자에게 보낼 질문 (콘셉트 선택 또는 최종 확인)")
     wip_concepts: Dict[str, Any] = Field(default_factory=dict, description="사용자가 수정을 진행 중인 콘셉트 정보 (예: {'original': ImageConcept, 'feedback_history': []})")
+    final_thumbnail: Optional[ImageConcept] = Field(default=None)
     final_concepts: List[ImageConcept] = Field(default_factory=list, description="사용자가 최종 확정한 4개의 이미지 콘셉트")
     is_ready: bool = Field(False, description="이미지 콘셉트 생성이 모두 완료되었는지 여부")
     error_message: Optional[str] = None
@@ -98,7 +100,7 @@ class ImageConceptState(BaseModel):
 
 class ImagePromptItemPydantic(BaseModel):
     """개별 패널에 대한 이미지 생성 프롬프트 정보"""
-    panel_id: int
+    panel_id: int   # thumbnail은 0번 패널
     prompt: str = Field(description="AI 이미지 생성기용 메인 프롬프트 (영어)")
     negative_prompt: str = Field(default="text, watermark, ugly, deformed, blurry", description="제외할 요소들에 대한 프롬프트 (영어)")
     seed: int = Field(default_factory=lambda: random.randint(1, 2 ** 32 - 1))
@@ -110,8 +112,10 @@ class ImagePromptsPydanticState(BaseModel):
     """
     N07 이미지 프롬프트 생성 노드의 상태 관리 모델 (대화형)
     """
+    thumbnail_prompt_candidate: Optional[ImagePromptItemPydantic] = Field(default=None)
     prompt_candidates: List[ImagePromptItemPydantic] = Field(default_factory=list)
     question: Optional[str] = None
+    thumbnail_prompt: Optional[ImagePromptItemPydantic] = Field(default=None)
     panels: List[ImagePromptItemPydantic] = Field(default_factory=list)
     is_ready: bool = False
     error_message: Optional[str] = None
