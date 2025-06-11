@@ -3,8 +3,10 @@
 import json
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+import os
 
 from pydantic import ValidationError
+import aiohttp  # 외부 API 호출용
 
 # --- 애플리케이션 구성 요소 임포트 ---
 from app.services.postgresql_service import PostgreSQLService
@@ -15,6 +17,8 @@ from app.workflows.state_v3 import (
     ImagePromptItemPydantic,
     ImageQueueState
 )
+from app.config.settings import settings  # settings 임포트 추가
+from app.services.storage_service import StorageService
 
 # --- 로거 설정 ---
 logger = get_logger("n_08_QueueForImageGenerationNode")
@@ -61,74 +65,115 @@ class N08QueueForImageGenerationNode:
             node_state.error_message = error_msg
             return await self._finalize_and_save_state(workflow_state, log_extra)
 
-        # --- DB에 저장할 데이터 추출 ---
+        # --- API 전송용 데이터 추출 및 dummy 값 보완 ---
         try:
-            # 썸네일(0번) + 4컷(1~4번) 프롬프트 합치기
-            all_prompts = []
+            # 반드시 필요한 값 체크
             thumbnail = image_prompts_state.thumbnail_prompt
             panels = image_prompts_state.panels
-            if thumbnail:
-                all_prompts.append(thumbnail)
-            all_prompts.extend(panels)
-            # image_concept_state 정의 추가
             image_concept_state = workflow_state.image_concept
-            # title, panel_descriptions 추출
-            title = image_concept_state.final_thumbnail.caption if image_concept_state.final_thumbnail else None
-            panel_descriptions = [c.caption for c in image_concept_state.final_concepts] if image_concept_state.final_concepts else []
-            job_data = {
+            persona_id = persona_analysis_state.selected_opinion.persona_id if persona_analysis_state.selected_opinion else None
+            report_draft = report_draft_state.draft
+
+            # 필수 값 체크
+            if not thumbnail:
+                raise ValueError("썸네일 프롬프트(thumbnail_prompt)가 존재하지 않습니다.")
+            if not panels or len(panels) == 0:
+                raise ValueError("패널 프롬프트(panels)가 존재하지 않습니다.")
+            if not image_concept_state.final_thumbnail:
+                raise ValueError("최종 썸네일 콘셉트(final_thumbnail)가 존재하지 않습니다.")
+            if not image_concept_state.final_concepts or len(image_concept_state.final_concepts) < 4:
+                raise ValueError("최종 패널 콘셉트(final_concepts)가 4개 미만입니다.")
+            if not persona_id:
+                raise ValueError("선택된 페르소나(persona_analysis.selected_opinion)가 존재하지 않습니다.")
+            if not report_draft:
+                raise ValueError("보고서 초안(report_draft.draft)이 존재하지 않습니다.")
+
+            all_prompts = [thumbnail.model_dump()]
+            all_prompts.extend([p.model_dump() for p in panels])
+            title = image_concept_state.final_thumbnail.caption
+            panel_descriptions = [c.caption for c in image_concept_state.final_concepts]
+
+            # dummy 값만 하드코딩 (준비 안된 부분)
+            keyword = "dummy_keyword"  # TODO: 실제 값 추출 필요
+            category = "dummy_category"  # TODO: 실제 값 추출 필요
+            content = report_draft[:200] if report_draft else "dummy_content"  # 요약 구현 필요
+            reference_url = "https://dummy.com/reference"  # TODO: 실제 값 추출 필요
+
+            # 1. HTML 파일 경로 결정 (settings에서 읽음)
+            html_file_path = os.path.join(settings.REPORT_HTML_OUTPUT_DIR, f"{work_id}.html")
+            storage_service = StorageService()
+            report_url = "https://dummy.com/report.html"  # 기본값
+
+            # 2. 파일이 존재하면 S3 업로드 및 CloudFront URL 획득
+            if os.path.exists(html_file_path):
+                upload_result = await storage_service.upload_file_with_cloudfront_url(
+                    file_path=html_file_path,
+                    object_key=f"reports/{work_id}.html",
+                    content_type="text/html"
+                )
+                if upload_result.get("cloudfront_url"):
+                    report_url = upload_result["cloudfront_url"]
+                else:
+                    raise ValueError(f"CloudFront URL 생성 실패: {upload_result}")
+            else:
+                raise ValueError(f"HTML 파일이 존재하지 않음: {html_file_path}")
+
+            payload = {
                 "work_id": work_id,
-                "persona_id": persona_analysis_state.selected_opinion.persona_id,
-                "report_text": report_draft_state.draft,
+                "persona_id": persona_id,
+                "keyword": keyword,     # TODO: 실제 값 추출 필요
+                "category": category,   # TODO: 실제 값 추출 필요
                 "title": title,
-                "panel_descriptions": panel_descriptions,
-                "image_prompts": [p.model_dump() for p in all_prompts],
-                "scheduled_at": FIXED_TIME
+                "reportUrl": report_url,
+                "content": content,     # TODO: 요약 구현 필요
+                "referenceUrl": reference_url,  # TODO: 추후 source에서 추출
+                "description1": panel_descriptions[0],
+                "description2": panel_descriptions[1],
+                "description3": panel_descriptions[2],
+                "description4": panel_descriptions[3],
+                "imagePrompts": all_prompts
             }
-        except AttributeError as e:
-            error_msg = f"DB에 저장할 데이터를 추출하는 중 필요한 값이 없습니다: {e}"
+        except Exception as e:
+            error_msg = f"API 전송용 데이터 추출 중 오류: {e}"
             self.logger.error(error_msg, extra=log_extra)
             node_state.error_message = error_msg
             return await self._finalize_and_save_state(workflow_state, log_extra)
 
-        # --- DB에 작업 큐잉 ---
-        job_id = await self._queue_image_generation_job(**job_data)
-
-        if job_id:
+        # --- 외부 API 호출 ---
+        api_url = settings.EXTERNAL_NOTIFICATION_API_URL
+        if not api_url:
+            node_state.error_message = "EXTERNAL_NOTIFICATION_API_URL이 설정되어 있지 않습니다."
+            self.logger.error(node_state.error_message, extra=log_extra)
+            workflow_state.insert_image_queue = node_state
+            return await self._finalize_and_save_state(workflow_state, log_extra)
+        api_result = await self._send_image_prompt_to_api(payload, api_url, log_extra)
+        if api_result.get("status") == "success":
             node_state.is_ready = True
-            node_state.job_id = job_id
-            self.logger.info(f"이미지 생성 작업(Job ID: {job_id})이 큐에 성공적으로 저장되었습니다.", extra=log_extra)
+            node_state.job_id = None  # 외부 API에서 반환하는 값이 있으면 할당
+            self.logger.info(f"이미지 생성 API 호출 성공.", extra=log_extra)
         else:
-            node_state.error_message = "이미지 생성 작업을 큐에 저장하는 데 실패했습니다."
+            node_state.error_message = f"API 호출 실패: {api_result.get('error')}"
             self.logger.error(node_state.error_message, extra=log_extra)
 
         workflow_state.insert_image_queue = node_state
         return await self._finalize_and_save_state(workflow_state, log_extra)
 
-    async def _queue_image_generation_job(self, work_id: str, persona_id: str, report_text: str, title: str, panel_descriptions: list, image_prompts: list, scheduled_at: str) -> Optional[int]:
-        """
-        이미지 생성에 필요한 모든 데이터를 DB 테이블에 'pending' 상태로 삽입합니다.
-        """
-        # RETURNING 절은 삽입된 행의 특정 컬럼 값을 반환하도록 지시합니다.
-        query = """
-            INSERT INTO ai_test_image_generation_queue (work_id, persona_id, report_text, title, panel_descriptions, image_prompts, scheduled_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-            RETURNING job_id;
-        """
-        # image_prompts 리스트를 JSON 문자열로 변환
-        image_prompts_json = json.dumps(image_prompts, ensure_ascii=False)
-        panel_descriptions_json = json.dumps(panel_descriptions, ensure_ascii=False)
-        try:
-            record = await self.db.fetch_one(query, work_id, persona_id, report_text, title, panel_descriptions_json, image_prompts_json, scheduled_at)
-            if record and 'job_id' in record:
-                job_id = record['job_id']
-                self.logger.info(f"DB에서 반환된 Job ID: {job_id}", extra={"work_id": work_id})
-                return job_id
-            else:
-                self.logger.error("DB INSERT 후 job_id를 반환받지 못했습니다.", extra={"work_id": work_id})
-                return None
-        except Exception as e:
-            self.logger.error(f"DB 작업 큐 삽입 중 오류 발생: {e}", exc_info=True, extra={"work_id": work_id})
-            return None
+    async def _send_image_prompt_to_api(self, payload: dict, api_url: str, log_extra: dict) -> dict:
+        headers = {"Content-Type": "application/json"}
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.post(api_url, headers=headers, json=payload) as resp:
+                    resp_text = await resp.text()
+                    status = resp.status
+                    if 200 <= status < 300:
+                        self.logger.info(f"N08: API 호출 성공 (Status: {status})", extra=log_extra)
+                        return {"status": "success", "response": resp_text}
+                    else:
+                        self.logger.error(f"N08: API 호출 실패 (Status: {status}): {resp_text}", extra=log_extra)
+                        return {"status": "failed", "error": resp_text}
+            except Exception as e:
+                self.logger.error(f"N08: API 호출 중 예외 발생: {e}", extra=log_extra)
+                return {"status": "failed", "error": str(e)}
 
     async def _finalize_and_save_state(self, workflow_state: OverallWorkflowState, log_extra: Dict) -> Dict[str, Any]:
         """최종 상태를 저장하고 반환합니다."""
