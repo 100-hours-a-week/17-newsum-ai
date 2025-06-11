@@ -1,4 +1,3 @@
-#1
 name: Deploy AI Service to GCP VM (dev)
 
 on:
@@ -45,41 +44,68 @@ jobs:
       - name: Set up SSH
         uses: webfactory/ssh-agent@v0.8.0
         with:
-            ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY_DEV }}
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY_DEV }}
 
-      - name: Upload Project and .envs to GCP VM
+      - name: Upload Project and .envs to GCP VM (zip 방식)
         run: |
-          ssh -o StrictHostKeyChecking=no ${{ secrets.GCP_VM_USER_DEV }}@${{ secrets.GCP_VM_IP_DEV }} "rm -rf ~/17-newsum-ai && mkdir -p ~/17-newsum-ai"
-          scp -r ./* ${{ secrets.GCP_VM_USER_DEV }}@${{ secrets.GCP_VM_IP_DEV }}:~/17-newsum-ai/
+          zip -r project.zip . -x "*.git*" "node_modules/*" "__pycache__/*"
+          scp project.zip ${{ secrets.GCP_VM_USER_DEV }}@${{ secrets.GCP_VM_IP_DEV }}:~
+          ssh -o StrictHostKeyChecking=no ${{ secrets.GCP_VM_USER_DEV }}@${{ secrets.GCP_VM_IP_DEV }} << 'EOF'
+            rm -rf ~/17-newsum-ai
+            mkdir -p ~/17-newsum-ai
+            unzip -q ~/project.zip -d ~/17-newsum-ai
+            rm -f ~/project.zip
+          EOF
           scp main.env ${{ secrets.GCP_VM_USER_DEV }}@${{ secrets.GCP_VM_IP_DEV }}:~/17-newsum-ai/.env
           scp sub.env ${{ secrets.GCP_VM_USER_DEV }}@${{ secrets.GCP_VM_IP_DEV }}:~/17-newsum-ai/pre-test/service_streamlit/.env
 
-      - name: Run Deployment Commands on VM
+      - name: Stop & Start Services on VM (with logs)
         run: |
           ssh ${{ secrets.GCP_VM_USER_DEV }}@${{ secrets.GCP_VM_IP_DEV }} << 'EOF'
-              export PATH="$HOME/.pyenv/bin:$PATH"
-              eval "$(pyenv init --path)"
-              eval "$(pyenv virtualenv-init -)"
+            set -e
+            export PATH="$HOME/.pyenv/bin:$PATH"
+            eval "$(pyenv init --path)"
+            eval "$(pyenv virtualenv-init -)"
 
-              cd ~/17-newsum-ai
+            cd ~/17-newsum-ai
 
-              # FastAPI venv
-              python -m venv .venv
-              source .venv/bin/activate
-              pip install --upgrade pip
-              pip install -r requirements.txt
+            echo "🛑 Stopping old services..."
+            if [ -f ./scripts/stop_services.sh ]; then
+              chmod +x ./scripts/stop_services.sh
+              ./scripts/stop_services.sh || true
+              echo "📄 [stop_services.log]"
+              cat ./scripts/logs/server.log || echo "(no server.log)"
+              cat ./scripts/logs/worker.log || echo "(no worker.log)"
+            fi
 
-              # 서비스 실행
-              chmod +x ./scripts/start_services.sh
-              ./scripts/start_services.sh
+            echo "🚀 Setting up FastAPI venv..."
+            python -m venv .venv
+            source .venv/bin/activate
+            pip install --upgrade pip
+            pip install -r requirements.txt
 
-              # Streamlit
-              cd pre-test/service_streamlit
-              python -m venv .venv
-              source .venv/bin/activate
-              pip install --upgrade pip
-              pip install -r requirements.txt
-              nohup streamlit run app.py --server.port 8501 --server.address 0.0.0.0 > streamlit.log 2>&1 &
-              nohup python3 -u reception_api.py > reception_api.log 2>&1 & echo $! > reception_api.pid
+            echo "▶️ Starting FastAPI & Worker..."
+            chmod +x ./scripts/start_services.sh
+            ./scripts/start_services.sh
+
+            echo "📄 [start_services.log]"
+            cat ./scripts/logs/server.log || echo "(no server.log)"
+            cat ./scripts/logs/worker.log || echo "(no worker.log)"
+
+            echo "💡 Setting up Streamlit..."
+            cd pre-test/service_streamlit
+            python -m venv .venv
+            source .venv/bin/activate
+            pip install --upgrade pip
+            pip install -r requirements.txt
+
+            echo "📊 Running Streamlit & Reception API..."
+            nohup streamlit run app.py --server.port 8501 --server.address 0.0.0.0 > streamlit.log 2>&1 &
+            nohup python3 -u reception_api.py > reception_api.log 2>&1 & echo $! > reception_api.pid
+
+            sleep 3
+            echo "📄 [streamlit.log]"
+            tail -n 30 streamlit.log || echo "(no streamlit.log)"
+            echo "📄 [reception_api.log]"
+            tail -n 30 reception_api.log || echo "(no reception_api.log)"
           EOF
-  
