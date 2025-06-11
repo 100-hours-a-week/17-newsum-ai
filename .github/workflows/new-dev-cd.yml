@@ -54,25 +54,25 @@ jobs:
           scp main.env ${{ secrets.GCP_VM_USER_DEV }}@${{ secrets.GCP_VM_IP_DEV }}:~/17-newsum-ai/.env
           scp sub.env ${{ secrets.GCP_VM_USER_DEV }}@${{ secrets.GCP_VM_IP_DEV }}:~/17-newsum-ai/pre-test/service_streamlit/.env
 
-          - name: Run Deployment Commands on VM
-          run: |
-            ssh ${{ secrets.GCP_VM_USER_DEV }}@${{ secrets.GCP_VM_IP_DEV }} << 'EOF'
+      - name: Run Deployment Commands on VM
+        run: |
+          ssh ${{ secrets.GCP_VM_USER_DEV }}@${{ secrets.GCP_VM_IP_DEV }} << 'EOF'
               export PATH="$HOME/.pyenv/bin:$PATH"
               eval "$(pyenv init --path)"
               eval "$(pyenv virtualenv-init -)"
-  
+
               cd ~/17-newsum-ai
-  
+
               # FastAPI venv
               python -m venv .venv
               source .venv/bin/activate
               pip install --upgrade pip
               pip install -r requirements.txt
-  
+
               # 서비스 실행
               chmod +x ./scripts/start_services.sh
               ./scripts/start_services.sh
-  
+
               # Streamlit
               cd pre-test/service_streamlit
               python -m venv .venv
@@ -81,5 +81,5 @@ jobs:
               pip install -r requirements.txt
               nohup streamlit run app.py --server.port 8501 --server.address 0.0.0.0 > streamlit.log 2>&1 &
               nohup python3 -u reception_api.py > reception_api.log 2>&1 & echo $! > reception_api.pid
-            EOF
+          EOF
   
