@@ -49,7 +49,7 @@ jobs:
       - name: Upload Project and .envs to GCP VM (zip 방식)
         run: |
           zip -r project.zip . -x "*.git*" "node_modules/*" "__pycache__/*"
-          scp project.zip ${{ secrets.GCP_VM_USER_DEV }}@${{ secrets.GCP_VM_IP_DEV }}:~
+          scp -o StrictHostKeyChecking=no project.zip ${{ secrets.GCP_VM_USER_DEV }}@${{ secrets.GCP_VM_IP_DEV }}:~
           ssh -o StrictHostKeyChecking=no ${{ secrets.GCP_VM_USER_DEV }}@${{ secrets.GCP_VM_IP_DEV }} << 'EOF'
             rm -rf ~/17-newsum-ai
             mkdir -p ~/17-newsum-ai
@@ -61,7 +61,7 @@ jobs:
 
       - name: Stop & Start Services on VM (with logs)
         run: |
-          ssh ${{ secrets.GCP_VM_USER_DEV }}@${{ secrets.GCP_VM_IP_DEV }} << 'EOF'
+          ssh -o StrictHostKeyChecking=no ${{ secrets.GCP_VM_USER_DEV }}@${{ secrets.GCP_VM_IP_DEV }} << 'EOF'
             set -e
             export PATH="$HOME/.pyenv/bin:$PATH"
             eval "$(pyenv init --path)"
