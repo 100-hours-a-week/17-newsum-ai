@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional
 from urllib.parse import urlparse, urljoin
 import aiohttp
 from bs4 import BeautifulSoup
@@ -63,10 +63,13 @@ class ArticleScraperTool:
         Args:
             session (Optional[aiohttp.ClientSession]): 외부 aiohttp 세션 (선택 사항). 없으면 내부 생성.
         """
-        self.user_agent = settings.SCRAPER_USER_AGENT
-        self.http_timeout = settings.SCRAPER_HTTP_TIMEOUT
-        self.min_text_length = settings.MIN_EXTRACTED_TEXT_LENGTH
-        self.min_lang_detect_length = settings.MIN_LANGDETECT_TEXT_LENGTH
+
+        self.user_agent = getattr(settings, 'SCRAPER_USER_AGENT', None) or \
+                          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+        self.http_timeout = getattr(settings, 'SCRAPER_HTTP_TIMEOUT', 15)
+        self.min_text_length = getattr(settings, 'MIN_EXTRACTED_TEXT_LENGTH', 150)
+        self.min_lang_detect_length = getattr(settings, 'MIN_LANGDETECT_TEXT_LENGTH', 50)
+
 
         self._session = session
         self._created_session = False
@@ -81,10 +84,9 @@ class ArticleScraperTool:
         if not TRAFILATURA_AVAILABLE: logger.warning("trafilatura 라이브러리를 찾을 수 없습니다. Trafilatura 추출 비활성화됨.")
         if not LANGDETECT_AVAILABLE: logger.warning("langdetect 라이브러리를 찾을 수 없습니다. 언어 감지가 비활성화됩니다 ('und').")
 
-
     @retry(
-        stop=stop_after_attempt(settings.TOOL_RETRY_ATTEMPTS), # 설정값 사용
-        wait=wait_exponential(multiplier=1, min=settings.TOOL_RETRY_WAIT_MIN, max=settings.TOOL_RETRY_WAIT_MAX), # 설정값 사용
+        stop=stop_after_attempt(getattr(settings, 'TOOL_RETRY_ATTEMPTS', 3)), # 설정값 사용
+        wait=wait_exponential(multiplier=1, min=getattr(settings, 'TOOL_RETRY_WAIT_MIN', 2), max=getattr(settings, 'TOOL_RETRY_WAIT_MAX', 10)), # 설정값 사용
         retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError)), # 재시도 조건
         reraise=True # 실패 시 예외 다시 발생
     )

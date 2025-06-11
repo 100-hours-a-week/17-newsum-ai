@@ -18,8 +18,6 @@ import asyncio
 import json
 from typing import Any, Dict, List, Optional
 
-import aiohttp
-from bs4 import BeautifulSoup
 from pydantic import ValidationError
 
 from app.config.settings import Settings
@@ -30,6 +28,9 @@ from app.utils.logger import get_logger
 from app.workflows.state_v3 import (
     OverallWorkflowState,
 )
+
+from app.tools.scraping.article_scraper import ArticleScraperTool
+from app.tools.scraping.selenium_scraper import SeleniumScraperTool, SELENIUM_AVAILABLE
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 설정 및 상수
@@ -51,11 +52,33 @@ class N03SearchExecutionNode:
             redis_client: DatabaseClient,
             llm_service: LLMService,
             search_tool: Optional[GoogleSearchTool] = None,
+            article_scraper: Optional[ArticleScraperTool] = None,
+            selenium_scraper: Optional[SeleniumScraperTool] = None,
     ):
         self.redis = redis_client
         self.llm = llm_service
         self.search_tool = search_tool or GoogleSearchTool()
+
+        # 스크레이퍼 인스턴스화
+        self.article_scraper = article_scraper or ArticleScraperTool()
+        self.selenium_scraper = None # 먼저 None으로 초기화
+
+        # 모듈에서 직접 import한 SELENIUM_AVAILABLE 변수를 사용하여 확인
+        if SELENIUM_AVAILABLE:
+            self.selenium_scraper = selenium_scraper or SeleniumScraperTool()
+
+        if not self.selenium_scraper:
+            logger.warning("SeleniumScraperTool이 비활성화되었습니다. Fallback 스크래핑을 사용할 수 없습니다.")
+
         self.logger = logger
+
+    # 노드 종료 시 WebDriver를 안전하게 닫기 위한 메서드 추가
+    async def close(self):
+        """노드에서 사용된 리소스를 안전하게 종료합니다."""
+        await self.article_scraper.close()
+        if self.selenium_scraper:
+            await self.selenium_scraper.close()
+        logger.info("N03 노드의 모든 스크레이퍼 리소스가 종료되었습니다.")
 
     async def __call__(self, current_state_dict: Dict[str, Any]) -> Dict[str, Any]:
         work_id = current_state_dict.get("work_id")
@@ -181,15 +204,8 @@ class N03SearchExecutionNode:
 
     async def _process_url(self, source_info: Dict[str, str], lang: str, work_id: str) -> Optional[Dict[str, Any]]:
         """
-        단일 URL의 전체 텍스트를 추출하고 메타데이터(title, snippet)를 포함한 구조화된 데이터를 반환합니다.
-
-        Args:
-            source_info (Dict[str, str]): 'url', 'title', 'snippet'을 포함한 딕셔너리
-            lang (str): 검색된 언어 ('ko' 또는 'en')
-            work_id (str): 작업의 고유 ID
-
-        Returns:
-            Optional[Dict[str, Any]]: 처리된 아티클의 상세 정보 또는 실패 시 None
+        [하이브리드 전략 적용]
+        단일 URL을 처리합니다. ArticleScraper를 먼저 시도하고, 실패 시 SeleniumScraper로 대체 작동합니다.
         """
         url = source_info.get("url")
         if not url:
@@ -197,48 +213,61 @@ class N03SearchExecutionNode:
             return None
 
         log_extra = {"work_id": work_id, "url": url}
-        self.logger.info("URL 처리 시작.", extra=log_extra)
+        self.logger.info(f"URL 처리 시작 (하이브리드 전략): {url}", extra=log_extra)
 
-        full_text = await self._fetch_and_parse_url(url, work_id)
-        if not full_text:
-            self.logger.warning("콘텐츠를 가져올 수 없어 처리를 중단합니다.", extra=log_extra)
+        scraped_data = None
+
+        # --- 1차 시도: ArticleScraperTool (빠른 정적 분석) ---
+        try:
+            self.logger.debug("1차 시도: ArticleScraperTool", extra=log_extra)
+            # ArticleScraperTool은 상세한 메타데이터를 반환하므로 결과 대부분을 활용
+            scraped_data = await self.article_scraper.scrape_article(url, trace_id=work_id, comic_id=work_id)
+        except Exception as e:
+            self.logger.error(f"ArticleScraperTool 실행 중 오류 발생: {e}", exc_info=True, extra=log_extra)
+            scraped_data = None
+
+        # --- 2차 시도: SeleniumScraperTool (강력한 동적 분석) ---
+        # 1차 시도 실패, 텍스트가 너무 짧거나, Selenium 사용이 가능한 경우
+        if (not scraped_data or len(scraped_data.get("text", "")) < 100) and self.selenium_scraper:
+            self.logger.warning("1차 시도 실패 또는 내용 부족. 2차 시도 (SeleniumScraperTool) 실행.", extra=log_extra)
+            try:
+                # SeleniumScraper는 다른 형식의 데이터를 반환할 수 있으므로 정규화 필요
+                selenium_result = await self.selenium_scraper.scrape_url(url, platform="OtherWeb", work_id=work_id)
+
+                # Selenium 결과가 있다면, ArticleScraper 결과 형식에 맞게 정규화
+                if selenium_result and selenium_result.get("text"):
+                    scraped_data = {
+                        'url': url,
+                        'title': selenium_result.get('title') or source_info.get('title', ''),
+                        'text': selenium_result.get('text'),
+                        'publish_date': selenium_result.get('timestamp'),
+                        'language': 'und',  # Selenium은 언어 감지 기능이 없으므로 미정으로 설정
+                        'extraction_method': 'selenium'
+                    }
+                else:
+                    scraped_data = None  # Selenium도 실패한 경우
+            except Exception as e:
+                self.logger.error(f"SeleniumScraperTool 실행 중 오류 발생: {e}", exc_info=True, extra=log_extra)
+                scraped_data = None
+
+        # --- 최종 결과 처리 ---
+        if not scraped_data or not scraped_data.get("text"):
+            self.logger.error("모든 스크래핑 방법으로 유의미한 콘텐츠 추출 실패.", extra=log_extra)
             return None
 
-        text_length = len(full_text)
-
-        self.logger.info(f"URL 처리 및 전체 텍스트 추출 성공 (길이: {text_length}).", extra=log_extra)
-
-        # 최종 결과물에 title과 snippet을 포함하여 반환
-        return {
-            "source_url": url,
-            "language": lang,
-            "title": source_info.get("title", ""),  # title 필드 추가
-            "snippet": source_info.get("snippet", ""),  # snippet 필드 추가
-            "full_text": full_text,
-            "text_length": text_length
+        # 최종 결과물 구조화 (n_03 노드가 기대하는 형식으로)
+        final_result = {
+            "source_url": scraped_data.get('url', url),
+            "language": scraped_data.get('language', lang),  # 언어 감지 실패 시 검색어 언어 사용
+            "title": scraped_data.get('title') or source_info.get('title', ''),  # 제목 없으면 검색 결과 제목 사용
+            "snippet": source_info.get('snippet', ''),  # 검색 결과의 snippet은 항상 포함
+            "full_text": scraped_data['text'][:MAX_CONTENT_LENGTH],  # 최대 길이 제한
+            "text_length": len(scraped_data['text']),
+            "extraction_method": scraped_data.get('extraction_method', 'unknown')  # 추출 방법 기록
         }
 
-    async def _fetch_and_parse_url(self, url: str, work_id: str) -> Optional[str]:
-        """URL의 HTML을 가져와 본문 텍스트를 파싱합니다."""
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=15) as response:
-                    if response.status == 200:
-                        html = await response.text()
-                        soup = BeautifulSoup(html, 'html.parser')
-                        main_content = soup.find('main') or soup.find('article') or soup.find('body')
-                        if main_content:
-                            text = ' '.join(
-                                p.get_text(strip=True) for p in main_content.find_all(['p', 'h1', 'h2', 'h3']))
-                            return text[:MAX_CONTENT_LENGTH]  # 최대 길이 제한
-                        return None
-                    else:
-                        self.logger.warning(f"URL GET 실패, 상태 코드: {response.status}",
-                                            extra={"work_id": work_id, "url": url})
-                        return None
-        except Exception as e:
-            self.logger.error(f"URL 스크래핑 중 오류: {e}", extra={"work_id": work_id, "url": url})
-            return None
+        self.logger.info(f"URL 처리 성공 (방법: {final_result['extraction_method']}).", extra=log_extra)
+        return final_result
 
     async def _finalize_and_save_state(self, workflow_state: OverallWorkflowState, log_extra: Dict) -> Dict[str, Any]:
         """최종 상태를 저장하고 반환합니다."""

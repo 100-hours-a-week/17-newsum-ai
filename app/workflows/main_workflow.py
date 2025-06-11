@@ -31,6 +31,8 @@ from app.services.database_client import DatabaseClient
 from app.services.llm_service import LLMService
 from app.services.postgresql_service import PostgreSQLService
 from app.tools.search.Google_Search_tool import GoogleSearchTool
+from app.tools.scraping.article_scraper import ArticleScraperTool
+from app.tools.scraping.selenium_scraper import SeleniumScraperTool
 from app.config.settings import Settings
 
 # 애플리케이션 로거 사용 권장 (예: from app.utils.logger import get_logger)
@@ -85,10 +87,13 @@ def get_v3_node_instances(
         google_search_tool_instance: GoogleSearchTool
 
 ) -> Dict[str, Any]:
+    article_scraper_instance = ArticleScraperTool()
+    selenium_scraper_instance = SeleniumScraperTool()
+
     return {
         NODE_INTERNAL_NAMES_V3[0]: N01TopicClarificationNode(redis_client, llm_service, pg_service, google_search_tool_instance),
         NODE_INTERNAL_NAMES_V3[1]: N02ReportSearchPlanningNode(redis_client, llm_service),
-        NODE_INTERNAL_NAMES_V3[2]: N03SearchExecutionNode(redis_client, llm_service, google_search_tool_instance),
+        NODE_INTERNAL_NAMES_V3[2]: N03SearchExecutionNode(redis_client, llm_service, google_search_tool_instance, article_scraper_instance, selenium_scraper_instance),
         NODE_INTERNAL_NAMES_V3[3]: N04ReportDraftingNode(redis_client, llm_service),  # LLMService 추가 가정
         NODE_INTERNAL_NAMES_V3[4]: N05PersonaAnalysisNode(pg_service, llm_service, redis_client),  # LLMService 추가 가정
         NODE_INTERNAL_NAMES_V3[5]: N06OpinionToImageConceptNode(llm_service, redis_client),  # LLMService 추가 가정

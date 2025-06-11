@@ -60,7 +60,7 @@ def build_and_truncate_context(
         recent_history: List[Dict[str, str]],
         user_message: str,
         tokenizer: Optional[AutoTokenizer],
-        workflow_state_str: str,
+        #workflow_state_str: str,
         current_time_str: str,
         main_user_info: str,
         state_field_explanations_str: str
@@ -68,12 +68,11 @@ def build_and_truncate_context(
     messages_for_llm = []
     messages_for_llm.append({"role": "system", "content": system_prompt})
     # current_tokens = count_tokens(system_prompt, tokenizer) # [주석 처리]
-
+    # - 현재 워크플로우 상태: {workflow_state_str}
     additional_context_content = f"""**추가 중요 정보:**
-- 현재 워크플로우 상태: {workflow_state_str}
 - 현재 시간: {current_time_str}
-- 사용자 관련 참고사항: {main_user_info}
-- 워크플로우 상태 필드 가이드: {state_field_explanations_str}"""
+- 사용자 관련 참고사항: {main_user_info}"""
+    # - 워크플로우 상태 필드 가이드: {state_field_explanations_str}
     messages_for_llm.append({"role": "system", "content": additional_context_content})
     # current_tokens += count_tokens(additional_context_content, tokenizer) # [주석 처리]
 
@@ -231,7 +230,8 @@ async def handle_chat_processing(
 
         messages_for_llm = build_and_truncate_context(
             system_prompt_to_use, summary, recent_history, user_message, tokenizer,
-            workflow_state_str, current_time_str, main_user_info, state_field_explanations
+            # workflow_state_str,
+            current_time_str, main_user_info, state_field_explanations
         )
 
         logger.debug(f"LLM params for call: {final_llm_params}, CoT: {use_cot_flag}", extra=log_extra)
