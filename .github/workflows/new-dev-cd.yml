@@ -99,6 +99,25 @@ jobs:
             pip install --upgrade pip
             pip install -r requirements.txt
 
+
+            echo "📊 Stopping existing Streamlit and Reception API if running..."
+
+            # Streamlit 종료 (8501 포트)
+            STREAMLIT_PID=$(lsof -t -i:8501)
+            if [ -n "$STREAMLIT_PID" ]; then
+                echo "   🔴 Stopping Streamlit (PID: $STREAMLIT_PID)..."
+                kill "$STREAMLIT_PID"
+                sleep 2
+            fi
+
+            # Reception API 종료 (9090 포트)
+            RECEPTION_PID=$(lsof -t -i:9090)
+            if [ -n "$RECEPTION_PID" ]; then
+                echo "   🔴 Stopping Reception API (PID: $RECEPTION_PID)..."
+                kill "$RECEPTION_PID"
+                sleep 2
+            fi
+
             echo "📊 Running Streamlit & Reception API..."
             nohup streamlit run app.py --server.port 8501 --server.address 0.0.0.0 > streamlit.log 2>&1 &
             nohup python3 -u reception_api.py > reception_api.log 2>&1 & echo $! > reception_api.pid
