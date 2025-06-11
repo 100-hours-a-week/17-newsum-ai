@@ -70,12 +70,12 @@ jobs:
             cd ~/17-newsum-ai
 
             echo "🛑 Stopping old services..."
-            if [ -f ./scripts/stop_services.sh ]; then
-              chmod +x ./scripts/stop_services.sh
-              ./scripts/stop_services.sh || true
+            if [ -f ./deploy_scripts/stop_services.sh ]; then
+              chmod +x ./deploy_scripts/stop_services.sh
+              ./deploy_scripts/stop_services.sh || true
               echo "📄 [stop_services.log]"
-              cat ./scripts/logs/server.log || echo "(no server.log)"
-              cat ./scripts/logs/worker.log || echo "(no worker.log)"
+              cat ./deploy_scripts/logs/server.log || echo "(no server.log)"
+              cat ./deploy_scripts/logs/worker.log || echo "(no worker.log)"
             fi
 
             echo "🚀 Setting up FastAPI venv..."
@@ -85,12 +85,12 @@ jobs:
             pip install -r requirements.txt
 
             echo "▶️ Starting FastAPI & Worker..."
-            chmod +x ./scripts/start_services.sh
-            ./scripts/start_services.sh
+            chmod +x ./deploy_scripts/start_services.sh
+            ./deploy_scripts/start_services.sh
 
             echo "📄 [start_services.log]"
-            cat ./scripts/logs/server.log || echo "(no server.log)"
-            cat ./scripts/logs/worker.log || echo "(no worker.log)"
+            cat ./deploy_scripts/logs/server.log || echo "(no server.log)"
+            cat ./deploy_scripts/logs/worker.log || echo "(no worker.log)"
 
             echo "💡 Setting up Streamlit..."
             cd pre-test/service_streamlit
