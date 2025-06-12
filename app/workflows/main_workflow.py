@@ -98,7 +98,7 @@ def get_v3_node_instances(
         NODE_INTERNAL_NAMES_V3[4]: N05PersonaAnalysisNode(pg_service, llm_service, redis_client),  # LLMService 추가 가정
         NODE_INTERNAL_NAMES_V3[5]: N06OpinionToImageConceptNode(llm_service, redis_client),  # LLMService 추가 가정
         NODE_INTERNAL_NAMES_V3[6]: N07ImagePromptGenerationNode(llm_service, redis_client),  # LLMService 추가 가정
-        NODE_INTERNAL_NAMES_V3[7]: N08QueueForImageGenerationNode(pg_service, redis_client),  # LLMService 추가 가정
+        NODE_INTERNAL_NAMES_V3[7]: N08QueueForImageGenerationNode(pg_service, redis_client, llm_service),
     }
 
 # 일반화된 노드 실행 래퍼 함수

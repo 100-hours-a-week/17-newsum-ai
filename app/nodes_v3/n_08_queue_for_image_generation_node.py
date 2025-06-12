@@ -19,6 +19,7 @@ from app.workflows.state_v3 import (
 )
 from app.config.settings import settings  # settings 임포트 추가
 from app.services.storage_service import StorageService
+from app.services.llm_service import LLMService
 
 # --- 로거 설정 ---
 logger = get_logger("n_08_QueueForImageGenerationNode")
@@ -30,14 +31,16 @@ class N08QueueForImageGenerationNode:
     LangGraph 비동기 노드 – 이미지 생성용 데이터를 DB 큐에 저장합니다. (n_08)
     """
 
-    def __init__(self, postgre_db_client: PostgreSQLService, redis_client: DatabaseClient):
+    def __init__(self, postgre_db_client: PostgreSQLService, redis_client: DatabaseClient, llm_service: LLMService):
         """
         노드 초기화. 필요한 서비스 클라이언트들을 주입받습니다.
         :param postgre_db_client: PostgreSQL DB 상호작용을 위한 클라이언트
         :param redis_client: 상태 저장을 위한 Redis 클라이언트
+        :param llm_service: LLMService 인스턴스 (외부에서 주입)
         """
         self.db = postgre_db_client
         self.redis = redis_client
+        self.llm = llm_service
         self.logger = logger
 
     async def __call__(self, current_state_dict: Dict[str, Any]) -> Dict[str, Any]:
@@ -72,6 +75,8 @@ class N08QueueForImageGenerationNode:
             panels = image_prompts_state.panels
             image_concept_state = workflow_state.image_concept
             persona_id = persona_analysis_state.selected_opinion.persona_id if persona_analysis_state.selected_opinion else None
+            persona_name = persona_analysis_state.selected_opinion.persona_name if persona_analysis_state.selected_opinion else None
+            persona_opinion = persona_analysis_state.selected_opinion.opinion_text if persona_analysis_state.selected_opinion else None
             report_draft = report_draft_state.draft
 
             # 필수 값 체크
@@ -97,42 +102,30 @@ class N08QueueForImageGenerationNode:
             title = image_concept_state.final_thumbnail.caption
             panel_descriptions = [c.caption for c in image_concept_state.final_concepts]
             category = report_draft_state.category
-            keyword = ", ".join(report_draft_state.keywords)
-            content = report_draft[:200] if report_draft else "dummy_content"  # 요약 구현 필요
+
+            # content 생성: LLM 호출 (보고서 전체, 페르소나 시각, 400자 이내)
+            content = await self._generate_content_summary(report_draft, persona_name, persona_opinion, self.logger, work_id)
 
             # 1. HTML 파일 경로 결정 (settings에서 읽음)
             html_file_path = os.path.join(settings.REPORT_HTML_OUTPUT_DIR, f"{work_id}.html")
-            storage_service = StorageService()
-            report_url = "https://dummy.com/report.html"  # 기본값
-
-            # 2. 파일이 존재하면 S3 업로드 및 CloudFront URL 획득
-            if os.path.exists(html_file_path):
-                upload_result = await storage_service.upload_file_with_cloudfront_url(
-                    file_path=html_file_path,
-                    object_key=f"reports/{work_id}.html",
-                    content_type="text/html"
-                )
-                if upload_result.get("cloudfront_url"):
-                    report_url = upload_result["cloudfront_url"]
-                else:
-                    raise ValueError(f"CloudFront URL 생성 실패: {upload_result}")
-            else:
-                raise ValueError(f"HTML 파일이 존재하지 않음: {html_file_path}")
+            report_url = await self._upload_report_and_get_url(html_file_path, work_id, self.logger)
 
             payload = {
                 "work_id": work_id,
                 "ai_author_id": persona_id,
-                "keyword": keyword,     # 쉼표로 join된 문자열
+                "keyword": report_draft_state.keywords,   # 리스트 그대로 전달
                 "category": category,   # POLITICS, IT, FINANCE 중 하나
                 "title": title,
                 "reportUrl": report_url,
-                "content": content,     # TODO: 요약 구현 필요
+                "content": content,     # LLM 생성 요약문
                 "description1": panel_descriptions[0],
                 "description2": panel_descriptions[1],
                 "description3": panel_descriptions[2],
                 "description4": panel_descriptions[3],
                 "imagePrompts": all_prompts
             }
+            # content를 state에도 기록
+            node_state.content = content
         except Exception as e:
             error_msg = f"API 전송용 데이터 추출 중 오류: {e}"
             self.logger.error(error_msg, extra=log_extra)
@@ -190,3 +183,54 @@ class N08QueueForImageGenerationNode:
             await self.redis.set(key, json_compatible_state, expire=60 * 60 * 6)
         except Exception as e:
             self.logger.error(f"Redis 상태 저장 중 오류 발생: {e}", exc_info=True, extra={"work_id": work_id})
+
+    async def _generate_content_summary(self, report_draft, persona_name, persona_opinion, logger, work_id):
+        """
+        보고서 draft, 페르소나 이름/의견을 받아 LLM으로 400자 이내 요약문 생성
+        """
+        content_prompt = (
+            "아래 정보를 바탕으로 400자 이내의 보고서 설명문을 작성하세요.\n"
+            "\n"
+            "1. 보고서 전체 내용(마크다운):\n"
+            f"{report_draft[:2000] if report_draft else ''}\n"
+            "2. 페르소나 이름:\n"
+            f"{persona_name or ''}\n"
+            "3. 페르소나 의견:\n"
+            f"{persona_opinion or ''}\n"
+            "\n"
+            "- 보고서 전체 내용을 간단히 요약하고, 페르소나의 시각이 자연스럽게 녹아들도록 작성하세요.\n"
+            "- 사실을 왜곡하지 말고, 객관적 내용을 바탕으로 하되 페르소나의 관점이 드러나게 써주세요.\n"
+            "- 너무 딱딱하지 않게, 독자가 흥미를 가질 수 있도록 써주세요.\n"
+            "- 반드시 400자 이내로 작성하세요."
+        )
+        try:
+            resp = await self.llm.generate_text(
+                messages=[{"role": "user", "content": content_prompt}],
+                request_id=f"n08-content-summary-{work_id}",
+                max_tokens=1024,
+                temperature=0.5
+            )
+            content = resp.get("generated_text", "").strip()
+            if not content or len(content) > 500:
+                raise ValueError("LLM이 content를 제대로 생성하지 못함")
+            return content
+        except Exception as e:
+            logger.error(f"content 생성 LLM 호출 실패: {e}", extra={"work_id": work_id})
+            return f"이 보고서는 페르소나({persona_name or ''})의 시각이 반영된 전문 보고서입니다. {persona_opinion[:100] if persona_opinion else ''} (자동 요약 실패)"
+
+    async def _upload_report_and_get_url(self, html_file_path, work_id, logger):
+        storage_service = StorageService()
+        report_url = "https://dummy.com/report.html"  # 기본값
+        if os.path.exists(html_file_path):
+            upload_result = await storage_service.upload_file_with_cloudfront_url(
+                file_path=html_file_path,
+                object_key=f"reports/{work_id}.html",
+                content_type="text/html"
+            )
+            if upload_result.get("cloudfront_url"):
+                report_url = upload_result["cloudfront_url"]
+            else:
+                raise ValueError(f"CloudFront URL 생성 실패: {upload_result}")
+        else:
+            raise ValueError(f"HTML 파일이 존재하지 않음: {html_file_path}")
+        return report_url

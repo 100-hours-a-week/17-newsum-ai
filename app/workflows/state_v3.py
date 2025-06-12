@@ -129,6 +129,7 @@ class ImageQueueState(BaseModel):
     is_ready: bool = Field(False, description="이미지 생성 작업이 큐에 성공적으로 저장되었는지 여부")
     job_id: Optional[int] = Field(None, description="DB에 생성된 작업의 고유 ID")
     error_message: Optional[str] = None
+    content: Optional[str] = None  # 보고서 요약+페르소나 시각 설명문
 
 class OverallWorkflowState(BaseModel):
     user_query: str
