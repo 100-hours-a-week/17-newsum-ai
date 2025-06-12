@@ -5,6 +5,7 @@ from fastapi import Depends # Request는 현재 미사용, 필요시 유지
 from langgraph.graph import StateGraph
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
+from app.services.backend_client import BackendApiClient
 from app.services.database_client import DatabaseClient
 from app.services.postgresql_service import PostgreSQLService
 from app.services.llm_service import LLMService
@@ -50,6 +51,9 @@ def get_Google_Search_tool() -> GoogleSearchTool: # 함수명 변경 및 키 변
 def get_image_service() -> ImageService:
     return _get_shared_object('image_service')
 
+def get_backend_apiclient() -> BackendApiClient:
+    return _get_shared_object('backend_apiclient')
+
 def get_translation_service() -> TranslationService:
     return _get_shared_object('translation_service')
 
@@ -78,6 +82,7 @@ SpamServiceDep = Annotated[SpamService, Depends(get_spam_service)]
 StorageServiceDep = Annotated[StorageService, Depends(get_storage_service)]
 LangSmithServiceDep = Annotated[LangSmithService, Depends(get_langsmith_service)]
 CheckpointSaverDep = Annotated[BaseCheckpointSaver, Depends(get_checkpointer)]
+BackendApiClientDep = Annotated[BackendApiClient, Depends(get_backend_apiclient)]
 
 
 # WorkflowControllerV3 의존성 주입 함수

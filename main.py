@@ -9,7 +9,7 @@ from fastapi import FastAPI
 
 # API 라우트 정의
 # from app.api.v1 import endpoints as v1_endpoints
-from app.api.v2 import endpoints as v2_endpoints
+from app.api.v2 import endpoints, image_endpoints
 
 # 애플리케이션 시작/종료 시 실행될 로직 (예: 모델 로딩, 워크플로우 컴파일)
 from app.lifespan import lifespan
@@ -45,7 +45,8 @@ app = FastAPI(
 # '/api/v1' 경로로 들어오는 요청을 v1_endpoints.router 가 처리하도록 설정
 # app.include_router(v1_endpoints.router, prefix="/api/v1")
 # '/api/v2' 경로로 들어오는 요청을 v2_endpoints.router 가 처리하도록 설정  
-app.include_router(v2_endpoints.router, prefix="/api/v2")
+app.include_router(endpoints.router, prefix="/api/v2")
+app.include_router(image_endpoints.router, prefix="/api/v2")
 
 # --- Uvicorn 서버 실행 (로컬 개발 환경용) ---
 # 이 스크립트가 직접 실행될 때만 동작

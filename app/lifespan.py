@@ -15,6 +15,7 @@ from app.workflows.main_workflow import compile_workflow
 from app.dependencies import _shared_state
 
 from app.services.database_client import DatabaseClient
+from app.services.backend_client import BackendApiClient
 from app.services.postgresql_service import PostgreSQLService
 from app.services.llm_service import LLMService
 from app.services.image_service import ImageService
@@ -87,6 +88,11 @@ async def startup_event():
         _shared_state['db_client'] = db_client
         _service_instances_lifespan.append(db_client)
         logger_lifespan.info("DatabaseClient (Redis) initialized.")
+
+        backend_apiclient = BackendApiClient(session=shared_aiohttp_session)
+        _shared_state['backend_apiclient'] = backend_apiclient
+        _service_instances_lifespan.append(backend_apiclient)
+        logger_lifespan.info("BackendApiClient initialized.")
 
         pg_service = PostgreSQLService()
         await pg_service.connect()

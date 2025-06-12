@@ -91,6 +91,7 @@ class Settings(BaseSettings):
     TARGET_COMMUNITY_DOMAINS: List[str] = Field(default_factory=list) 
     EXTERNAL_NOTIFICATION_API_URL: Optional[str] = Field(None)
     BACKEND_RECEIVE_API_URL: Optional[str] = Field(None)
+    STREAMLIT_RECEIVE_API_URL: Optional[str] = Field(None)
     EXTERNAL_API_TIMEOUT_SECONDS: int = 30
 
     # --- 도구 공통 설정 ---

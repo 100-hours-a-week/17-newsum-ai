@@ -474,7 +474,7 @@ def render_chat_interface():
 
         st.session_state.messages = db_utils.get_messages(room_id)
         st.session_state.is_loading = True
-        asyncio.run(call_ai_server(prompt, room_id, user_id, req_id, target_status_for_api, work_id))
+        asyncio.run(call_ai_server(prompt.replace("\"","").replace("\'",""), room_id, user_id, req_id, target_status_for_api, work_id))
         st.rerun()
 
     if st.session_state.is_loading:
