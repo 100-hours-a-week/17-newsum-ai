@@ -44,6 +44,11 @@ class ChatResponse(BaseModel): # API 응답 스키마 예시
 # --------------------------------------------------------------------------
 # │ [신규] 이미지 API 관련 스키마 추가                                       │
 # --------------------------------------------------------------------------
+
+class ImageHealthResponse(BaseModel):
+    """이미지 서비스 건강 상태 응답 스키마"""
+    status: str = Field(..., description="이미지 생성 서비스의 현재 상태", examples=["healthy", "unhealthy"])
+
 class ImagePromptItem(BaseModel):
     """개별 이미지 생성 요청 항목 스키마 (클라이언트 요청 형식에 맞춤)"""
     # 요청 JSON의 필드를 그대로 정의합니다.
