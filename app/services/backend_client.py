@@ -9,7 +9,7 @@ from app.config.settings import settings
 logger = get_logger(__name__)
 # BACKEND_RECEIVE_API_URL
 streamlit_callback_url = settings.STREAMLIT_RECEIVE_API_URL
-backend_callback_url = settings.STREAMLIT_RECEIVE_API_URL
+backend_callback_url = settings.BACKEND_RECEIVE_API_URL
 
 class BackendApiClient:
     """

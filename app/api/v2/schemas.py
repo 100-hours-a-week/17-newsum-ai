@@ -62,6 +62,7 @@ class ImagePromptItem(BaseModel):
     model_name: str = Field("pure", description="이미지 생성에 사용할 모델 이름")
 
 
+
 class BatchImageGenerationRequest(BaseModel):
     """배치 이미지 생성 API 요청 스키마 (클라이언트 요청 형식에 맞춤)"""
     request_id: str = Field(..., description="전체 배치 작업에 대한 고유 ID. 콜백 시 사용됩니다.")
