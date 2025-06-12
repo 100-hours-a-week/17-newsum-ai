@@ -75,11 +75,9 @@ async def generate_images_in_background(
     # 순차 처리를 위해 for 루프를 사용합니다.
     success_uploads: List[ImageUploadResult] = []
     has_errors = False
-
+    num_prompts = len(payload.image_prompts)
     for i, item in enumerate(payload.image_prompts):
         try:
-            # for 루프 내에서 각 작업을 직접 'await' 합니다.
-            # 이 호출이 끝나기 전까지 다음 루프는 실행되지 않습니다.
             single_result_dict = await generate_and_upload_single_image(
                 item_payload=item.model_dump(),
                 image_service=image_service,
@@ -91,7 +89,9 @@ async def generate_images_in_background(
         except Exception as e:
             has_errors = True
             logger.error(f"배경 작업 중 개별 작업(index: {i}) 실패: {e}", extra=extra_log, exc_info=True)
-        time.sleep(3000)
+        if i < num_prompts - 1:
+            logger.info(f"다음 이미지 생성을 위해 2초 대기합니다. (현재 {i + 1}/{num_prompts} 완료)")
+            await asyncio.sleep(2)
     # 최종 결과 구성 (이 부분은 수정 없음)
     final_status = "COMPLETED"
     if has_errors:
