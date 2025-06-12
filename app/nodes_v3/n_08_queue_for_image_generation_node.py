@@ -97,7 +97,7 @@ class N08QueueForImageGenerationNode:
             keyword = "dummy_keyword"  # TODO: 실제 값 추출 필요
             category = "dummy_category"  # TODO: 실제 값 추출 필요
             content = report_draft[:200] if report_draft else "dummy_content"  # 요약 구현 필요
-            reference_url = "https://dummy.com/reference"  # TODO: 실제 값 추출 필요
+            # reference_url = "https://dummy.com/reference"  # TODO: 실제 값 추출 필요
 
             # 1. HTML 파일 경로 결정 (settings에서 읽음)
             html_file_path = os.path.join(settings.REPORT_HTML_OUTPUT_DIR, f"{work_id}.html")
@@ -126,7 +126,7 @@ class N08QueueForImageGenerationNode:
                 "title": title,
                 "reportUrl": report_url,
                 "content": content,     # TODO: 요약 구현 필요
-                "referenceUrl": reference_url,  # TODO: 추후 source에서 추출
+                # "referenceUrl": reference_url,  # TODO: 제외 요청 필요
                 "description1": panel_descriptions[0],
                 "description2": panel_descriptions[1],
                 "description3": panel_descriptions[2],
