@@ -26,6 +26,7 @@ from app.utils.logger import get_logger
 from app.workflows.state_v3 import (
     OverallWorkflowState,
 )
+from app.utils.report_html_renderer import render_report_html_from_markdown, save_report_html
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 설정 및 상수
@@ -204,6 +205,50 @@ class N04ReportDraftingNode:
         workflow_state.report_draft.draft = final_draft_with_title
         workflow_state.report_draft.is_ready = True
         self.logger.info("보고서 초안 작성을 모두 완료했습니다.", extra={"work_id": work_id})
+
+        # HTML 파일로 저장 (최종 확정 시점)
+        try:
+            html = render_report_html_from_markdown(work_id, report_title_text, final_draft_with_title)
+            save_report_html(work_id, html)
+            self.logger.info(f"HTML 보고서가 저장되었습니다. work_id={work_id}", extra={"work_id": work_id})
+        except Exception as e:
+            self.logger.error(f"HTML 보고서 저장 중 오류: {e}", extra={"work_id": work_id})
+
+        # --- (수정) 보고서에서 category, keywords 추출 (JSON 포맷) ---
+        import json as _json
+        try:
+            extract_prompt = f"""아래는 전문 보고서입니다.\n\n---\n{final_draft_with_title}\n---\n\n아래 두 가지를 반드시 JSON 형식(키: category, keywords)으로 반환하세요.\n- category: POLITICS, IT, FINANCE 중 하나의 문자열\n- keywords: 이 보고서의 핵심 키워드 5개 (중복 없이, 명사 위주, 한글/영어 혼용 가능, 리스트 형태)\n\n[출력 예시]\n{{\n  \"category\": \"IT\",\n  \"keywords\": [\"디지털 네이티브\", \"오프라인 활동\", \"스마트폰 의존\", \"정신건강\", \"커뮤니케이션 패러다임\"]\n}}\n"""
+            resp = await self.llm.generate_text(
+                messages=[{"role": "user", "content": extract_prompt}],
+                request_id=f"extract-cat-keywords-json-{work_id}",
+                max_tokens=200,
+                temperature=0.2
+            )
+            result_text = resp.get("generated_text", "").strip()
+            # JSON 파싱
+            try:
+                result_json = _json.loads(result_text)
+                category = result_json.get("category", None)
+                keywords = result_json.get("keywords", [])
+                if not isinstance(keywords, list):
+                    keywords = []
+            except Exception as e:
+                self.logger.error(f"category/keywords JSON 파싱 실패: {e}, 원본: {result_text}", extra={"work_id": work_id})
+                category = None
+                keywords = []
+            if category not in {"POLITICS", "IT", "FINANCE"}:
+                self.logger.warning(f"LLM이 반환한 category가 유효하지 않음: {category}", extra={"work_id": work_id})
+                category = None
+            if not keywords or len(keywords) < 1:
+                self.logger.warning(f"LLM이 반환한 keywords가 비어있음: {keywords}", extra={"work_id": work_id})
+                keywords = []
+            workflow_state.report_draft.category = category
+            workflow_state.report_draft.keywords = keywords
+            self.logger.info(f"보고서에서 추출된 category: {category}, keywords: {keywords}", extra={"work_id": work_id})
+        except Exception as e:
+            self.logger.error(f"category/keywords 추출 중 오류: {e}", extra={"work_id": work_id})
+            workflow_state.report_draft.category = None
+            workflow_state.report_draft.keywords = []
 
     async def _finalize_and_save_state(self, workflow_state: OverallWorkflowState, log_extra: Dict) -> Dict[str, Any]:
         """최종 상태를 저장하고 반환합니다."""

@@ -116,6 +116,10 @@ class Settings(BaseSettings):
     ORIGINAL_REPORT_LANGUAGE: str = "en"
     N06_REPORT_TRANSLATION_TARGET_LANG: str = "ko"
 
+    # --- 커스텀 경로 설정 (보고서 HTML 저장 경로 등) ---
+    REPORT_HTML_OUTPUT_DIR: str = Field("app/static/generated_reports")
+    REPORT_TEMPLATE_PATH: str = Field("app/static/report_template.html")
+
 # 설정 객체 인스턴스 생성
 settings = Settings()
 

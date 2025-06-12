@@ -70,3 +70,6 @@ pre-test/qwen3-14b-awq/
 results/
 scripts/
 *.sql
+
+# report, image static files
+app/static/generated_reports/
