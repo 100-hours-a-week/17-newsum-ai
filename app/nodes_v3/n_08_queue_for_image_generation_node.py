@@ -79,6 +79,10 @@ class N08QueueForImageGenerationNode:
                 raise ValueError("썸네일 프롬프트(thumbnail_prompt)가 존재하지 않습니다.")
             if not panels or len(panels) == 0:
                 raise ValueError("패널 프롬프트(panels)가 존재하지 않습니다.")
+            if not report_draft_state.category:
+                raise ValueError(f"category 값이 없음: category={report_draft_state.category}")
+            if not report_draft_state.keywords:
+                raise ValueError(f"keywords 값이 없음: keywords={report_draft_state.keywords}")
             if not image_concept_state.final_thumbnail:
                 raise ValueError("최종 썸네일 콘셉트(final_thumbnail)가 존재하지 않습니다.")
             if not image_concept_state.final_concepts or len(image_concept_state.final_concepts) < 4:
@@ -92,12 +96,9 @@ class N08QueueForImageGenerationNode:
             all_prompts.extend([p.model_dump() for p in panels])
             title = image_concept_state.final_thumbnail.caption
             panel_descriptions = [c.caption for c in image_concept_state.final_concepts]
-
-            # dummy 값만 하드코딩 (준비 안된 부분)
-            keyword = "dummy_keyword"  # TODO: 실제 값 추출 필요
-            category = "dummy_category"  # TODO: 실제 값 추출 필요
+            category = report_draft_state.category
+            keyword = ", ".join(report_draft_state.keywords)
             content = report_draft[:200] if report_draft else "dummy_content"  # 요약 구현 필요
-            # reference_url = "https://dummy.com/reference"  # TODO: 실제 값 추출 필요
 
             # 1. HTML 파일 경로 결정 (settings에서 읽음)
             html_file_path = os.path.join(settings.REPORT_HTML_OUTPUT_DIR, f"{work_id}.html")
@@ -120,13 +121,12 @@ class N08QueueForImageGenerationNode:
 
             payload = {
                 "work_id": work_id,
-                "persona_id": persona_id,
-                "keyword": keyword,     # TODO: 실제 값 추출 필요
-                "category": category,   # TODO: 실제 값 추출 필요
+                "ai_author_id": persona_id,
+                "keyword": keyword,     # 쉼표로 join된 문자열
+                "category": category,   # POLITICS, IT, FINANCE 중 하나
                 "title": title,
                 "reportUrl": report_url,
                 "content": content,     # TODO: 요약 구현 필요
-                # "referenceUrl": reference_url,  # TODO: 제외 요청 필요
                 "description1": panel_descriptions[0],
                 "description2": panel_descriptions[1],
                 "description3": panel_descriptions[2],
