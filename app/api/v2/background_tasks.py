@@ -63,7 +63,6 @@ async def run_workflow_step_in_background(
     )
 
     try:
-        # ▼▼▼ 핵심 변경 부분 ▼▼▼
         # 1. 컨트롤러 실행 결과를 chat_response 변수에 저장
         chat_response: Optional[ChatResponse] = await controller.process_chat_interaction(
             payload=payload_for_controller)
@@ -83,7 +82,7 @@ async def run_workflow_step_in_background(
                             extra=extra_log)
 
                 # backend_client를 사용하여 직접 응답 메시지 전송
-                callback_success = await backend_client.send_ai_response(
+                callback_success = await backend_client.streamlit_send_ai_response(
                     request_id=callback_id_to_send,
                     content=chat_response.message
                 )

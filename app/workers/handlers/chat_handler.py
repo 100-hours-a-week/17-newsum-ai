@@ -310,7 +310,7 @@ async def handle_chat_processing(
 
         callback_success: Optional[bool] = None
         try:
-            callback_success = await backend_client.send_ai_response(callback_id_to_send, final_answer)
+            callback_success = await backend_client.streamlit_send_ai_response(callback_id_to_send, final_answer)
             if callback_success:
                 logger.info(f"AI response callback sent successfully.", extra=log_extra)
             else:

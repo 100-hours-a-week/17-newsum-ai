@@ -1,6 +1,6 @@
 # ai/app/api/v2/schemas.py (수정 예시)
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List, Dict, Any
 
 # main_workflow.py에서 정의된 새로운 라우터 키 (예시, 실제 값과 일치시켜야 함)
 # 이 값들은 API 클라이언트가 target_status로 전송할 수 있는 유효한 값들입니다.
@@ -40,3 +40,44 @@ class ChatResponse(BaseModel): # API 응답 스키마 예시
     work_id: Optional[str] = Field(None, description="현재 처리 중이거나 생성된 워크플로우의 work_id (구 comic_id).")
     current_overall_status: Optional[str] = Field(None, description="워크플로우의 현재 전반적인 상태 (예: WAITING, PROCESSING, COMPLETED_STEP_X, FAILED).")
     # 필요시 추가적인 상태 정보나 다음 단계 제안 포함 가능
+
+# --------------------------------------------------------------------------
+# │ [신규] 이미지 API 관련 스키마 추가                                       │
+# --------------------------------------------------------------------------
+class ImagePromptItem(BaseModel):
+    """개별 이미지 생성 요청 항목 스키마 (클라이언트 요청 형식에 맞춤)"""
+    # 요청 JSON의 필드를 그대로 정의합니다.
+    seed: int
+    width: int
+    height: int
+    prompt: str
+    panel_id: int
+    negative_prompt: str
+    # 백엔드 로직에 필요하지만 요청에는 없는 model_name은 기본값을 설정합니다.
+    model_name: str = Field("pure", description="이미지 생성에 사용할 모델 이름")
+
+
+class BatchImageGenerationRequest(BaseModel):
+    """배치 이미지 생성 API 요청 스키마 (클라이언트 요청 형식에 맞춤)"""
+    request_id: str = Field(..., description="전체 배치 작업에 대한 고유 ID. 콜백 시 사용됩니다.")
+    # Field의 alias 기능을 사용하여 JSON의 'imagePrompts'(camelCase) 키를
+    # Python 코드의 'image_prompts'(snake_case) 필드에 매핑합니다.
+    image_prompts: List[ImagePromptItem] = Field(..., alias="imagePrompts", min_length=1, max_length=5, description="이미지 생성 프롬프트 목록 (최대 5개)")
+
+class ImageUploadResult(BaseModel):
+    """개별 이미지 생성 및 업로드 결과 스키마"""
+    s3_uri: str = Field(..., description="S3에 업로드된 이미지의 URI")
+    object_key: str = Field(..., description="S3 버킷 내 객체 키")
+    original_prompt: str = Field(..., description="해당 이미지를 생성한 원본 프롬프트")
+
+class BatchImageGenerationResponse(BaseModel):
+    """배치 이미지 생성 최종 결과 콜백 스키마"""
+    request_id: str = Field(..., description="원본 요청 ID")
+    status: str = Field(..., description="배치 작업의 최종 상태 (예: COMPLETED, FAILED)")
+    results: List[ImageUploadResult] = Field([], description="성공적으로 생성 및 업로드된 이미지 결과 목록")
+    error: Optional[str] = Field(None, description="배치 작업 전체가 실패한 경우 에러 메시지")
+
+class AcceptedResponse(BaseModel):
+    """HTTP 202 수락 응답 스키마"""
+    message: str = Field("요청이 수락되어 백그라운드에서 처리됩니다.", description="처리 시작 확인 메시지")
+    request_id: str = Field(..., description="수락된 요청의 ID")

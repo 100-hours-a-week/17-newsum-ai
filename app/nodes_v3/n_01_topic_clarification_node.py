@@ -322,7 +322,7 @@ class N01TopicClarificationNode:
             prompt_user = f"Sentence: '{chosen_intent}'\n\nExtract keywords in Korean:"
             messages = [{"role": "system", "content": prompt_sys}, {"role": "user", "content": prompt_user}]
             try:
-                resp = await self.llm.generate_text(messages=messages, request_id=f"kw-extract-{work_id}", max_tokens=50,
+                resp = await self.llm.generate_text(messages=messages, request_id=f"kw-extract-{work_id}", max_tokens=300,
                                                     temperature=0.1, timeout=LLM_TIMEOUT_SEC / 2)
                 extracted_kws_text = resp.get("generated_text", "").strip()
                 if extracted_kws_text:
@@ -520,6 +520,8 @@ class N01TopicClarificationNode:
         if node_state.draft:
             intent_classification_result = await self._classify_user_response_intent(node_state.draft, user_answer,
                                                                                      work_id)
+            self.logger.info(
+                f"사용자 답변이 '{intent_classification_result}'으로 분류됨. ", extra={"work_id": work_id})
         else:
             intent_classification_result = "RE"
             self.logger.warning("피드백 처리 시 현재 초안(node_state.draft)이 없습니다. 사용자 답변을 수정 요청으로 간주합니다.",
