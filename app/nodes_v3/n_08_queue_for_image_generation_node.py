@@ -110,9 +110,18 @@ class N08QueueForImageGenerationNode:
             html_file_path = os.path.join(settings.REPORT_HTML_OUTPUT_DIR, f"{work_id}.html")
             report_url = await self._upload_report_and_get_url(html_file_path, work_id, self.logger)
 
-            payload = {
-                "work_id": work_id,
-                "ai_author_id": persona_id,
+            # persona_id를 int로 변환 (예: persona_activist_idealistic_05 -> 5)
+            persona_id_int = None
+            try:
+                if persona_id and isinstance(persona_id, str):
+                    persona_id_int = int(persona_id.split('_')[-1])
+            except Exception as e:
+                self.logger.warning(f"persona_id int 변환 실패: {persona_id} ({e})", extra=log_extra)
+                persona_id_int = None
+
+            payload = { # 카멜 방식 api
+                "workId": work_id,
+                "aiAuthorId": persona_id_int,
                 "keyword": report_draft_state.keywords,   # 리스트 그대로 전달
                 "category": category,   # POLITICS, IT, FINANCE 중 하나
                 "title": title,
@@ -126,6 +135,11 @@ class N08QueueForImageGenerationNode:
             }
             # content를 state에도 기록
             node_state.content = content
+            # 외부 API 호출 직전 payload 로그
+            try:
+                self.logger.info(f"N08: 외부 API 호출 payload: {json.dumps(payload, ensure_ascii=False)[:4000]}", extra=log_extra)
+            except Exception as e:
+                self.logger.warning(f"N08: payload 로깅 중 오류: {e}", extra=log_extra)
         except Exception as e:
             error_msg = f"API 전송용 데이터 추출 중 오류: {e}"
             self.logger.error(error_msg, extra=log_extra)
