@@ -113,7 +113,7 @@ class ImageService:
             payload["seed"] = kwargs["seed"]
 
         headers = {"Content-Type": "application/json", "Accept": "*/*"}
-        api_url = self.endpoint
+        api_url = str(self.endpoint)
 
         try:
             self.logger.debug(f"이미지 생성 요청: URL={api_url}, Payload={summarize_for_logging(payload)}")
