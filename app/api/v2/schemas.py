@@ -68,7 +68,7 @@ class BatchImageGenerationRequest(BaseModel):
     id: str = Field(..., description="전체 배치 작업에 대한 고유 ID. 콜백 시 사용됩니다.")
     # Field의 alias 기능을 사용하여 JSON의 'imagePrompts'(camelCase) 키를
     # Python 코드의 'image_prompts'(snake_case) 필드에 매핑합니다.
-    imagePrompts: List[ImagePromptItem] = Field(..., alias="imagePrompts", min_length=1, max_length=5, description="이미지 생성 프롬프트 목록 (최대 5개)")
+    image_prompts: List[ImagePromptItem] = Field(..., alias="imagePrompts", min_length=1, max_length=5, description="이미지 생성 프롬프트 목록 (최대 5개)")
 
 class ImageUploadResult(BaseModel):
     """개별 이미지 생성 및 업로드 결과 스키마"""
