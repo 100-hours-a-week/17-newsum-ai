@@ -38,15 +38,21 @@ async def generate_and_upload_single_image(
     local_path = gen_result["image_path"]
     try:
         logger.info(f"S3 업로드 시작: '{local_path}'")
-        upload_result = await storage_service.upload_file(file_path=local_path, prefix="generated_images/")
-        if upload_result.get("error"):
-            error_msg = upload_result.get("error")
+        # object_key를 local_path에서 storage_base_path 기준 상대경로로 추출
+        object_key = os.path.relpath(local_path, image_service.storage_base_path)
+        upload_result = await storage_service.upload_file_with_cloudfront_url(
+            file_path=local_path,
+            object_key=object_key,
+            content_type="image/png"
+        )
+        if not upload_result.get("cloudfront_url"):
+            error_msg = upload_result.get("error", "CloudFront URL 반환 실패")
             logger.error(f"S3 업로드 실패 '{local_path}': {error_msg}")
             raise IOError(f"S3 upload failed: {error_msg}")
 
         return {
-            "s3_uri": upload_result["s3_uri"],
-            "object_key": upload_result["object_key"],
+            "s3_uri": upload_result["cloudfront_url"],
+            "object_key": object_key,
             "original_prompt": prompt,
         }
     finally:
@@ -71,40 +77,45 @@ async def generate_images_in_background(
     extra_log = {"request_id": payload.id}
     logger.info("배치 이미지 생성 백그라운드 작업 시작 (순차 처리 모드).", extra=extra_log)
 
-    # [수정됨] 동시 처리를 위한 tasks 리스트와 asyncio.gather를 제거하고,
-    # 순차 처리를 위해 for 루프를 사용합니다.
-    success_uploads: List[ImageUploadResult] = []
-    has_errors = False
-    num_prompts = len(payload.image_prompts)
-    for i, item in enumerate(payload.image_prompts):
-        try:
-            single_result_dict = await generate_and_upload_single_image(
-                item_payload=item.model_dump(),
-                image_service=image_service,
-                storage_service=storage_service,
-                request_id=payload.id,
-                image_index=i
-            )
-            success_uploads.append(ImageUploadResult(**single_result_dict))
-        except Exception as e:
-            has_errors = True
-            logger.error(f"배경 작업 중 개별 작업(index: {i}) 실패: {e}", extra=extra_log, exc_info=True)
-        if i < num_prompts - 1:
-            logger.info(f"다음 이미지 생성을 위해 2초 대기합니다. (현재 {i + 1}/{num_prompts} 완료)")
-            await asyncio.sleep(2)
-    # 최종 결과 구성 (이 부분은 수정 없음)
-    final_status = "COMPLETED"
-    if has_errors:
-        final_status = "COMPLETED_WITH_ERRORS" if success_uploads else "FAILED"
-
-    # 백엔드 서버로 결과 콜백 전송 (이 부분은 수정 없음)
+    image_service.is_running = True  # 배치 시작 시 True
     try:
-        image_links = [result.s3_uri for result in success_uploads]
-        logger.info(f"백그라운드 작업 결과 콜백 전송 시도. 전송할 링크 수: {len(image_links)}", extra=extra_log)
-        await backend_client.backend_send_ai_response(
-            request_id=payload.id,
-            image_links=image_links
-        )
-        logger.info("콜백 전송 성공.", extra=extra_log)
-    except Exception as e:
-        logger.error(f"콜백 전송 중 예외 발생: {e}", exc_info=True, extra=extra_log)
+        success_uploads: List[ImageUploadResult] = []
+        has_errors = False
+        num_prompts = len(payload.image_prompts)
+        for i, item in enumerate(payload.image_prompts):
+            try:
+                single_result_dict = await generate_and_upload_single_image(
+                    item_payload=item.model_dump(),
+                    image_service=image_service,
+                    storage_service=storage_service,
+                    request_id=payload.id,
+                    image_index=i
+                )
+                success_uploads.append(ImageUploadResult(**single_result_dict))
+            except Exception as e:
+                has_errors = True
+                logger.error(f"배경 작업 중 개별 작업(index: {i}) 실패: {e}", extra=extra_log, exc_info=True)
+            if i < num_prompts - 1:
+                logger.info(f"다음 이미지 생성을 위해 2초 대기합니다. (현재 {i + 1}/{num_prompts} 완료)")
+                await asyncio.sleep(2)
+        final_status = "COMPLETED"
+        if has_errors:
+            final_status = "COMPLETED_WITH_ERRORS" if success_uploads else "FAILED"
+
+        if len(success_uploads) != num_prompts:
+            error_msg = f"요청한 프롬프트 개수({num_prompts})와 생성된 이미지 개수({len(success_uploads)})가 일치하지 않습니다. 콜백을 전송하지 않습니다."
+            logger.error(error_msg, extra=extra_log)
+            raise RuntimeError(error_msg)
+
+        try:
+            image_links = [result.s3_uri for result in success_uploads]
+            logger.info(f"백그라운드 작업 결과 콜백 전송 시도. 전송할 링크 수: {len(image_links)}", extra=extra_log)
+            await backend_client.backend_send_ai_response(
+                request_id=payload.id,
+                image_links=image_links
+            )
+            logger.info("콜백 전송 성공.", extra=extra_log)
+        except Exception as e:
+            logger.error(f"콜백 전송 중 예외 발생: {e}", exc_info=True, extra=extra_log)
+    finally:
+        image_service.is_running = False  # 배치 끝나면 False
