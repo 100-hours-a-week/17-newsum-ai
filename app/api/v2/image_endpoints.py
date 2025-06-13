@@ -55,7 +55,7 @@ async def batch_generate_images(
     """
     요청을 즉시 수락(202 Accepted)하고, 실제 작업은 백그라운드 태스크로 위임합니다.
     """
-    logger.info(f"배치 이미지 생성 요청 수신: {payload.request_id}")
+    logger.info(f"배치 이미지 생성 요청 수신: {payload.id}")
 
     background_tasks.add_task(
         generate_images_in_background,
@@ -65,4 +65,4 @@ async def batch_generate_images(
         backend_client=backend_client,
     )
 
-    return AcceptedResponse(request_id=payload.request_id)
+    return AcceptedResponse(request_id=payload.id)
