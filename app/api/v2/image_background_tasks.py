@@ -68,7 +68,7 @@ async def generate_images_in_background(
     [수정] 배치 이미지 생성 요청을 순차적으로 처리하고,
     완료 후 백엔드 서버에 결과를 콜백으로 전송합니다.
     """
-    extra_log = {"request_id": payload.request_id}
+    extra_log = {"request_id": payload.id}
     logger.info("배치 이미지 생성 백그라운드 작업 시작 (순차 처리 모드).", extra=extra_log)
 
     # [수정됨] 동시 처리를 위한 tasks 리스트와 asyncio.gather를 제거하고,
@@ -84,7 +84,7 @@ async def generate_images_in_background(
                 item_payload=item.model_dump(),
                 image_service=image_service,
                 storage_service=storage_service,
-                request_id=payload.request_id,
+                request_id=payload.id,
                 image_index=i
             )
             success_uploads.append(ImageUploadResult(**single_result_dict))
@@ -102,7 +102,7 @@ async def generate_images_in_background(
         image_links = [result.s3_uri for result in success_uploads]
         logger.info(f"백그라운드 작업 결과 콜백 전송 시도. 전송할 링크 수: {len(image_links)}", extra=extra_log)
         await backend_client.backend_send_ai_response(
-            request_id=payload.request_id,
+            request_id=payload.id,
             image_links=image_links
         )
         logger.info("콜백 전송 성공.", extra=extra_log)
