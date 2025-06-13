@@ -70,12 +70,12 @@ jobs:
             cd ~/17-newsum-ai
 
             echo "🛑 Stopping old services..."
-            if [ -f ./deploy_scripts/stop_services.sh ]; then
-              chmod +x ./deploy_scripts/stop_services.sh
-              ./deploy_scripts/stop_services.sh || true
-              echo "📄 [stop_services.log]"
-              cat ./deploy_scripts/logs/server.log || echo "(no server.log)"
-              cat ./deploy_scripts/logs/worker.log || echo "(no worker.log)"
+            # fast api 종료 (8000 포트)
+            FASTPAI_PIDS=$(lsof -t -i:8000 | sort | uniq)
+            if [ -n "$FASTPAI_PIDS" ]; then
+                echo "   🔴 Stopping FASTPAI (PIDs: $FASTPAI_PIDS)..."
+                echo "$FASTPAI_PIDS" | xargs -r kill
+                sleep 2
             fi
 
             echo "🚀 Setting up FastAPI venv..."
@@ -103,18 +103,19 @@ jobs:
             echo "📊 Stopping existing Streamlit and Reception API if running..."
 
             # Streamlit 종료 (8501 포트)
-            STREAMLIT_PID=$(lsof -t -i:8501)
-            if [ -n "$STREAMLIT_PID" ]; then
-                echo "   🔴 Stopping Streamlit (PID: $STREAMLIT_PID)..."
-                kill "$STREAMLIT_PID"
+            STREAMLIT_PIDS=$(lsof -t -i:8501 | sort | uniq)
+            if [ -n "$STREAMLIT_PIDS" ]; then
+                echo "   🔴 Stopping Streamlit (PIDs: $STREAMLIT_PIDS)..."
+                echo "$STREAMLIT_PIDS" | xargs -r kill
                 sleep 2
             fi
 
+
             # Reception API 종료 (9090 포트)
-            RECEPTION_PID=$(lsof -t -i:9090)
-            if [ -n "$RECEPTION_PID" ]; then
-                echo "   🔴 Stopping Reception API (PID: $RECEPTION_PID)..."
-                kill "$RECEPTION_PID"
+            RECEPTION_PIDS=$(lsof -t -i:8501 | sort | uniq)
+            if [ -n "$RECEPTION_PIDS" ]; then
+                echo "   🔴 Stopping Reception API (PIDS: $RECEPTION_PIDS)..."
+                kill "$RECEPTION_PIDS" | xargs -r kill
                 sleep 2
             fi
 

@@ -21,5 +21,5 @@ nohup python "$PROJECT_ROOT/run_chat_worker.py" > "$LOG_DIR/worker.log" 2>&1 &
 echo $! > "$LOG_DIR/worker.pid"
 echo "   PID: $(cat $LOG_DIR/worker.pid)"
 
-echo "path: ./scripts/status_services.sh"
-echo "path: ./scripts/stop_services.sh"
+echo "path: ./deploy_scripts/status_services.sh"
+echo "path: ./deploy_scripts/stop_services.sh"
