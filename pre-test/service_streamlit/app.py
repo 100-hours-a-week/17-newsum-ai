@@ -15,7 +15,7 @@ st.set_page_config(page_title="SLM Chat Service", layout="wide")
 # --- 모델 및 유틸리티 임포트 ---
 try:
     from state_v2 import WorkflowState
-    import state_view_utils
+    # import state_view_utils
 
     STATE_MODULE_LOADED = True
 except ImportError:
