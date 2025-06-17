@@ -390,7 +390,7 @@ Return a single JSON object representing the final, chosen outline. Do not add a
 
             question_parts = [
                 "AI가 아래와 같이 3개의 보고서 목차 후보를 생성했으나, 최종안을 확정하는 데 어려움을 겪고 있습니다.",
-                "어떤 안으로 보고서를 구성할까요? 번호를 선택해주시거나, 직접 수정하고 싶은 내용을 알려주세요.\n"
+                "어떤 안으로 보고서를 구성할까요? 번호를 선택해주세요. (예: 2번)\n"
             ]
 
             for i, candidate in enumerate(node_state.outline_candidates):

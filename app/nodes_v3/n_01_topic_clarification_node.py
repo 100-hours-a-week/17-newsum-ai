@@ -224,7 +224,8 @@ class N01TopicClarificationNode:
 
         if node_state.potential_intents:
             try:
-                match = re.match(r"(\d+)", user_choice_str)
+                # [수정 1] re.match -> re.search 로 변경하여 문자열 전체에서 첫 번째 숫자를 찾습니다.
+                match = re.search(r"(\d+)", user_response)
                 if match:
                     choice_id_str = match.group(1)
                     if choice_id_str == str(len(node_state.potential_intents) + 1):
