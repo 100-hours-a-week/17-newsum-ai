@@ -147,7 +147,9 @@ class N05PersonaAnalysisNode:
     async def _process_user_choice(self, node_state: PersonaAnalysisState, user_response: str, work_id: str):
         """사용자 선택을 파싱하고, 선택된 의견을 피드백에 따라 수정합니다."""
         try:
-            match = re.match(r"^\s*(\d+)", user_response)
+            # match = re.match(r"^\s*(\d+)", user_response)
+            # [수정 1] re.match -> re.search 로 변경하여 문자열 전체에서 첫 번째 숫자를 찾습니다.
+            match = re.search(r"(\d+)", user_response)
             if not match:
                 node_state.question = "죄송합니다. 몇 번 의견을 선택하셨는지 번호를 포함하여 다시 말씀해주시겠어요?"
                 return
@@ -230,7 +232,7 @@ Your response MUST be ONLY the revised, final text in KOREAN.
         return (
             "보고서에 대해 다음과 같은 4가지 다른 관점의 의견을 생성했습니다.\n\n"
             f"{options_text}\n\n"
-            "어떤 의견을 바탕으로 발전시켜 볼까요? 번호를 선택하여 의견을 말씀해주세요. (예: 2번 의견은 좋은데, 좀 더 날카롭게 다듬어주세요.)"
+            "어떤 의견을 바탕으로 발전시켜 볼까요? 번호를 선택하여 의견을 말씀해주세요. (예: 2번)"
         )
 
     def _formulate_final_confirmation_question(self, final_opinion: Opinion) -> str:
