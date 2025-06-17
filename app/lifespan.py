@@ -122,6 +122,9 @@ async def startup_event():
         _service_instances_lifespan.append(image_service)
         logger_lifespan.info("ImageService initialized.")
 
+        # 앱 시작 시 단 1회만 헬스체크 루프를 시작
+        await image_service.initialize_service()
+
         translation_service = TranslationService()
         _shared_state['translation_service'] = translation_service
         logger_lifespan.info("TranslationService initialized.")

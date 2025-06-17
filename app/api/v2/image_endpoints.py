@@ -28,7 +28,6 @@ async def check_image_service_health(image_service: ImageServiceDep):
     """
     ImageService의 is_ready 상태를 확인하여 서비스 가용성을 반환합니다.
     """
-    await image_service.initialize_service()
     if image_service.is_ready:
         return ImageHealthResponse(status="healthy")
     else:

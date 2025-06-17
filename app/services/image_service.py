@@ -47,7 +47,7 @@ class ImageService:
     async def initialize_service(self):
         """
         서비스를 시작하고, 초기 헬스 체크를 수행한 뒤 백그라운드 헬스 체크를 시작합니다.
-        중복 호출 방어 로직 추가
+        중복 호출 방어 로직(if문)만 유지 (lock 미적용)
         """
         # 중복 태스크 방어: 이미 실행 중이면 재생성 안 함
         if self.health_check_task and not self.health_check_task.done():
@@ -96,49 +96,25 @@ class ImageService:
 
     async def _health_check_loop(self):
         """
-        최초 1분 대기 후, 정상 시 5분(300초), 장애 시 1분(60초), 배치 중 스킵 30초. 예외 발생 시에도 반드시 interval만큼 sleep.
+        정상(healthy) 시 5분(300초), 비정상(unhealthy) 시 1분(60초) 간격으로 헬스체크를 반복합니다.
         """
-        await asyncio.sleep(60)  # 최초 1분 대기
-        interval_normal = 300  # 정상 시 5분
-        interval_error = 60    # 장애 시 1분
-        skip_interval = 30     # 배치 중 30초
-        interval = interval_error  # 초기에는 장애 간격으로 시작
-        first_success = False
-        try:
-            while True:
-                try:
-                    if self.is_running:
-                        self.logger.info("현재 이미지 배치 생성이 진행중입니다. health check를 skip합니다.")
-                        await asyncio.sleep(skip_interval)
-                        continue
-
-                    is_healthy = await self._check_health()
-                    if is_healthy and not self.is_ready:
-                        self.logger.info("헬스 체크 성공: 서비스가 다시 준비 상태가 되었습니다.")
-                        self.is_ready = True
-                    elif not is_healthy and self.is_ready:
-                        self.logger.error("헬스 체크 실패: 서비스가 응답하지 않아 '준비되지 않음' 상태로 변경됩니다.")
-                        self.is_ready = False
-
-                    # interval 관리
-                    if not is_healthy:
-                        interval = interval_error  # 장애 감지 후 1분 단기 주기
-                        first_success = False
-                    elif not first_success and is_healthy:
-                        interval = interval_normal  # 최초 성공 이후 5분 간격
-                        first_success = True
-                except Exception as e:
-                    self.logger.error(f"헬스 체크 루프 내부 예외 발생: {e}", exc_info=True)
-                    # 예외 발생 시에도 interval만큼 sleep
-                await asyncio.sleep(interval)
-        except asyncio.CancelledError:
-            self.logger.info("헬스 체크 루프가 CancelledError로 안전하게 종료되었습니다.")
-            return
+        healthy_interval = 300  # 5분
+        unhealthy_interval = 60  # 1분
+        while True:
+            try:
+                ok = await self._check_health()
+                self.is_ready = ok
+            except Exception as e:
+                self.logger.error(f"헬스 체크 루프 예외: {e}", exc_info=True)
+                self.is_ready = False
+            interval = healthy_interval if self.is_ready else unhealthy_interval
+            await asyncio.sleep(interval)
 
     # [수정됨] 메서드 시그니처에 request_id와 image_index 추가
     async def generate_image(self, model_name: str, prompt: str, request_id: str, image_index: int, **kwargs) -> \
     Dict[str, Any]:
         """이미지 생성을 요청합니다. 서비스가 준비된 경우에만 작동합니다."""
+        # 1차 안전장치: 서비스 준비 상태 체크
         if not self.is_ready or not self.client:
             self.logger.error("서비스가 준비되지 않아 이미지 생성 요청을 거부합니다.")
             return {"error": "Image generation service is not available or unhealthy."}
@@ -156,6 +132,11 @@ class ImageService:
         api_url = str(self.endpoint)
 
         try:
+            # 2차 안전장치: 요청 직전에도 is_ready 체크
+            if not self.is_ready:
+                self.logger.error("이미지 생성 직전 is_ready가 False로 변경됨. 요청 중단.")
+                return {"error": "Image generation service became unavailable just before request."}
+
             self.logger.debug(f"이미지 생성 요청: URL={api_url}, Payload={summarize_for_logging(payload)}")
             response = await self.client.post(api_url, json=payload, headers=headers)
             response.raise_for_status()

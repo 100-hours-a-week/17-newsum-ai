@@ -20,20 +20,26 @@ async def generate_and_upload_single_image(
         request_id: str,
         image_index: int
 ) -> Dict[str, Any]:
-    """단일 프롬프트에 대한 이미지 생성, S3 업로드, 로컬 파일 삭제를 수행하는 보조 함수"""
+    """단일 프롬프트에 대한 이미지 생성, S3 업로드, 로컬 파일 삭제를 수행하는 보조 함수 (재시도 포함)"""
     prompt = item_payload.get("prompt", "")
     log_prompt = prompt[:50] + '...' if prompt else "N/A"
     logger.info(f"이미지 생성 시작: request_id='{request_id}', index={image_index}, prompt='{log_prompt}'")
 
-    gen_result = await image_service.generate_image(
-        **item_payload,
-        request_id=request_id,
-        image_index=image_index
-    )
-    if gen_result.get("error") or not gen_result.get("image_path"):
-        error_msg = gen_result.get("error", "Generated image path not found.")
-        logger.error(f"이미지 생성 실패 '{log_prompt}': {error_msg}")
-        raise ValueError(f"Generation failed: {error_msg}")
+    max_retries = 2
+    for attempt in range(max_retries + 1):
+        gen_result = await image_service.generate_image(
+            **item_payload,
+            request_id=request_id,
+            image_index=image_index
+        )
+        if not gen_result.get("error") and gen_result.get("image_path"):
+            break
+        else:
+            error_msg = gen_result.get("error", "Generated image path not found.")
+            logger.error(f"이미지 생성 실패 '{log_prompt}' (시도 {attempt+1}/{max_retries+1}): {error_msg}")
+            if attempt == max_retries:
+                raise ValueError(f"Generation failed after {max_retries+1} attempts: {error_msg}")
+            await asyncio.sleep(1)  # 재시도 전 1초 대기
 
     local_path = gen_result["image_path"]
     try:
