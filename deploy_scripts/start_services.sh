@@ -5,7 +5,7 @@
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-LOG_DIR="$PROJECT_ROOT/scripts/logs"
+LOG_DIR="$PROJECT_ROOT/deploy_scripts/logs"
 mkdir -p "$LOG_DIR"
 
 # FastAPI 서버 시작
