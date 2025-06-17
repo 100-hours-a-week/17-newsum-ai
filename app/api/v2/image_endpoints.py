@@ -26,9 +26,10 @@ logger = get_logger(__name__)
 )
 async def check_image_service_health(image_service: ImageServiceDep):
     """
-    ImageService의 is_ready 상태를 확인하여 서비스 가용성을 반환합니다.
+    ImageService의 실시간 헬스체크 결과를 반환합니다.
     """
-    if image_service.is_ready:
+    is_healthy = await image_service.check_health()
+    if is_healthy:
         return ImageHealthResponse(status="healthy")
     else:
         logger.warning("이미지 서비스 상태 확인 실패: 서비스가 준비되지 않음.")
@@ -53,8 +54,17 @@ async def batch_generate_images(
 ):
     """
     요청을 즉시 수락(202 Accepted)하고, 실제 작업은 백그라운드 태스크로 위임합니다.
+    이미지 생성 전 실시간 헬스체크를 수행합니다.
     """
     logger.info(f"배치 이미지 생성 요청 수신: {payload.id}")
+
+    is_healthy = await image_service.check_health()
+    if not is_healthy:
+        logger.warning("이미지 생성 요청 시 이미지 서버가 준비되지 않음.")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"status": "unhealthy", "message": "Image generation service is not available."},
+        )
 
     background_tasks.add_task(
         generate_images_in_background,
