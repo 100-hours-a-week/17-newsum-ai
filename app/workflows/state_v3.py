@@ -84,6 +84,11 @@ class ImageConcept(BaseModel):
     narrative_step: str = Field(description="콘셉트의 서사 단계 (예: 기(起): 문제 제기)")
     concept_description: str = Field(description="이미지에 표현될 구체적인 시각 요소와 장면에 대한 상세 설명")
     caption: str = Field(description="이미지에 오버레이될 짧고 임팩트 있는 문구")
+    composition: Optional[str] = Field(default=None, description="인물/주요 오브젝트의 배치(전경/중경/배경 등)")
+    color_palette: Optional[str] = Field(default=None, description="주요 색상/톤")
+    lighting: Optional[str] = Field(default=None, description="조명(아침, 저녁, 역광 등)")
+    props: Optional[str] = Field(default=None, description="소품/주요 오브젝트")
+    mood: Optional[str] = Field(default=None, description="전체 분위기(감정)")
 
 class ImageConceptState(BaseModel):
     """
@@ -98,6 +103,7 @@ class ImageConceptState(BaseModel):
     final_concepts: List[ImageConcept] = Field(default_factory=list, description="사용자가 최종 확정한 4개의 이미지 콘셉트")
     is_ready: bool = Field(False, description="이미지 콘셉트 생성이 모두 완료되었는지 여부")
     error_message: Optional[str] = None
+    common_style: Optional[str] = Field(default=None, description="4컷 및 썸네일에 공통 적용할 스타일")
 
 
 class ImagePromptItemPydantic(BaseModel):

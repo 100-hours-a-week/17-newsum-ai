@@ -52,13 +52,14 @@ class N07ImagePromptGenerationNode:
         if not node_state.prompt_candidates and not node_state.thumbnail_prompt_candidate and not node_state.is_ready:
             # 썸네일 프롬프트 생성
             final_thumbnail = workflow_state.image_concept.final_thumbnail
+            common_style = workflow_state.image_concept.common_style
             if final_thumbnail:
-                thumbnail_prompt = await self._convert_concept_to_prompt(final_thumbnail, work_id)
+                thumbnail_prompt = await self._convert_concept_to_prompt(final_thumbnail, work_id, common_style)
                 node_state.thumbnail_prompt_candidate = thumbnail_prompt
             # 4컷 프롬프트 생성
             final_concepts = workflow_state.image_concept.final_concepts
             if final_concepts:
-                prompt_tasks = [self._convert_concept_to_prompt(concept, work_id) for concept in final_concepts]
+                prompt_tasks = [self._convert_concept_to_prompt(concept, work_id, common_style) for concept in final_concepts]
                 prompt_candidates = await asyncio.gather(*prompt_tasks)
                 node_state.prompt_candidates = [p for p in prompt_candidates if p]
 
@@ -84,8 +85,8 @@ class N07ImagePromptGenerationNode:
         workflow_state.image_prompts = node_state
         return await self._finalize_and_save_state(workflow_state, log_extra)
 
-    async def _convert_concept_to_prompt(self, concept: ImageConcept, work_id: str) -> Optional[ImagePromptItemPydantic]:
-        prompt_for_llm = self._build_prompt_conversion_prompt(concept)
+    async def _convert_concept_to_prompt(self, concept: ImageConcept, work_id: str, common_style: Optional[str] = None) -> Optional[ImagePromptItemPydantic]:
+        prompt_for_llm = self._build_prompt_conversion_prompt(concept, common_style)
         try:
             response = await self.llm.generate_text(
                 messages=[{"role": "user", "content": prompt_for_llm}],
@@ -104,30 +105,33 @@ class N07ImagePromptGenerationNode:
             self.logger.error(f"{concept.panel_id}번 패널 프롬프트 변환 중 오류: {e}", extra={"work_id": work_id})
             return None
 
-    def _build_prompt_conversion_prompt(self, concept: ImageConcept) -> str:
+    def _build_prompt_conversion_prompt(self, concept: ImageConcept, common_style: Optional[str] = None) -> str:
+        style_clause = f"\n- Common Art Style (Korean): \"{common_style}\"" if common_style else ""
         return f"""
 You are an expert Flux Dev–style image-prompt engineer.
 
-Create a single fluent English sentence to visualize the scene for Flux Dev based on the details below.
+You are given a structured set of visual concept fields for a webtoon panel. Your job is to:
+1. Normalize any uncommon, non-standard, or overly abstract words in each field (composition, color_palette, lighting, props, mood) into clear, visually interpretable, and internationally common English terms suitable for image generation prompts.
+2. Normalize the common art style (if provided) into a visually interpretable, natural English phrase (e.g., 'webtoon style', 'minimalist', 'realistic').
+3. Create a single fluent English sentence to visualize the scene for Flux Dev, using the normalized information from all fields below. At the end of the prompt, append the normalized common art style phrase (if provided).
+4. After the prompt, generate a short list of 5 words or phrases to avoid common flaws (negative_prompt).
 
-**Requirements:**
-1. Composition: Specify subject placement (foreground, midground, background).
-2. Details: Describe color, lighting, texture, props, and mood.
-3. Fluent Prose: Use one or two short English sentences with descriptive clauses (e.g., "with ...").
-4. Few-Shot Examples: Provide prompt examples only; negative_prompt examples are not required here.
-5. Negative Prompt: After the prompt, generate a **short list of 5 words or phrases** to avoid common flaws (e.g., "text, watermark, blurry, deformed, extra limbs").
-6. Output only a JSON object with keys "prompt" and "negative_prompt".
+[STRUCTURED VISUAL CONCEPT]
+- Narrative Step (Korean): \"{concept.narrative_step}\"
+- Concept Description (Korean): \"{concept.concept_description}\"
+- Caption (Korean): \"{concept.caption}\"
+- Composition: \"{concept.composition or ''}\"
+- Color Palette: \"{concept.color_palette or ''}\"
+- Lighting: \"{concept.lighting or ''}\"
+- Props: \"{concept.props or ''}\"
+- Mood: \"{concept.mood or ''}\"{style_clause}
 
-**Examples:**
-- "A single tree stands in the center, its left half lush green under a bright sunlit sky and its right half frosted bare under a stormy, thunderous backdrop."
-- "In the foreground, a vintage car with a 'CLASSIC' license plate sits on cobblestone, behind it a bustling market of colorful awnings, and in the distance the silhouette of an ancient castle shrouded in mist."
+[INSTRUCTIONS]
+- If any field contains a word or phrase that is not visually clear or is not a common English term for image generation, replace it with a more standard, visually interpretable English word.
+- Use all the normalized fields to compose a single, fluent English prompt sentence (1~2 sentences max). At the end, append the normalized common art style phrase (if provided).
+- Output only a JSON object with keys "prompt" and "negative_prompt".
 
-[VISUAL CONCEPT TO CONVERT]
-- Narrative Step (Korean): "{concept.narrative_step}"
-- Concept Description (Korean): "{concept.concept_description}"
-- Caption (Korean): "{concept.caption}"
-
-Now generate only the JSON:
+[OUTPUT FORMAT]
 {{
   "prompt": "<Flux Dev–style English sentence>",
   "negative_prompt": "<Short English phrase describing what to avoid>"

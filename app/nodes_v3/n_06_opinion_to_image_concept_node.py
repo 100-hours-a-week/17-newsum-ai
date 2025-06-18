@@ -95,7 +95,16 @@ Your task is to take a written opinion and create a 4-panel narrative image seri
 [TASK INSTRUCTIONS]
 1.  Analyze the opinion to understand its core argument, conflict, and conclusion.
 2.  Deconstruct the argument and map it onto the 4-part narrative structure below.
-3.  Generate **exactly 4 visual concepts**, one for each part of the narrative, in the correct order.
+3.  For each part, generate a visual concept with the following structured fields:
+    - narrative_step (string, Korean): The narrative stage (e.g., \"기(起): 문제 제기\")
+    - concept_description (string, Korean): A detailed, vivid description of the image content.
+    - caption (string, Korean): A short, impactful text phrase or dialogue for the image.
+    - composition (string, Korean): Describe the placement of main subjects/objects (foreground, midground, background, etc).
+    - color_palette (string, Korean): Main color tones or palette.
+    - lighting (string, Korean): Lighting style (e.g., morning, sunset, backlight, etc).
+    - props (string, Korean): Key props or objects in the scene.
+    - mood (string, Korean): Overall mood or emotion.
+4. After generating all panels, specify a single, common art style (in Korean) that should be applied to all panels and the thumbnail for visual consistency.
 
 [NARRATIVE STRUCTURE: Gi-Seung-Jeon-Gyeol (기승전결)]
 - **Panel 1 (기: Introduction):** Introduce the core problem or the initial situation described in the opinion. Set the stage.
@@ -104,13 +113,11 @@ Your task is to take a written opinion and create a 4-panel narrative image seri
 - **Panel 4 (결: Conclusion):** Present the final resolution, the ultimate message, a call to action, or the future outlook resulting from the 'Turn'.
 
 [JSON OUTPUT FORMAT]
-- You MUST provide the output as a JSON array of 4 objects, in the correct narrative order.
-- Each object must have the following three keys:
-  - `narrative_step` (string): The narrative stage of the panel (e.g., \"기(起): 문제 제기\"). This MUST be in Korean.
-  - `concept_description` (string): A detailed, vivid description of the image content. This MUST be in Korean. **If the message or caption contains a specific phrase (e.g., '디지털 디톡스'), do NOT draw the phrase as text in the image. Instead, represent its meaning using symbolic objects, icons, or scenes that visually convey the message.**
-  - `caption` (string): A short, impactful text phrase or dialogue for the image. This MUST be in Korean.
+- You MUST provide the output as a JSON object with these keys:
+  - panels: a JSON array of 4 objects, each with all the above fields (except style)
+  - common_style: a single string (Korean) describing the art style to be applied to all panels and the thumbnail
 
-Now, generate the JSON array for the provided opinion, following the 'Gi-Seung-Jeon-Gyeol' structure.
+Now, generate the JSON object for the provided opinion, following the 'Gi-Seung-Jeon-Gyeol' structure.
 """
         return prompt
 
@@ -197,10 +204,14 @@ Now, generate the JSON array for the provided opinion, following the 'Gi-Seung-J
             response = await self.llm.generate_text(messages=[{"role": "user", "content": prompt}],
                                                     request_id=f"image-concept-narrative-{work_id}", max_tokens=3000,
                                                     temperature=0.75)
-            json_string = response.get("generated_text", "[]").strip()
+            json_string = response.get("generated_text", "{}").strip()
             if json_string.startswith("```json"): json_string = json_string[7:-3].strip()
-            concepts_data = json.loads(json_string)
-            return [ImageConcept(panel_id=i + 1, **data) for i, data in enumerate(concepts_data)]
+            data = json.loads(json_string)
+            panels = data["panels"] if "panels" in data else data
+            common_style = data.get("common_style")
+            concepts = [ImageConcept(panel_id=i + 1, **panel) for i, panel in enumerate(panels)]
+            self.common_style = common_style
+            return concepts
         except Exception as e:
             self.logger.error(f"초기 콘셉트 생성 중 오류: {e}", extra={"work_id": work_id})
             return []
@@ -323,8 +334,16 @@ Your task is to create a single, representative thumbnail image concept for the 
 [TASK INSTRUCTIONS]
 1. Analyze the opinion and extract its core message and mood.
 2. Imagine a single, visually impactful thumbnail image that best represents the overall opinion.
-3. Write a detailed, vivid description of the image content (in Korean). **If the message or caption contains a specific phrase (e.g., '디지털 디톡스'), do NOT draw the phrase as text in the image. Instead, represent its meaning using symbolic objects, icons, or scenes that visually convey the message.**
-4. Write a short, powerful caption or title for the thumbnail (in Korean).
+3. For the thumbnail, generate the following structured fields:
+    - narrative_step (string, Korean): Always set to \"썸네일\"
+    - concept_description (string, Korean): A detailed, vivid description of the image content.
+    - caption (string, Korean): A short, powerful caption or title for the thumbnail.
+    - composition (string, Korean): Describe the placement of main subjects/objects (foreground, midground, background, etc).
+    - color_palette (string, Korean): Main color tones or palette.
+    - lighting (string, Korean): Lighting style (e.g., morning, sunset, backlight, etc).
+    - props (string, Korean): Key props or objects in the scene.
+    - mood (string, Korean): Overall mood or emotion.
+4. Use the same art style as the 4-panel sequence for visual consistency. (You will be given the style string separately.)
 
 [OUTPUT FORMAT]
 Return a JSON object with the following keys:
@@ -332,6 +351,11 @@ Return a JSON object with the following keys:
 - narrative_step: "썸네일"
 - concept_description: (Korean, detailed image description)
 - caption: (Korean, short title or phrase)
+- composition: (Korean)
+- color_palette: (Korean)
+- lighting: (Korean)
+- props: (Korean)
+- mood: (Korean)
 """
         try:
             response = await self.llm.generate_text(
