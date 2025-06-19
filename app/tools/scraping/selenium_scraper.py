@@ -5,6 +5,7 @@ import random
 import time
 import re
 from typing import Dict, Any, Optional
+import tempfile  # << [수정 1] tempfile 라이브러리 임포트
 
 # Selenium 및 관련 라이브러리 동적 임포트
 SELENIUM_AVAILABLE = False
@@ -96,58 +97,43 @@ class SeleniumScraperTool:
             logger.error("Selenium 사용 불가 (라이브러리 미설치)", extra=extra_log_data)
             return None
 
-        # 이미 드라이버가 실행 중이면 반환 (재사용)
-        # 주의: 단일 드라이버 재사용 시 상태 문제 발생 가능성 있음 (쿠키, 세션 등)
-        # 매번 새로 생성하는 것이 더 안정적일 수 있음 (self._driver = None 후 생성)
+        # [수정 2] 기존 드라이버 재사용 로직 제거 또는 수정
+        # 매번 새로운 드라이버를 생성하는 것이 서버 환경에서 더 안정적입니다.
+        # 기존 드라이버가 있다면 완전히 종료하고 새로 시작합니다.
         if self._driver:
-             # 간단한 health check (선택 사항)
-             try:
-                  _ = self._driver.current_url # 드라이버 상태 확인 시도
-                  logger.debug("기존 Selenium 드라이버 재사용", extra=extra_log_data)
-                  return self._driver
-             except WebDriverException:
-                  logger.warning("기존 Selenium 드라이버가 응답하지 않음. 새로 생성 시도.", extra=extra_log_data)
-                  self.quit_driver(work_id) # 기존 드라이버 종료
+             logger.warning("기존 드라이버 인스턴스가 존재하여 종료 후 새로 생성합니다.", extra=extra_log_data)
+             self.quit_driver(work_id)
 
         logger.info("Selenium WebDriver 초기화 시도...", extra=extra_log_data)
         try:
-            # TODO: 브라우저 선택 기능 추가 (예: Firefox)
             options = webdriver.ChromeOptions()
             if self.is_headless: options.add_argument("--headless=new")
             options.add_argument("--no-sandbox")
             options.add_argument("--disable-dev-shm-usage")
             options.add_argument("--disable-gpu")
-            # 페이지 로딩 전략 설정 (eager: DOM 완료 시, normal: 전체 로드, none: 즉시 반환)
-            options.page_load_strategy = 'normal' # 'normal' 또는 'eager'
+            options.page_load_strategy = 'normal'
 
-            # TODO: 사용자 에이전트 로테이션 구현
+            # [수정 3] 각 드라이버마다 고유한 사용자 데이터 디렉터리 설정
+            # 이것이 'user data directory is already in use' 오류의 핵심 해결책입니다.
+            user_data_dir = tempfile.mkdtemp()
+            logger.debug(f"임시 사용자 데이터 디렉터리 생성: {user_data_dir}", extra=extra_log_data)
+            options.add_argument(f"--user-data-dir={user_data_dir}")
+
             current_ua = self.default_ua
-            if self.rotate_ua:
-                # current_ua = random.choice(self.USER_AGENTS)
-                pass # 실제 로테이션 로직 필요
             options.add_argument(f"user-agent={current_ua}")
 
-            # 프록시 설정
             if self.use_proxy and self.proxy_url:
                 logger.info(f"프록시 사용 설정: {self.proxy_url}", extra=extra_log_data)
                 options.add_argument(f'--proxy-server={self.proxy_url}')
 
-            # Selenium Grid 또는 로컬 드라이버 사용
             if self.grid_url:
                  logger.info(f"Selenium Grid에 연결 시도: {self.grid_url}", extra=extra_log_data)
-                 self._driver = webdriver.Remote(
-                      command_executor=self.grid_url, options=options )
+                 self._driver = webdriver.Remote(command_executor=self.grid_url, options=options)
             else:
                  logger.info("로컬 ChromeDriver 시작 시도...", extra=extra_log_data)
-                 # webdriver-manager 사용 예시 (주석 처리됨)
-                 # service = ChromeService(ChromeDriverManager().install())
-                 # self._driver = webdriver.Chrome(service=service, options=options)
-                 # PATH에서 chromedriver 찾기 가정
-                 self._driver = webdriver.Chrome(options=options)
+                 self._driver = webdriver.Chrome(options=options) # [오류 발생 지점]
 
             logger.info("Selenium WebDriver 초기화 성공.", extra=extra_log_data)
-            # 암시적 대기 설정 (권장되지 않으나 간단한 경우 사용 가능)
-            # self._driver.implicitly_wait(5) # 5초
             return self._driver
 
         except WebDriverException as e:
