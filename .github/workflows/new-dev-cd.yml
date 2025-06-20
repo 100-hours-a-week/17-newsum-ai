@@ -112,7 +112,7 @@ jobs:
 
 
             # Reception API 종료 (9090 포트)
-            RECEPTION_PIDS=$(lsof -t -i:8501 | sort | uniq)
+            RECEPTION_PIDS=$(lsof -t -i:9090 | sort | uniq)
             if [ -n "$RECEPTION_PIDS" ]; then
                 echo "   🔴 Stopping Reception API (PIDS: $RECEPTION_PIDS)..."
                 kill "$RECEPTION_PIDS" | xargs -r kill
