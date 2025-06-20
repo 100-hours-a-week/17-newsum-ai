@@ -9,6 +9,7 @@ from .schemas import (
 )
 # 의존성 주입을 위한 서비스 및 클라이언트 임포트 (dependencies.py에 정의되어야 함)
 from app.dependencies import (
+    PostgreSQLServiceDep,
     ImageServiceDep,
     StorageServiceDep,
     BackendApiClientDep
@@ -48,6 +49,7 @@ async def check_image_service_health(image_service: ImageServiceDep):
 async def batch_generate_images(
     payload: BatchImageGenerationRequest,
     background_tasks: BackgroundTasks,
+    pg_service: PostgreSQLServiceDep,
     image_service: ImageServiceDep,
     storage_service: StorageServiceDep,
     backend_client: BackendApiClientDep,
@@ -58,6 +60,16 @@ async def batch_generate_images(
     """
     logger.info(f"배치 이미지 생성 요청 수신: {payload.id}")
 
+    # 1. job_id 중복 확인
+    is_running = await pg_service.is_image_job_running(payload.id)
+    if is_running:
+        logger.warning(f"중복된 job_id: {payload.id}")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"status": "duplicate", "message": f"Job {payload.id} is already running."},
+        )
+
+    # 2. 기존 health check
     is_healthy = await image_service.check_health()
     if not is_healthy:
         logger.warning("이미지 생성 요청 시 이미지 서버가 준비되지 않음.")
@@ -69,6 +81,7 @@ async def batch_generate_images(
     background_tasks.add_task(
         generate_images_in_background,
         payload=payload,
+        pg_service=pg_service,
         image_service=image_service,
         storage_service=storage_service,
         backend_client=backend_client,

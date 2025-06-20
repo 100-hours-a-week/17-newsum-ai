@@ -311,3 +311,18 @@ class PostgreSQLService:
                 for p in prompts
             ])
         self.logger.info(f"{len(prompts)} image generation tasks scheduled for work_id {work_id}.")
+
+    async def is_image_job_running(self, job_id: str) -> bool:
+        """
+        ai_image_job_tracking 테이블에 job_id가 이미 존재하면 True 반환
+        """
+        query = "SELECT 1 FROM ai_image_job_tracking WHERE job_id = $1 LIMIT 1"
+        result = await self.fetch_one(query, job_id)
+        return result is not None
+
+    async def delete_image_job_by_id(self, job_id: str) -> None:
+        """
+        ai_image_job_tracking 테이블에서 job_id로 row를 삭제
+        """
+        query = "DELETE FROM ai_image_job_tracking WHERE job_id = $1"
+        await self.execute(query, job_id)
