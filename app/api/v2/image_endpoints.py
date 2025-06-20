@@ -78,6 +78,9 @@ async def batch_generate_images(
             detail={"status": "unhealthy", "message": "Image generation service is not available."},
         )
 
+    # job_id를 ai_image_job_tracking 테이블에 기록
+    await pg_service.insert_image_job_tracking(payload.id)
+
     background_tasks.add_task(
         generate_images_in_background,
         payload=payload,

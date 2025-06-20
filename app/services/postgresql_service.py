@@ -326,3 +326,10 @@ class PostgreSQLService:
         """
         query = "DELETE FROM ai_image_job_tracking WHERE job_id = $1"
         await self.execute(query, job_id)
+
+    async def insert_image_job_tracking(self, job_id: str) -> None:
+        """
+        ai_image_job_tracking 테이블에 job_id를 기록(삽입)
+        """
+        query = "INSERT INTO ai_image_job_tracking (job_id) VALUES ($1) ON CONFLICT (job_id) DO NOTHING"
+        await self.execute(query, job_id)
