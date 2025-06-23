@@ -4,6 +4,7 @@ import asyncio
 import time
 from typing import List, Dict, Any
 from app.utils.logger import get_logger
+from app.services.postgresql_service import PostgreSQLService
 from app.services.image_service import ImageService
 from app.services.storage_service import StorageService
 from app.services.backend_client import BackendApiClient
@@ -72,6 +73,7 @@ async def generate_and_upload_single_image(
 
 async def generate_images_in_background(
         payload: BatchImageGenerationRequest,
+        pg_service: PostgreSQLService,
         image_service: ImageService,
         storage_service: StorageService,
         backend_client: BackendApiClient,
@@ -79,9 +81,10 @@ async def generate_images_in_background(
     """
     [수정] 배치 이미지 생성 요청을 순차적으로 처리하고,
     완료 후 백엔드 서버에 결과를 콜백으로 전송합니다.
+    실패 시 ai_image_job_tracking에서 job_id를 삭제합니다.
     """
     extra_log = {"request_id": payload.id}
-    logger.info("배치 이미지 생성 백그라운드 작업 시작 (순차 처리 모드).", extra=extra_log)
+    logger.info(f"배치 이미지 생성 백그라운드 작업 시작 (순차 처리 모드).", extra=extra_log)
 
     image_service.is_running = True  # 배치 시작 시 True
     try:
@@ -98,30 +101,53 @@ async def generate_images_in_background(
                     image_index=i
                 )
                 success_uploads.append(ImageUploadResult(**single_result_dict))
+                logger.info(
+                    f"[{payload.id}] 이미지 생성 및 업로드 성공 (index: {i+1}/{num_prompts})",
+                    extra={**extra_log, "image_index": i, "success_count": len(success_uploads)}
+                )
             except Exception as e:
                 has_errors = True
-                logger.error(f"배경 작업 중 개별 작업(index: {i}) 실패: {e}", extra=extra_log, exc_info=True)
+                logger.error(
+                    f"[{payload.id}] 배경 작업 중 개별 작업(index: {i}) 실패: {e}",
+                    extra={**extra_log, "image_index": i, "error": str(e)},
+                    exc_info=True
+                )
             if i < num_prompts - 1:
-                logger.info(f"다음 이미지 생성을 위해 2초 대기합니다. (현재 {i + 1}/{num_prompts} 완료)")
+                logger.info(
+                    f"[{payload.id}] 다음 이미지 생성을 위해 2초 대기 (현재 {i + 1}/{num_prompts} 완료)",
+                    extra=extra_log
+                )
                 await asyncio.sleep(2)
         final_status = "COMPLETED"
         if has_errors:
             final_status = "COMPLETED_WITH_ERRORS" if success_uploads else "FAILED"
 
         if len(success_uploads) != num_prompts:
-            error_msg = f"요청한 프롬프트 개수({num_prompts})와 생성된 이미지 개수({len(success_uploads)})가 일치하지 않습니다. 콜백을 전송하지 않습니다."
-            logger.error(error_msg, extra=extra_log)
+            error_msg = f"[{payload.id}] 요청한 프롬프트 개수({num_prompts})와 생성된 이미지 개수({len(success_uploads)})가 일치하지 않습니다. 콜백을 전송하지 않습니다. DB에서 job_id 제거."
+            logger.error(error_msg, extra={**extra_log, "success_count": len(success_uploads), "expected_count": num_prompts})
+            await pg_service.delete_image_job_by_id(payload.id)
             raise RuntimeError(error_msg)
 
         try:
             image_links = [result.s3_uri for result in success_uploads]
-            logger.info(f"백그라운드 작업 결과 콜백 전송 시도. 전송할 링크 수: {len(image_links)}", extra=extra_log)
+            logger.info(
+                f"[{payload.id}] 백그라운드 작업 결과 콜백 전송 시도. 전송할 링크 수: {len(image_links)}",
+                extra={**extra_log, "image_links": image_links, "success_count": len(success_uploads), "expected_count": num_prompts}
+            )
             await backend_client.backend_send_ai_response(
                 request_id=payload.id,
                 image_links=image_links
             )
-            logger.info("콜백 전송 성공.", extra=extra_log)
+            logger.info(
+                f"[{payload.id}] 콜백 전송 성공. (전송된 링크 수: {len(image_links)})",
+                extra={**extra_log, "image_links": image_links, "success_count": len(success_uploads), "expected_count": num_prompts}
+            )
         except Exception as e:
-            logger.error(f"콜백 전송 중 예외 발생: {e}", exc_info=True, extra=extra_log)
+            logger.error(
+                f"[{payload.id}] 콜백 전송 중 예외 발생: {e}. DB에서 job_id 제거.",
+                exc_info=True,
+                extra={**extra_log, "image_links": image_links if 'image_links' in locals() else [], "error": str(e)}
+            )
+            await pg_service.delete_image_job_by_id(payload.id)
     finally:
         image_service.is_running = False  # 배치 끝나면 False
