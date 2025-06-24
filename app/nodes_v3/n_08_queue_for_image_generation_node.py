@@ -11,7 +11,7 @@ import aiohttp  # 외부 API 호출용
 # --- 애플리케이션 구성 요소 임포트 ---
 from app.services.postgresql_service import PostgreSQLService
 from app.services.database_client import DatabaseClient  # RedisClient 용도
-from app.utils.logger import get_logger
+from app.utils.logger import get_logger, summarize_for_logging
 from app.workflows.state_v3 import (
     OverallWorkflowState,
     ImagePromptItemPydantic,
@@ -46,14 +46,22 @@ class N08QueueForImageGenerationNode:
     async def __call__(self, current_state_dict: Dict[str, Any]) -> Dict[str, Any]:
         """LangGraph 노드의 메인 진입점 함수. 이 노드는 사용자와 상호작용하지 않습니다."""
         work_id = current_state_dict.get("work_id", "UNKNOWN_WORK_ID_N08")
-        log_extra = {"work_id": work_id}
-        self.logger.info("N08_QueueForImageGenerationNode 시작.", extra=log_extra)
+        node_name = "N08"
+        trace_id = work_id
+        req_id = f"n08-{work_id}"
+        log_extra = {
+            "trace_id": trace_id,
+            "work_id": work_id,
+            "node_name": node_name,
+            "req_id": req_id
+        }
+        self.logger.info(f"{node_name} 시작 - work_id={work_id}", extra=log_extra)
 
         try:
             workflow_state = OverallWorkflowState(**current_state_dict)
             node_state = workflow_state.insert_image_queue
         except ValidationError as e:
-            self.logger.error(f"N08 State 유효성 검사 실패: {e}", extra=log_extra)
+            self.logger.error(f"{node_name} State 유효성 검사 실패: {e}", extra=log_extra)
             current_state_dict.setdefault('insert_image_queue', {})['error_message'] = str(e)
             return current_state_dict
 
@@ -62,15 +70,19 @@ class N08QueueForImageGenerationNode:
         report_draft_state = workflow_state.report_draft
         image_prompts_state = workflow_state.image_prompts
 
+        self.logger.info(
+            f"{node_name} 이전 노드 완료 여부: persona={persona_analysis_state.is_ready}, draft={report_draft_state.is_ready}, prompts={image_prompts_state.is_ready}",
+            extra=log_extra
+        )
+
         if not (persona_analysis_state.is_ready and report_draft_state.is_ready and image_prompts_state.is_ready):
             error_msg = "이전 노드(페르소나 분석, 보고서 작성, 프롬프트 생성) 중 하나 이상이 완료되지 않았습니다."
-            self.logger.error(error_msg, extra=log_extra)
+            self.logger.error(f"{node_name} 실패 - {error_msg}", extra=log_extra)
             node_state.error_message = error_msg
             return await self._finalize_and_save_state(workflow_state, log_extra)
 
         # --- API 전송용 데이터 추출 및 dummy 값 보완 ---
         try:
-            # 반드시 필요한 값 체크
             thumbnail = image_prompts_state.thumbnail_prompt
             panels = image_prompts_state.panels
             image_concept_state = workflow_state.image_concept
@@ -116,33 +128,32 @@ class N08QueueForImageGenerationNode:
                 if persona_id and isinstance(persona_id, str):
                     persona_id_int = int(persona_id.split('_')[-1])
             except Exception as e:
-                self.logger.warning(f"persona_id int 변환 실패: {persona_id} ({e})", extra=log_extra)
+                self.logger.warning(f"{node_name} persona_id int 변환 실패: {persona_id} ({e})", extra=log_extra)
                 persona_id_int = None
 
-            payload = { # 카멜 방식 api
+            payload = {
                 "workId": work_id,
                 "aiAuthorId": persona_id_int,
-                "keyword": report_draft_state.keywords,   # 리스트 그대로 전달
-                "category": category,   # POLITICS, IT, FINANCE 중 하나
+                "keyword": report_draft_state.keywords,
+                "category": category,
                 "title": title,
                 "reportUrl": report_url,
-                "content": content,     # LLM 생성 요약문
+                "content": content,
                 "description1": panel_descriptions[0],
                 "description2": panel_descriptions[1],
                 "description3": panel_descriptions[2],
                 "description4": panel_descriptions[3],
                 "imagePrompts": all_prompts
             }
-            # content를 state에도 기록
             node_state.content = content
-            # 외부 API 호출 직전 payload 로그
-            try:
-                self.logger.info(f"N08: 외부 API 호출 payload: {json.dumps(payload, ensure_ascii=False)[:4000]}", extra=log_extra)
-            except Exception as e:
-                self.logger.warning(f"N08: payload 로깅 중 오류: {e}", extra=log_extra)
+            # payload 요약 로그
+            self.logger.info(
+                f"{node_name} 외부 API 호출 준비 - payload 요약: {summarize_for_logging(payload, max_len=200)}",
+                extra=log_extra
+            )
         except Exception as e:
             error_msg = f"API 전송용 데이터 추출 중 오류: {e}"
-            self.logger.error(error_msg, extra=log_extra)
+            self.logger.error(f"{node_name} 실패 - {error_msg}", extra=log_extra)
             node_state.error_message = error_msg
             return await self._finalize_and_save_state(workflow_state, log_extra)
 
@@ -150,53 +161,53 @@ class N08QueueForImageGenerationNode:
         api_url = settings.EXTERNAL_NOTIFICATION_API_URL
         if not api_url:
             node_state.error_message = "EXTERNAL_NOTIFICATION_API_URL이 설정되어 있지 않습니다."
-            self.logger.error(node_state.error_message, extra=log_extra)
+            self.logger.error(f"{node_name} 실패 - {node_state.error_message}", extra=log_extra)
             workflow_state.insert_image_queue = node_state
             return await self._finalize_and_save_state(workflow_state, log_extra)
         api_result = await self._send_image_prompt_to_api(payload, api_url, log_extra)
         if api_result.get("status") == "success":
             node_state.is_ready = True
-            node_state.job_id = None  # 외부 API에서 반환하는 값이 있으면 할당
-            self.logger.info(f"이미지 생성 API 호출 성공.", extra=log_extra)
+            node_state.job_id = None
+            self.logger.info(f"{node_name} 외부 API 호출 성공 - 응답: {summarize_for_logging(api_result, max_len=200)}", extra=log_extra)
         else:
             node_state.error_message = f"API 호출 실패: {api_result.get('error')}"
-            self.logger.error(node_state.error_message, extra=log_extra)
+            self.logger.error(f"{node_name} 외부 API 호출 실패 - {node_state.error_message}", extra=log_extra)
 
         workflow_state.insert_image_queue = node_state
         return await self._finalize_and_save_state(workflow_state, log_extra)
 
     async def _send_image_prompt_to_api(self, payload: dict, api_url: str, log_extra: dict) -> dict:
         headers = {"Content-Type": "application/json"}
+        req_id = log_extra.get("req_id", "n08-unknown")
+        api_log_extra = {**log_extra, "req_id": req_id}
         async with aiohttp.ClientSession() as session:
             try:
                 async with session.post(api_url, headers=headers, json=payload) as resp:
                     resp_text = await resp.text()
                     status = resp.status
                     if 200 <= status < 300:
-                        self.logger.info(f"N08: API 호출 성공 (Status: {status})", extra=log_extra)
+                        self.logger.info(f"N08 외부 API HTTP {status} 성공 - req_id={req_id}", extra=api_log_extra)
                         return {"status": "success", "response": resp_text}
                     else:
-                        self.logger.error(f"N08: API 호출 실패 (Status: {status}): {resp_text}", extra=log_extra)
+                        self.logger.error(f"N08 외부 API HTTP {status} 실패 - req_id={req_id}, 응답: {resp_text[:200]}", extra=api_log_extra)
                         return {"status": "failed", "error": resp_text}
             except Exception as e:
-                self.logger.error(f"N08: API 호출 중 예외 발생: {e}", extra=log_extra)
+                self.logger.error(f"N08 외부 API 호출 예외 발생 - req_id={req_id}, 오류: {e}", extra=api_log_extra)
                 return {"status": "failed", "error": str(e)}
 
     async def _finalize_and_save_state(self, workflow_state: OverallWorkflowState, log_extra: Dict) -> Dict[str, Any]:
-        """최종 상태를 저장하고 반환합니다."""
         updated_state_dict = workflow_state.model_dump(mode='json')
         await self._save_workflow_state_to_redis(workflow_state.work_id, updated_state_dict)
-        self.logger.info("N08 노드 처리 완료 및 상태 저장.", extra=log_extra)
+        self.logger.info(f"N08 상태 저장 완료 - work_id={workflow_state.work_id}", extra=log_extra)
         return updated_state_dict
 
     async def _save_workflow_state_to_redis(self, work_id: str, state_dict: Dict[str, Any]):
-        """워크플로우 상태를 Redis에 저장합니다."""
         key = f"workflow:{work_id}:full_state"
         try:
             json_compatible_state = json.loads(json.dumps(state_dict, default=str))
             await self.redis.set(key, json_compatible_state, expire=60 * 60 * 6)
         except Exception as e:
-            self.logger.error(f"Redis 상태 저장 중 오류 발생: {e}", exc_info=True, extra={"work_id": work_id})
+            self.logger.error(f"N08 Redis 상태 저장 중 오류 발생: {e}", exc_info=True, extra={"work_id": work_id, "node_name": "N08", "trace_id": work_id})
 
     async def _generate_content_summary(self, report_draft, persona_name, persona_opinion, logger, work_id):
         """
