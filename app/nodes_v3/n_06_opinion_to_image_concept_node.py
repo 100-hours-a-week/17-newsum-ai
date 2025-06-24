@@ -113,9 +113,19 @@ Your task is to take a written opinion and create a 4-panel narrative image seri
 - **Panel 4 (결: Conclusion):** Present the final resolution, the ultimate message, a call to action, or the future outlook resulting from the 'Turn'.
 
 [JSON OUTPUT FORMAT]
-- You MUST provide the output as a JSON object with these keys:
-  - panels: a JSON array of 4 objects, each with all the above fields (except style)
-  - common_style: a single string (Korean) describing the art style to be applied to all panels and the thumbnail
+- You MUST provide the output as a JSON object.
+- The root object must have two keys: `panels` and `common_style`.
+- `common_style` must be a single Korean string describing the art style.
+- `panels` must be a JSON array containing exactly 4 objects.
+- Each object in the `panels` array must have the following keys. All string values must be in Korean.
+  - "narrative_step": The narrative stage (e.g., "기(起): 문제 제기").
+  - "concept_description": A detailed, vivid description of the image content.
+  - "caption": A short, impactful text phrase or dialogue for the image.
+  - "composition": A description of the placement of main subjects/objects.
+  - "color_palette": Main color tones or palette.
+  - "lighting": Lighting style (e.g., morning, sunset, backlight).
+  - "props": Key props or objects in the scene.
+  - "mood": The overall mood or emotion.
 
 Now, generate the JSON object for the provided opinion, following the 'Gi-Seung-Jeon-Gyeol' structure.
 """
@@ -252,6 +262,13 @@ Now, generate the JSON object for the provided opinion, following the 'Gi-Seung-
             self.logger.error(f"LLM 의도 분류 중 오류: {e}", exc_info=True, extra={"work_id": work_id})
             return "UN"
 
+    # --- 필드 누락 보완 유틸리티 ---
+    def _fill_missing_fields(self, new_data: dict, old_obj: ImageConcept) -> dict:
+        for field in ['panel_id', 'narrative_step', 'concept_description', 'caption', 'composition', 'color_palette', 'lighting', 'props', 'mood']:
+            if field not in new_data or new_data[field] is None:
+                new_data[field] = getattr(old_obj, field)
+        return new_data
+
     # --- 핵심 수정: 피드백 처리 로직 단순화 ---
     async def _process_concepts_and_thumbnail_feedback(self, node_state: ImageConceptState, user_response: str, opinion: Opinion, work_id: str):
         """
@@ -270,12 +287,82 @@ You are an expert editorial cartoon planner. The user has provided feedback afte
   - narrative_step: {node_state.thumbnail_candidate.narrative_step if node_state.thumbnail_candidate else ''}
   - concept_description: {node_state.thumbnail_candidate.concept_description if node_state.thumbnail_candidate else ''}
   - caption: {node_state.thumbnail_candidate.caption if node_state.thumbnail_candidate else ''}
+  - composition: {node_state.thumbnail_candidate.composition if node_state.thumbnail_candidate else ''}
+  - color_palette: {node_state.thumbnail_candidate.color_palette if node_state.thumbnail_candidate else ''}
+  - lighting: {node_state.thumbnail_candidate.lighting if node_state.thumbnail_candidate else ''}
+  - props: {node_state.thumbnail_candidate.props if node_state.thumbnail_candidate else ''}
+  - mood: {node_state.thumbnail_candidate.mood if node_state.thumbnail_candidate else ''}
 - Panels:
 """
         # thumbnail 내용에 이어서 panels 내용을 prompt에 추가하는 코드
         for c in node_state.concept_candidates:
-            prompt += f"  - panel_id: {c.panel_id}\n    narrative_step: {c.narrative_step}\n    concept_description: {c.concept_description}\n    caption: {c.caption}\n"
-        prompt += f"\n[User's Feedback (Korean)]\n{user_response}\n\n[INSTRUCTIONS]\n- If the feedback is about the thumbnail, only update the thumbnail.\n- If about a specific panel, only update that panel.\n- If about all, update all.\n- If the user confirms, copy the current concept(s) to the final field(s).\n- If unclear, return a message asking for clarification.\n\n[OUTPUT FORMAT]\nReturn a JSON object with these keys:\n- 'thumbnail': the updated thumbnail concept (or null if unchanged)\n- 'panels': a list of 4 updated panel concepts (or null if unchanged)\n- 'finalize': true if the user confirmed all, false otherwise\n- 'clarification_needed': true if the intent was unclear, false otherwise\n- 'clarification_message': (if clarification_needed) a Korean message to ask the user\n"
+            prompt += f"  - panel_id: {c.panel_id}\n    narrative_step: {c.narrative_step}\n    concept_description: {c.concept_description}\n    caption: {c.caption}\n    composition: {c.composition}\n    color_palette: {c.color_palette}\n    lighting: {c.lighting}\n    props: {c.props}\n    mood: {c.mood}\n"
+        prompt += f"""
+
+[User's Feedback (Korean)]
+{user_response}
+
+[INSTRUCTIONS]
+- If the feedback is about the thumbnail, only update the thumbnail.
+- If about a specific panel, only update that panel.
+- If about all, update all.
+- If the user confirms, copy the current concept(s) to the final field(s).
+- If unclear, return a message asking for clarification.
+
+[OUTPUT FORMAT]
+Return a JSON object with these keys:
+- 'thumbnail': the updated thumbnail concept (or null if unchanged)
+- 'panels': a list of 4 updated panel concepts (or null if unchanged)
+- 'finalize': true if the user confirmed all, false otherwise
+- 'clarification_needed': true if the intent was unclear, false otherwise
+- 'clarification_message': (if clarification_needed) a Korean message to ask the user
+
+**For every panel and the thumbnail, you MUST always include ALL of the following fields, even if they are unchanged:**
+- panel_id (int)
+- narrative_step (string, Korean)
+- concept_description (string, Korean)
+- caption (string, Korean)
+- composition (string, Korean)
+- color_palette (string, Korean)
+- lighting (string, Korean)
+- props (string, Korean)
+- mood (string, Korean)
+If a field is not changed, copy its previous value exactly.
+
+[EXAMPLE OUTPUT]
+{{
+  "thumbnail": {{
+    "panel_id": 0,
+    "narrative_step": "썸네일",
+    "concept_description": "...",
+    "caption": "...",
+    "composition": "...",
+    "color_palette": "...",
+    "lighting": "...",
+    "props": "...",
+    "mood": "..."
+  }},
+  "panels": [
+    {{
+      "panel_id": 1,
+      "narrative_step": "기(起): 문제 제기",
+      "concept_description": "...",
+      "caption": "...",
+      "composition": "...",
+      "color_palette": "...",
+      "lighting": "...",
+      "props": "...",
+      "mood": "..."
+    }},
+    {{"panel_id": 2, ...}},
+    {{"panel_id": 3, ...}},
+    {{"panel_id": 4, ...}}
+  ],
+  "finalize": true,
+  "clarification_needed": false,
+  "clarification_message": ""
+}}
+"""
 
         try:
             response = await self.llm.generate_text(
@@ -289,10 +376,18 @@ You are an expert editorial cartoon planner. The user has provided feedback afte
             data = json.loads(json_string)
             # 썸네일 처리
             if data.get('thumbnail'):
-                node_state.thumbnail_candidate = ImageConcept(**data['thumbnail'])
+                old_thumb = node_state.thumbnail_candidate
+                filled_thumb = self._fill_missing_fields(data['thumbnail'], old_thumb) if old_thumb else data['thumbnail']
+                node_state.thumbnail_candidate = ImageConcept(**filled_thumb)
             # 패널 처리
             if data.get('panels'):
-                node_state.concept_candidates = [ImageConcept(**p) for p in data['panels']]
+                old_panels = node_state.concept_candidates
+                new_panels = []
+                for i, p in enumerate(data['panels']):
+                    old_panel = old_panels[i] if i < len(old_panels) else None
+                    filled_panel = self._fill_missing_fields(p, old_panel) if old_panel else p
+                    new_panels.append(ImageConcept(**filled_panel))
+                node_state.concept_candidates = new_panels
             # 확정 처리
             if data.get('finalize'):
                 node_state.final_thumbnail = node_state.thumbnail_candidate

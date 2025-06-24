@@ -92,7 +92,7 @@ class N07ImagePromptGenerationNode:
                 messages=[{"role": "user", "content": prompt_for_llm}],
                 request_id=f"prompt-generation-{concept.panel_id}-{work_id}",
                 temperature=0.4,
-                max_tokens=1000)
+                max_tokens=1500)
             json_string = response.get("generated_text", "{}").strip()
             if json_string.startswith("```json"): json_string = json_string[7:-3].strip()
             prompt_data = json.loads(json_string)
@@ -106,35 +106,48 @@ class N07ImagePromptGenerationNode:
             return None
 
     def _build_prompt_conversion_prompt(self, concept: ImageConcept, common_style: Optional[str] = None) -> str:
-        style_clause = f"\n- Common Art Style (Korean): \"{common_style}\"" if common_style else ""
-        return f"""
-You are an expert Flux Dev–style image-prompt engineer.
+        style_clause = f"\n- Common Art Style (Korean): {common_style}" if common_style else ""
+        return f""""
+You are a master prompt engineer specializing in creating visually rich prompts for advanced text-to-image models like Flux Dev. Your mission is to translate a Korean webtoon panel concept into a powerful and descriptive English prompt that will generate a beautiful and accurate image.
 
-You are given a structured set of visual concept fields for a webtoon panel. Your job is to:
-1. Normalize any uncommon, non-standard, or overly abstract words in each field (composition, color_palette, lighting, props, mood) into clear, visually interpretable, and internationally common English terms suitable for image generation prompts.
-2. Normalize the common art style (if provided) into a visually interpretable, natural English phrase (e.g., 'webtoon style', 'minimalist', 'realistic').
-3. Create a single fluent English sentence to visualize the scene for Flux Dev, using the normalized information from all fields below. At the end of the prompt, append the normalized common art style phrase (if provided).
-4. After the prompt, generate a short list of 5 words or phrases to avoid common flaws (negative_prompt).
+**Your Goal:**
+Create a single, effective JSON object containing a "prompt" and a "negative_prompt".
+
+**Source Material:**
+You will be given a `[STRUCTURED VISUAL CONCEPT]` in Korean. This contains all the creative direction for one panel of a webtoon.
 
 [STRUCTURED VISUAL CONCEPT]
-- Narrative Step (Korean): \"{concept.narrative_step}\"
-- Concept Description (Korean): \"{concept.concept_description}\"
-- Caption (Korean): \"{concept.caption}\"
-- Composition: \"{concept.composition or ''}\"
-- Color Palette: \"{concept.color_palette or ''}\"
-- Lighting: \"{concept.lighting or ''}\"
-- Props: \"{concept.props or ''}\"
-- Mood: \"{concept.mood or ''}\"{style_clause}
+- Narrative Step (Korean): {concept.narrative_step}
+- Concept Description (Korean): {concept.concept_description}
+- Caption (Korean): {concept.caption}
+- Composition: {concept.composition}
+- Color Palette: {concept.color_palette}
+- Lighting: {concept.lighting}
+- Props: {concept.props}
+- Mood: {concept.mood}{style_clause}
 
-[INSTRUCTIONS]
-- If any field contains a word or phrase that is not visually clear or is not a common English term for image generation, replace it with a more standard, visually interpretable English word.
-- Use all the normalized fields to compose a single, fluent English prompt sentence (1~2 sentences max). At the end, append the normalized common art style phrase (if provided).
-- Output only a JSON object with keys "prompt" and "negative_prompt".
+**Step-by-Step Instructions:**
 
-[OUTPUT FORMAT]
+1.  **Analyze and Translate:** Carefully read all the Korean fields in the source material. Your first job is to be a great translator. Convert the Korean ideas into their most effective English visual equivalents. For example, '역광' should become 'backlighting' or 'rim lighting', and '아련한' might become 'dreamy, ethereal, soft focus'.
+
+2.  **Synthesize into a Master Prompt:** Weave all the translated English elements into a single, cohesive, and descriptive paragraph for the `prompt` field.
+    - Start with the core action or scene from the `concept_description`.
+    - Incorporate details from `composition`, `lighting`, `props`, and `mood` to build a rich visual narrative.
+    - The final sentence should describe the overall art style, using the `Common Art Style` as a guide (e.g., "in a vibrant webtoon art style," "in a minimalist and clean line art style.").
+    - The prompt should be a fluent, natural English paragraph, not just a list of keywords.
+
+3.  **Create a Negative Prompt:** For the `negative_prompt` field, provide a standard list of terms to prevent common image flaws. A good default is "text, watermark, signature, ugly, deformed, blurry, low quality".
+
+**Critical Output Requirements:**
+- Your final output MUST be a single, valid JSON object.
+- The JSON object must contain only two keys: "prompt" and "negative_prompt".
+- All text values within the JSON must be in English.
+- Do not add any explanations or text outside of the JSON object.
+
+[EXAMPLE OUTPUT FORMAT]
 {{
-  "prompt": "<Flux Dev–style English sentence>",
-  "negative_prompt": "<Short English phrase describing what to avoid>"
+  "prompt": "A lone warrior stands on a cliff overlooking a stormy sea at sunset, their silhouette defined by dramatic backlighting. The mood is somber and determined, with a color palette of deep oranges, purples, and blacks. in a detailed, cinematic fantasy art style.",
+  "negative_prompt": "text, watermark, signature, ugly, deformed, blurry, low quality"
 }}
 """
 
